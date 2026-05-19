@@ -1,0 +1,53 @@
+# Node modules
+node_modules/
+
+# Build output
+dist/
+
+# Go build output (except release/)
+*.exe
+*.dll
+*.syso
+*.so
+*.dylib
+!release/*.exe
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (keep examples)
+config/config.json
+config/dingtalk.json
+config/*.bak
+config/*.log
+
+# Build output
+build/bin/
+
+# Logs
+*.log
+
+# Runtime state
+.argus/
+
+# Trae IDE
+.trae/
+
+# Vim swap
+*.swp
+*.swm
+*.swn
+*.swo
+
+# Backup files
+*.bak
+*.backup.*
+
+# Test artifacts
+sse_test_results/
+test_log.txt

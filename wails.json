@@ -1,0 +1,22 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "argus-desktop",
+  "outputfilename": "argus-desktop",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev"
+  },
+  "author": {
+    "name": "Argus Team",
+    "email": "argus@example.com"
+  },
+  "info": {
+    "companyName": "Argus",
+    "productName": "Argus",
+    "productVersion": "1.0.21",
+    "copyright": "Copyright © 2026",
+    "comments": "Vibe Coding Platform"
+  }
+}

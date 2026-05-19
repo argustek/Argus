@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "name": "",
+  "clientId": "",
+  "clientSecret": "",
+  "robotCode": "",
+  "apiUrl": "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+  "mode": "stream",
+  "encrypt": false,
+  "defaultReply": "收到，正在处理...",
+  "pollInterval": 5
+}

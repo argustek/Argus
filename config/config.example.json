@@ -1,0 +1,51 @@
+{
+  "apiConfigs": [
+    {
+      "id": "1",
+      "name": "My API",
+      "provider": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "",
+      "modelName": "gpt-4o",
+      "isDefault": true,
+      "supportsMultimodal": false,
+      "testPassed": false
+    }
+  ],
+  "imConfigs": [],
+  "showCodeBlocks": true,
+  "showThinking": true,
+  "pmDecisionAlert": false,
+  "workDir": "",
+  "recentProjects": [],
+  "dingtalk": {
+    "enabled": false,
+    "name": "",
+    "clientId": "",
+    "clientSecret": "",
+    "robotCode": "",
+    "apiUrl": "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
+    "mode": "stream",
+    "encrypt": false,
+    "defaultReply": "收到，正在处理...",
+    "pollInterval": 5
+  },
+  "http": {
+    "enabled": false,
+    "port": 8080,
+    "apiToken": "",
+    "allowRemote": false
+  },
+  "apEnabled": true,
+  "apConfig": {
+    "id": "1",
+    "name": "My API",
+    "provider": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "",
+    "modelName": "gpt-4o",
+    "isDefault": false,
+    "supportsMultimodal": false,
+    "testPassed": false
+  }
+}
