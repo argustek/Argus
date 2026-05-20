@@ -4,13 +4,12 @@ node_modules/
 # Build output
 dist/
 
-# Go build output (except release/)
+# Go build output
 *.exe
 *.dll
 *.syso
 *.so
 *.dylib
-!release/*.exe
 
 # IDE
 .vscode/
