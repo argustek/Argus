@@ -179,6 +179,8 @@ type Manager struct {
 	todoList    []TodoItem
 	todoMaxSize int
 	todoMu      sync.RWMutex
+
+	richBuilder *RichMessageBuilder
 }
 
 type TodoItem struct {
@@ -275,6 +277,10 @@ func NewManager(config types.Config, workDir string) (*Manager, error) {
 		func(desc string) string { return manager.AddTodo(desc) },
 		func(id, status string) { manager.UpdateTodoStatus(id, status) },
 	)
+
+	// 初始化三层模型 Builder（用于 PM/SE 可视化）
+	manager.richBuilder = NewRichMessageBuilder(manager.emitWailsEvent)
+	pmProcessor.SetShellEmitter(manager.richBuilder)
 
 	// 初始化配置管理器（决策 + 权限）
 	configManager, err := NewConfigManager(workDir)
@@ -1234,6 +1240,15 @@ func (m *Manager) handleToPM(content string) (err error) {
 	fmt.Printf("[handleToPM] 开始处理消息: %s (时间: %s)\n", content, time.Now().Format("15:04:05"))
 
 	m.currentRole = "pm"
+
+	// === 检测是否为 SE 审核交接场景 ===
+	isReviewScenario := strings.Contains(content, "已完成") ||
+		strings.Contains(content, "审核") ||
+		strings.Contains(content, "SE已完成")
+
+	if isReviewScenario && m.richBuilder != nil {
+		return m.handlePMReviewWithRich(content, pmCtx)
+	}
 
 	// 🔴 Wails事件: PM开始处理（前端用 runtime.EventsOn 监听）
 	if m.ctx != nil {
@@ -3172,6 +3187,32 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 
 	m.currentRole = "pm"
 
+	// === 三层模型：启动 PM 审核 TaskList ===
+	pmTaskId := m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
+		{Text: "接收 SE 完成报告"},
+		{Text: "自动检测代码变更 (git status / list_files)"},
+		{Text: "审阅变更详情 (read_file / git diff)"},
+		{Text: "运行验证测试 (exec)"},
+		{Text: "给出审核结论"},
+	})
+	var pmReviewResult string
+	defer func() {
+		status := "completed"
+		if pmReviewResult == "" {
+			status = "error"
+			pmReviewResult = i18n.T("err.pm_review_failed", fmt.Errorf("no response"))
+		}
+		m.richBuilder.CompleteTaskList(pmTaskId, status, &types.ResultBlock{
+			Text: pmReviewResult,
+		})
+		m.richBuilder.Reset()
+	}()
+
+	m.richBuilder.UpdateTask(pmTaskId, 0, "running")
+	m.richBuilder.UpdateTask(pmTaskId, 0, "done")
+
+	m.pmProcessor.SetTaskContext(pmTaskId, 1)
+
 	// 转换历史
 	history := m.GetHistory()
 	pmHistory := make([]ai.ChatMessage, len(history))
@@ -3199,6 +3240,8 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		}
 		return fmt.Errorf("PM review failed: %w", err)
 	}
+
+	pmReviewResult = resp.Content
 
 	cleanContent := strings.TrimSpace(resp.Content)
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
@@ -3290,6 +3333,102 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 	// ✅ 设HandoverPending（第三层C监控才能兜底）
 	m.SetHandoverPending(HandoverPMToAP)
 
+	return m.handleAPReview("请AP进行最终质量审批")
+}
+
+// handlePMReviewWithRich 从 handleToPM 调用的 PM 审核（带三层模型可视化）
+func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) error {
+	fmt.Println("[RichPM] === 启动 PM 三层模型审核 ===")
+
+	pmTaskId := m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
+		{Text: "接收 SE 完成报告"},
+		{Text: "自动检测代码变更 (git status / list_files)"},
+		{Text: "审阅变更详情 (read_file / git diff)"},
+		{Text: "运行验证测试 (exec)"},
+		{Text: "给出审核结论"},
+	})
+	var pmReviewResult string
+	defer func() {
+		status := "completed"
+		if pmReviewResult == "" {
+			status = "error"
+			pmReviewResult = i18n.T("err.pm_review_failed", fmt.Errorf("no response"))
+		}
+		m.richBuilder.CompleteTaskList(pmTaskId, status, &types.ResultBlock{
+			Text: pmReviewResult,
+		})
+		m.richBuilder.Reset()
+	}()
+
+	m.richBuilder.UpdateTask(pmTaskId, 0, "running")
+	m.richBuilder.UpdateTask(pmTaskId, 0, "done")
+	m.pmProcessor.SetTaskContext(pmTaskId, 1)
+
+	if m.ctx != nil {
+		runtime.EventsEmit(m.ctx, "pm_started", map[string]string{})
+	}
+	m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
+
+	history := m.GetHistory()
+	pmHistory := make([]ai.ChatMessage, len(history))
+	for i, msg := range history {
+		pmHistory[i] = ai.ChatMessage{Role: msg.Role, Content: msg.Content}
+	}
+
+	m.pmProcessor.SetContext(pmCtx)
+	resp, err := m.pmProcessor.ProcessReview(content, pmHistory)
+	if err != nil {
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.cMonitor.UpdateProjectState(types.ProjectStateError)
+		if m.ctx != nil {
+			runtime.EventsEmit(m.ctx, "error", map[string]interface{}{
+				"error": err.Error(), "stage": "pm_review",
+			})
+		}
+		errMsg := fmt.Sprintf("%s\n\n%s", i18n.T("err.pm_review_failed", err), i18n.T("err.pm_api_network"))
+		m.addPMToUserMsg(errMsg)
+		return fmt.Errorf("PM review failed: %w", err)
+	}
+
+	pmReviewResult = resp.Content
+	cleanContent := strings.TrimSpace(resp.Content)
+	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.addPMToUserMsg(i18n.T("msg.task_complete"))
+		return nil
+	}
+
+	m.addPMToUserMsg(resp.Content)
+	m.resetPMHealth()
+
+	parsedMsg := m.router.Parse("pm", resp.Content)
+	if parsedMsg.To == "ap" {
+		fmt.Println("[RichPM] PM @AP → 路由到AP审批")
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.apProcessor != nil {
+			return m.handleAPReview(parsedMsg.Content)
+		}
+	}
+
+	if parsedMsg.To == "se" {
+		fmt.Println("[RichPM] PM @SE → 返工")
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		return m.startSETaskWithFrom(parsedMsg.Content, "pm")
+	}
+
+	m.currentRole = ""
+	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+
+	if resp.HasTasks {
+		return m.startSETask(resp.Tasks.CurrentTask)
+	}
+
+	m.SetHandoverPending(HandoverPMToAP)
 	return m.handleAPReview("请AP进行最终质量审批")
 }
 

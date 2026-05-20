@@ -185,6 +185,10 @@ type PMProcessor struct {
 	ctx            context.Context
 	todoAdder      func(string) string    // 添加待办
 	todoUpdater    func(string, string)   // 更新待办状态
+
+	shellEmitter    types.ShellEventEmitter // 三层模型 Shell 事件推送（可选）
+	currentTaskId   string                   // 当前 TaskList ID
+	currentTaskIndex int                      // 当前执行到的步骤索引
 }
 
 // NewPMProcessor 创建PM处理器
@@ -221,6 +225,15 @@ func (p *PMProcessor) SetTimeContext(timeInfo string) {
 // SetContext 设置上下文（用于取消AI调用）
 func (p *PMProcessor) SetContext(ctx context.Context) {
 	p.ctx = ctx
+}
+
+func (p *PMProcessor) SetShellEmitter(emitter types.ShellEventEmitter) {
+	p.shellEmitter = emitter
+}
+
+func (p *PMProcessor) SetTaskContext(taskId string, taskIndex int) {
+	p.currentTaskId = taskId
+	p.currentTaskIndex = taskIndex
 }
 
 // getCtx 获取上下文，nil 时返回 Background
@@ -666,12 +679,41 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
+		if p.shellEmitter != nil && p.currentTaskId != "" {
+			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "read_file", args.Path, nil)
+			startTime := time.Now()
+			content, err := os.ReadFile(filepath.Join(p.workDir, args.Path))
+			duration := time.Since(startTime).String()
+			if err != nil {
+				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, duration, "error")
+				return fmt.Sprintf("读取文件失败: %v", err)
+			}
+			p.shellEmitter.PushShellDone("pm", p.currentTaskId, 0, duration, "done")
+			return string(content)
+		}
 		content, err := os.ReadFile(filepath.Join(p.workDir, args.Path))
 		if err != nil {
 			return fmt.Sprintf("读取文件失败: %v", err)
 		}
 		return string(content)
+
 	case "list_files":
+		if p.shellEmitter != nil && p.currentTaskId != "" {
+			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "list_files", ".", nil)
+			startTime := time.Now()
+			entries, err := os.ReadDir(p.workDir)
+			duration := time.Since(startTime).String()
+			if err != nil {
+				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, duration, "error")
+				return fmt.Sprintf("列出文件失败: %v", err)
+			}
+			var result []string
+			for _, e := range entries {
+				result = append(result, e.Name())
+			}
+			p.shellEmitter.PushShellDone("pm", p.currentTaskId, 0, duration, "done")
+			return strings.Join(result, "\n")
+		}
 		entries, err := os.ReadDir(p.workDir)
 		if err != nil {
 			return fmt.Sprintf("列出文件失败: %v", err)
@@ -681,6 +723,7 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			result = append(result, e.Name())
 		}
 		return strings.Join(result, "\n")
+
 	case "exec":
 		var args struct {
 			Command string `json:"command"`
@@ -689,6 +732,11 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 
 		if p.terminalWriter != nil {
 			p.terminalWriter(fmt.Sprintf("\n\x1b[33m[QA Verify] %s\x1b[0m\n", args.Command))
+		}
+
+		hasEmitter := p.shellEmitter != nil && p.currentTaskId != ""
+		if hasEmitter {
+			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "exec", args.Command, nil)
 		}
 
 		cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", args.Command)
@@ -707,6 +755,9 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 
 		err := cmd.Start()
 		if err != nil {
+			if hasEmitter {
+				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, "", "error")
+			}
 			return fmt.Sprintf("命令执行失败(启动): %v", err)
 		}
 
@@ -722,14 +773,33 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			if p.terminalWriter != nil {
 				p.terminalWriter(result)
 			}
+			if hasEmitter {
+				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, "30s", "error")
+			}
 			return result
 		case err = <-done:
 			output := stdout.String()
 			if stderr.Len() > 0 {
 				output += "\n[stderr]\n" + stderr.String()
 			}
+			exitCode := 0
+			if cmd.ProcessState != nil {
+				exitCode = cmd.ProcessState.ExitCode()
+			}
+			if hasEmitter {
+				p.shellEmitter.PushShellOutput(p.currentTaskId, output)
+				shellStart := p.shellEmitter.GetLastShellTimestamp()
+				if shellStart > 0 {
+					duration := types.FormatDuration(shellStart, time.Now().Unix())
+					if exitCode == 0 {
+						p.shellEmitter.PushShellDone("pm", p.currentTaskId, exitCode, duration, "done")
+					} else {
+						p.shellEmitter.PushShellDone("pm", p.currentTaskId, exitCode, duration, "error")
+					}
+				}
+			}
 			if err != nil {
-				result := fmt.Sprintf("命令执行失败(exit code %d):\n%s", cmd.ProcessState.ExitCode(), output)
+				result := fmt.Sprintf("命令执行失败(exit code %d):\n%s", exitCode, output)
 				if p.terminalWriter != nil {
 					p.terminalWriter(result)
 				}

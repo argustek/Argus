@@ -509,6 +509,77 @@ onMounted(async () => {
       // 用户选择不继续
     }
   })
+
+  // === 三层模型事件监听 ===
+  EventsOn('tasklist_start', (data: { roleId: string; taskId: string; title: string; tasks: Array<{id:string;text:string;status:string}> }) => {
+    console.log('[RichMessage] tasklist_start:', data)
+    window.__richMessages = window.__richMessages || {}
+    window.__richMessages[data.taskId] = {
+      id: data.taskId,
+      role: data.roleId,
+      title: data.title,
+      taskList: { id: data.taskId, role: data.roleId, title: data.title, tasks: data.tasks, status: 'running', startedAt: Date.now() },
+      shells: [],
+      result: undefined
+    }
+    EventsEmit('rich-message-update', data.taskId)
+  })
+  
+  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm?.taskList) {
+      const t = rm.taskList.tasks[data.taskIndex]
+      if (t) {
+        t.status = data.status
+        if (data.error) t.error = data.error
+        if (data.status === 'running') t.startedAt = Date.now()
+        if (data.status === 'done' || data.status === 'error') t.completedAt = Date.now()
+      }
+      EventsEmit('rich-message-update', data.taskId)
+    }
+  })
+
+  EventsOn('tasklist_complete', (data: { taskId: string; status: string; result?: { text?: string } }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm) {
+      rm.taskList.status = data.status
+      rm.taskList.endedAt = Date.now()
+      if (data.result) rm.result = data.result
+      EventsEmit('rich-message-complete', data.taskId)
+    }
+  })
+
+  EventsOn('shell_start', (data: { roleId: string; taskId: string; taskIndex: number; type: string; command: string; extra?: Record<string,string> }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm) {
+      rm.shells.push({
+        taskId: data.taskId, type: data.type as any, command: data.command,
+        output: '', exitCode: 0, duration: '', status: 'running',
+        timestamp: Date.now(), extra: data.extra
+      })
+      EventsEmit('rich-message-update', data.taskId)
+    }
+  })
+
+  EventsOn('shell_output', (data: { taskId: string; output: string }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm && rm.shells.length > 0) {
+      const lastShell = rm.shells[rm.shells.length - 1]
+      lastShell.output += data.output
+      EventsEmit('rich-message-update', data.taskId)
+    }
+  })
+
+  EventsOn('shell_done', (data: { roleId: string; taskId: string; exitCode: number; duration: string; status: string }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm && rm.shells.length > 0) {
+      const lastShell = rm.shells[rm.shells.length - 1]
+      lastShell.exitCode = data.exitCode
+      lastShell.duration = data.duration
+      lastShell.status = data.status as any
+      EventsEmit('rich-message-update', data.taskId)
+    }
+  })
   
   try {
     const loadedConfig = await GetConfig()

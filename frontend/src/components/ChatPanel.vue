@@ -64,13 +64,17 @@
             <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
           </div>
           <div class="message-content pm-content structured-msg">
-            <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
-              <span class="summary-text">{{ getSummary(msg) }}</span>
-              <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
-            </div>
-            <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
-            <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
-              {{ getPreviewText(msg) }}
+            <!-- 三层模型 RichMessage -->
+            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
+            <div v-else>
+              <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
+                <span class="summary-text">{{ getSummary(msg) }}</span>
+                <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
+              </div>
+              <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
+              <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
+                {{ getPreviewText(msg) }}
+              </div>
             </div>
           </div>
         </template>
@@ -386,6 +390,8 @@ const searchInputRef = ref<HTMLInputElement>()
 
 // #2 CLI相关
 import CliPanel from './CliPanel.vue'
+import RichMessage from './chat/RichMessage.vue'
+import type { RichMessage as RichMessageType } from '../../types/rich-message'
 const showCli = ref(false)
 const cliCommand = ref('')
 
@@ -763,6 +769,18 @@ function toggleExpand(index: number) {
   if (expandedMessages.value.has(index)) expandedMessages.value.delete(index)
   else expandedMessages.value.add(index)
   expandedMessages.value = new Set(expandedMessages.value)
+}
+
+function getRichMessage(msg: any): RichMessageType | null {
+  if (!msg || !window.__richMessages) return null
+  const keys = Object.keys(window.__richMessages)
+  for (const k of keys) {
+    const rm = window.__richMessages[k]
+    if (rm && rm.role === msg.role && (rm.result?.text === msg.content || msg._richTaskId === k)) {
+      return rm
+    }
+  }
+  return null
 }
 
 function getMsgStatus(msg: any): { type: string, text: string } | null {
