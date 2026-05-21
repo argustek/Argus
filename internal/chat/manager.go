@@ -1247,7 +1247,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 		strings.Contains(content, "审核") ||
 		strings.Contains(content, "SE已完成")
 
+	fmt.Printf("[TRACE-RICH] isReviewScenario=%v richBuilder=%v content_head=%q\n",
+		isReviewScenario, m.richBuilder != nil, content[:min(60, len(content))])
+
 	if isReviewScenario && m.richBuilder != nil {
+		fmt.Println("[TRACE-RICH] ✅ 调用 handlePMReviewWithRich (审核场景)")
 		return m.handlePMReviewWithRich(content, pmCtx)
 	}
 
@@ -3407,6 +3411,8 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.mu.Lock()
 	if len(m.history) > 0 {
 		m.history[len(m.history)-1].RichTaskID = pmTaskId
+		fmt.Printf("[TRACE-RICH] ✅ 设置 _richTaskId=%s for PM message (content_head=%q)\n",
+			pmTaskId, resp.Content[:min(60, len(resp.Content))])
 	}
 	m.mu.Unlock()
 
