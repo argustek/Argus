@@ -1243,6 +1243,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	// === 检测是否为 SE 审核交接场景 ===
 	isReviewScenario := strings.Contains(content, "已完成") ||
+		strings.Contains(content, "任务完成") ||
 		strings.Contains(content, "审核") ||
 		strings.Contains(content, "SE已完成")
 
