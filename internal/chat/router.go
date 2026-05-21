@@ -18,16 +18,17 @@ const (
 
 // Message 消息结构
 type Message struct {
-	ID        string    `json:"id"`                 // 消息唯一ID
-	From      string    `json:"from"`               // 发送者: user, pm, se, mc
-	To        string    `json:"to"`                 // 接收者: pm, se, user
-	Role      string    `json:"role"`               // 角色: user, pm, se, mc（用于前端显示）
-	Content   string    `json:"content"`            // 内容（去掉@标记）
-	Raw       string    `json:"raw"`                // 原始内容
-	Timestamp time.Time `json:"timestamp"`          // 时间戳
-	Source    string    `json:"source"`             // 来源: user_input, handleToPM, handlePMReview, handleSEAskPM, c_monitor, system
-	ReplyTo   string    `json:"reply_to,omitempty"` // 回复的消息ID（消息线程）
-	Priority  TurnPriority `json:"priority"`        // 消息优先级
+	ID         string       `json:"id"`                 // 消息唯一ID
+	From       string       `json:"from"`               // 发送者: user, pm, se, mc
+	To         string       `json:"to"`                 // 接收者: pm, se, user
+	Role       string       `json:"role"`               // 角色: user, pm, se, mc（用于前端显示）
+	Content    string       `json:"content"`            // 内容（去掉@标记）
+	Raw        string       `json:"raw"`                // 原始内容
+	Timestamp  time.Time    `json:"timestamp"`          // 时间戳
+	Source     string       `json:"source"`             // 来源: user_input, handleToPM, handlePMReview, handleSEAskPM, c_monitor, system
+	ReplyTo    string       `json:"reply_to,omitempty"` // 回复的消息ID（消息线程）
+	Priority   TurnPriority `json:"priority"`           // 消息优先级
+	RichTaskID string       `json:"_richTaskId,omitempty"` // 三层模型任务ID（用于前端渲染RichMessage组件）
 }
 
 // Router 消息路由器（带轮换管理）
