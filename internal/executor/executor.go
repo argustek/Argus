@@ -41,6 +41,21 @@ func (e *Executor) SetWorkDir(workDir string) {
 }
 
 func (e *Executor) WriteFile(path, content string) error {
+	protectedFiles := []string{
+		"main.go",
+		"app.go",
+		"router.go",
+		"manager.go",
+	}
+	
+	baseName := filepath.Base(path)
+	for _, protected := range protectedFiles {
+		if strings.EqualFold(baseName, protected) {
+			fmt.Printf("[Executor] 🛡️ SECURITY: 拒绝写入受保护文件 %s (可能是项目源代码)\n", path)
+			return fmt.Errorf("security: 禁止写入受保护文件 '%s'（防止覆盖项目源代码）", path)
+		}
+	}
+
 	var fullPath string
 	if filepath.IsAbs(path) {
 		fullPath = path
@@ -50,6 +65,8 @@ func (e *Executor) WriteFile(path, content string) error {
 	if !isPathInDir(fullPath, e.workDir) {
 		return fmt.Errorf("path outside work directory: %s", path)
 	}
+
+	fmt.Printf("[Executor] WriteFile: %s -> %s (%d bytes)\n", path, fullPath, len(content))
 
 	if isPythonFile(path) {
 		fixed := fixPythonIndentation(content)

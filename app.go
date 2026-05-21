@@ -3155,14 +3155,40 @@ func (a *App) initDingTalk() {
 }
 
 func (a *App) getProjectDir() string {
+	fmt.Printf("[getProjectDir] 开始解析工作目录...\n")
+	fmt.Printf("[getProjectDir] config.WorkDir=%q\n", a.config.WorkDir)
+	fmt.Printf("[getProjectDir] useCWD=%v\n", a.useCWD)
+
 	if a.config.WorkDir != "" {
+		absWorkDir, _ := filepath.Abs(a.config.WorkDir)
+		fmt.Printf("[getProjectDir] 使用配置的 WorkDir: %s (abs: %s)\n", a.config.WorkDir, absWorkDir)
+		
+		if a.isDangerousWorkDir(absWorkDir) {
+			fallback := filepath.Join(os.TempDir(), "argus-workspace")
+			os.MkdirAll(fallback, 0755)
+			fmt.Printf("[getProjectDir] ⚠️ WorkDir 在危险路径中，强制使用: %s\n", fallback)
+			return fallback
+		}
+		
 		return a.config.WorkDir
 	}
 
-	// CLI 模式：使用当前工作目录
+	cwd, err := os.Getwd()
+	if err == nil {
+		fmt.Printf("[getProjectDir] 当前工作目录 cwd=%s\n", cwd)
+	}
+
 	if a.useCWD {
-		cwd, err := os.Getwd()
 		if err == nil {
+			absCwd, _ := filepath.Abs(cwd)
+			
+			if a.isDangerousWorkDir(absCwd) {
+				fallback := filepath.Join(os.TempDir(), "argus-workspace")
+				os.MkdirAll(fallback, 0755)
+				fmt.Printf("[getProjectDir] ⚠️ CLI模式下 cwd在危险路径中，强制使用: %s\n", fallback)
+				return fallback
+			}
+			
 			fmt.Printf("[getProjectDir] CLI模式，使用 cwd: %s\n", cwd)
 			return cwd
 		}
@@ -3170,16 +3196,48 @@ func (a *App) getProjectDir() string {
 
 	exePath, err := os.Executable()
 	if err != nil {
+		fmt.Printf("[getProjectDir] 获取 exe 路径失败: %v，使用当前目录\n", err)
 		return "."
 	}
 	exeDir := filepath.Dir(exePath)
 	projectDir := filepath.Join(exeDir, "project")
 
 	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		fmt.Printf("[getProjectDir] 创建 project 目录失败: %v\n", err)
 		return "."
 	}
 
+	fmt.Printf("[getProjectDir] 使用默认 project 目录: %s\n", projectDir)
 	return projectDir
+}
+
+func (a *App) isDangerousWorkDir(dir string) bool {
+	dangerousPatterns := []string{
+		"\\ArgusTek\\",
+		"\\src\\",
+		"\\internal\\",
+		"\\frontend\\",
+	}
+	
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(dir, pattern) {
+			return true
+		}
+	}
+	
+	currentExe, _ := os.Executable()
+	if currentExe != "" {
+		exeDir := filepath.Dir(currentExe)
+		absDir, _ := filepath.Abs(dir)
+		absExeDir, _ := filepath.Abs(exeDir)
+		
+		if strings.HasPrefix(absDir, absExeDir+string(os.PathSeparator)) ||
+		   absDir == absExeDir {
+			return true
+		}
+	}
+	
+	return false
 }
 
 func min(a, b int) int {
