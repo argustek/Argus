@@ -525,13 +525,14 @@ onMounted(async () => {
     EventsEmit('rich-message-update', data.taskId)
   })
   
-  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string }) => {
+  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string; detail?: string }) => {
     const rm = window.__richMessages?.[data.taskId]
     if (rm?.taskList) {
       const t = rm.taskList.tasks[data.taskIndex]
       if (t) {
         t.status = data.status
         if (data.error) t.error = data.error
+        if (data.detail) t.detail = data.detail
         if (data.status === 'running') t.startedAt = Date.now()
         if (data.status === 'done' || data.status === 'error') t.completedAt = Date.now()
       }
@@ -545,6 +546,8 @@ onMounted(async () => {
       rm.taskList.status = data.status
       rm.taskList.endedAt = Date.now()
       if (data.result) rm.result = data.result
+      const lastRoleMsg = [...messages.value].reverse().find(m => m.role === rm.role)
+      if (lastRoleMsg) (lastRoleMsg as any)._richTaskId = data.taskId
       EventsEmit('rich-message-complete', data.taskId)
     }
   })

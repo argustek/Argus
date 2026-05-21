@@ -87,6 +87,8 @@
             <span v-if="getSEActionCount(msg)" class="action-count">已执行 {{ getSEActionCount(msg) }} 个操作</span>
           </div>
           <div class="message-content se-content structured-msg">
+            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
+            <div v-else>
             <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
               <span class="summary-text">{{ getSummary(msg) }}</span>
               <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -94,6 +96,7 @@
             <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
             <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
               {{ getPreviewText(msg) }}
+            </div>
             </div>
           </div>
         </template>
@@ -105,6 +108,8 @@
             <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
           </div>
           <div class="message-content ap-content structured-msg">
+            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
+            <div v-else>
             <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
               <span class="summary-text">{{ getSummary(msg) }}</span>
               <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -112,6 +117,7 @@
             <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
             <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
               {{ getPreviewText(msg) }}
+            </div>
             </div>
           </div>
         </template>
@@ -127,7 +133,7 @@
         </template>
 
         <!-- 执行输出面板（通用：SE/PM均可） -->
-        <template v-if="(msg as any)._execData">
+        <template v-if="(msg as any)._execData && !getRichMessage(msg)">
           <div class="message-header">
             <span class="role-badge" :class="(msg as any)._execData?.executor === 'pm' ? 'pm' : 'se'">
               {{ (msg as any)._execData?.executor === 'pm' ? '⚡ PM' : '⚡ SE' }}

@@ -1,369 +1,328 @@
 # PM 三层消息模型实施 - 工作进度汇报
 
-**日期**: 2026-05-21  
-**状态**: 🔄 回滚稳定版（未验证）  
+**日期**: 2026-05-21
+**状态**: ✅ 已验证通过（PM/SE TaskList 全场景）
 **分支**: temp/rich-message-v1
 
 ---
 
 ## 一、项目目标
 
-实现 **PM（项目经理）三层消息模型**，将 PM 工作过程可视化展示：
+实现 **PM/SE/AP 通用三层消息模型**，将 AI 工作过程可视化展示：
 
 ```
 ┌─ 📋 TaskList（任务列表）────────────┐
-│  ○ 接收 SE 完成报告                │
-│  ○ 自动检测代码变更 (git status)    │
-│  ▶ 审阅变更详情 (git diff)          │ ← 当前高亮
-│  ○ 运行验证测试 (exec)              │
-│  ○ 给出审核结论                     │
+│  ✓ 分析用户需求                     │
+│     hi                              │ ← 具体内容 (detail)
+│  ✓ 分配 SE 任务                     │
+│  ✓ 审核 SE 结果                     │
+│  你好！今天是周一...                 │ ← 结果文本
 └────────────────────────────────────┘
 
 ┌─ 💻 Shell（命令输出）───────────────┐
-│  ▶ git diff hello.go               │
-│     +func main() {                 │
-│     +    fmt.Println("Hello")      │
-│     +}                             │
-│     ✅ exit 0 (0.15s)              │
+│  ▶ write_file hello.go             │
+│     ✅ exit 0                       │
+│  ▶ go run hello.go                 │
+│     Hello, World!                  │
+│     ✅ exit 0 (0.1s)               │
 └────────────────────────────────────┘
 
 ┌─ 📝 Result（结论文本）─────────────┐
-│  @USR ✅ 代码质量合格，测试通过     │
+│  @USR ✅ AP审批通过                │
 └────────────────────────────────────┘
 ```
 
 ---
 
-## 二、已完成的工作
+## 二、本次完成的工作（2026-05-21 晚）
 
-### ✅ 2.1 后端核心修改
+### ✅ 2.1 PM TaskList 不显示问题修复
 
-#### 修改 1: Message 结构体添加 RichTaskID 字段
-- **文件**: `internal/chat/router.go`
-- **位置**: 第 31 行
-- **内容**: 
+**G点**: [manager.go:1594](../internal/chat/manager.go#L1594) 的 `@USR 闲聊分支` 缺少 `CompleteTaskList` 调用
+
+| 修改位置 | 改动 | 说明 |
+|---------|------|------|
+| [manager.go:1553-1566](../internal/chat/manager.go#L1553-L1566) | +CompleteTaskList("done") | 闲聊分支正常路径 |
+| [manager.go:1321-1328](../internal/chat/manager.go#L1321-L1328) | +CompleteTaskList("error") | 错误路径兜底 |
+
+**修复前**: PM 回复只显示纯文本，无 TaskList
+**修复后**: 所有 PM 路径都有完整的 TaskList 生命周期
+
+### ✅ 2.2 TaskList 内容智能化（告别指示灯）
+
+**核心改进**: TaskItem 新增 `Detail` 字段，每一步携带具体任务内容
+
+| 文件 | 改动 |
+|------|------|
+| [rich_message.go:23](../internal/types/rich_message.go#L23) | TaskItem 添加 `Detail string` |
+| [rich-message.ts:4](../frontend/src/types/rich-message.ts#L4) | TS 接口添加 `detail?: string` |
+| [rich_message_builder.go:69](../internal/chat/rich_message_builder.go#L69) | UpdateTask 支持 detail 可选参数 |
+| [TaskListBlock.vue:29-32](../frontend/src/components/chat/TaskListBlock.vue#L29-L32) | detail 展示（等宽字体+灰色背景） |
+| [App.vue:536](../frontend/src/App.vue#L536) | 前端事件监听处理 detail |
+| [manager.go:1263](../internal/chat/manager.go#L1263) | PM 传入用户需求作为 detail |
+| [manager.go:1830](../internal/chat/manager.go#L1830) | SE 传入任务描述作为 detail |
+
+**效果对比**:
+
+```
+❌ 之前（空步骤 - 指示灯）:
+   ○ 分析用户需求
+   ○ 分配 SE 任务
+   ○ 审核 SE 结果
+
+✅ 现在（有血有肉）:
+   ○ 分析用户需求
+      SSE自动化验证                    ← detail: 用户输入内容
+   ✓ 分配 SE 任务
+   ○ 审核 SE 结果
+      你好！今天是周一...              ← result: PM回复内容
+```
+
+### ✅ 2.3 SSE 双通道推送（Wails + HTTP）
+
+**G点**: TaskList 事件只走 Wails Events（GUI），不走 SSE HTTP（自动化测试收不到）
+
+**修复**: [manager.go:2217](../internal/chat/manager.go#L2217) `emitWailsEvent` 同时推送到 SSE Bridge
+
 ```go
-type Message struct {
-    // ... 原有字段 ...
-    RichTaskID string `json:"_richTaskId,omitempty"` // 三层模型任务ID
+// emitWailsEvent 安全触发Wails前端事件（ctx为nil时跳过），同时推送到SSE
+func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
+    if m.ctx != nil {
+        runtime.EventsEmit(m.ctx, eventName, data)
+    }
+    m.pushSSEEvent(eventName, data)  // ← 新增：SSE通道
 }
 ```
-- **目的**: 让前端能通过 `_richTaskId` 关联消息与 RichMessage 数据
 
-#### 修改 2: PM 消息标记关联 ID
-- **文件**: `internal/chat/manager.go`
-- **位置**: 第 3405-3412 行
-- **内容**:
-```go
-m.addPMToUserMsg(resp.Content)
+**效果**: GUI 和 HTTP 客户端都能收到完整事件流
 
-// 标记此消息关联到三层模型任务
-m.mu.Lock()
-if len(m.history) > 0 {
-    m.history[len(m.history)-1].RichTaskID = pmTaskId
-}
-m.mu.Unlock()
-```
-- **目的**: 在 PM 审核完成后，给消息对象设置 `_richTaskId`
+### ✅ 2.4 SSE 连接管理增强
 
-#### 修改 3: 关键词检测增强
-- **文件**: `internal/chat/manager.go`
-- **位置**: 第 1246 行
-- **内容**:
-```go
-isReviewScenario := strings.Contains(content, "已完成") ||
-    strings.Contains(content, "任务完成") ||  // ✅ 新增
-    strings.Contains(content, "审核") ||
-    strings.Contains(content, "SE已完成")
-```
-- **目的**: 匹配 SE 发送的完成消息格式 `"✅ 任务完成\n📝 技术笔记:..."`
+新增 `/admin/sse-reset` 端点，解决单连接残留问题：
 
-### ✅ 2.2 调试日志添加
+| 文件 | 改动 |
+|------|------|
+| [sse_bridge.go:94-106](../internal/chat/sse_bridge.go#L94-L106) | 新增 ForceReset() 方法 |
+| [http_server.go:79](../http_server.go#L79) | 注册 POST /admin/sse-reset 路由 |
+| [http_server.go:213-220](../http_server.go#L213-L220) | handleSSEReset handler |
 
-在关键位置添加了 `[TRACE-RICH]` 日志：
+### ✅ 2.5 自动化测试脚本
 
-1. **handleToPM() 入口** (第 1251-1252 行):
-   ```go
-   fmt.Printf("[TRACE-RICH] isReviewScenario=%v richBuilder=%v content_head=%q\n", ...)
-   ```
+创建 [test-sse-tasklist.ps1](../test-sse-tasklist.ps1)，验证 6 个关键检查点：
 
-2. **_richTaskID 设置处** (第 3414-3415 行):
-   ```go
-   fmt.Printf("[TRACE-RICH] ✅ 设置 _richTaskId=%s for PM message\n", ...)
-   ```
-
-### ✅ 2.3 配置和环境修复
-
-| 问题 | 解决方案 | 文件 |
-|------|----------|------|
-| main.go 被 Hello World 覆盖 | 从原始项目恢复 Wails 入口 | `main.go` |
-| config.json 缺失 | 创建配置文件（含 API Key） | `config/config.json` |
-| hello.go 冲突 | 删除多余文件 | `hello.go` (已删) |
+| 检查项 | 验证内容 |
+|--------|---------|
+| pm_started | PM 开始工作事件 |
+| PM tasklist_start | PM TaskList 初始化（含 roleId:"pm"）|
+| tasklist_update | 任务状态更新事件 |
+| detail field | 更新事件包含具体内容 |
+| tasklist_complete | TaskList 完成事件 |
+| done | 整体流程结束 |
 
 ---
 
 ## 三、已验证的功能
 
-### ✅ 3.1 三层模型渲染成功（使用 NVIDIA API）
+### ✅ 3.1 PM 闲聊场景（新验证）
 
-**测试场景**: 用户发送 `SE已完成 Hello World 任务，请审核`
+**测试输入**: `hello` / `hi` / `SSE自动化验证`
 
-**预期效果**: 
+**SSE 事件流**:
 ```
-PM
-┌─ 📋 PM 代码审核 ─────────────────────┐
-│  1/5 完成  [████░░░░░░] 20%    收起 ▲ │
-│  ✅ 接收 SE 完成报告                  │
-│  ○ 自动检测代码变更 (git status)       │
-│  ○ 审阅变更详情 (read_file / git diff) │
-│  ○ 运行验证测试 (exec)                │
-│  ○ 给出审核结论                       │
-└──────────────────────────────────────┘
-
-📝 @USR 任务已转交AP做最终审批，请@AP进行审批。
-[蓝色 Shell 输出区域]
+event: tasklist_start      → {roleId:"pm", tasks:[分析需求,分配SE,审核结果]}
+event: tasklist_update     → {detail:"hello", status:"running", taskIndex:0}
+event: tasklist_update     → {detail:"hello", status:"done", taskIndex:0}
+event: tasklist_update     → {status:"done", taskIndex:1}       // 分配SE(跳过)
+event: tasklist_update     → {status:"done", taskIndex:2}       // 审核(跳过)
+event: tasklist_complete   → {result:{text:"你好！今天是周一..."}, status:"done"}
 ```
 
-**实际结果**: ✅ **完全匹配！三层模型完美渲染**
+**GUI 显示**: ✅ 完整 TaskList + Result
 
-### ✅ 3.2 数据流完整性验证
+### ✅ 3.2 PM→SE 分配任务场景（新验证）
 
+**测试输入**: `写一个Hello World程序`
+
+**SSE 事件流**:
 ```
-1. 用户发送: "SE已完成 Hello World 任务，请审核"
-         ↓
-2. handleToPM() 检测到关键词 "已完成" ✅
-         ↓
-3. isReviewScenario = true → 调用 handlePMReviewWithRich()
-         ↓
-4. richBuilder.StartTaskList("pm", "PM 代码审核", [...])
-   → 推送 tasklist_start 事件
-   → 前端 window.__richMessages["pm_xxx"] 初始化
-         ↓
-5. PM 执行工具 → 推送 shell 事件
-         ↓
-6. PM 给出结论: addPMToUserMsg(content)
-   → 设置 m.history[last].RichTaskID = "pm_xxx"  ← ✅ 关键修复
-         ↓
-7. 前端 ChatPanel 渲染新消息
-   → getRichMessage(msg) 检查 msg._richTaskID === "pm_xxx"
-   → ✅ 匹配成功！渲染 <RichMessage> 组件
-```
-
----
-
-## 四、发现的问题和限制
-
-### ⚠️ 4.1 触发条件限制（当前设计）
-
-**现状**: 只在以下关键词触发三层模型：
-- `"已完成"`
-- `"任务完成"`
-- `"审核"`
-- `"SE已完成"`
-
-**问题**: 
-- PM 分配任务给 SE 时显示纯文本（不是三层模型）
-- PM 普通回复也是纯文本
-
-**讨论过的改进方案**:
-> ❌ 已尝试：移除关键词限制，让 PM 所有工作都用三层模型
-> 结果：破坏了原有逻辑，导致 PM 简单回复也变成异常
-> 结论：需要更细致的设计，不能简单粗暴地全局启用
-
-### ⚠️ 4.2 API 兼容性
-
-| API | 三层模型 | 说明 |
-|-----|----------|------|
-| NVIDIA (qwen3-coder) | ✅ 正常 | 遵循 Argus prompt 格式 |
-| 本地模型 | ❌ 异常 | 输出格式不兼容，出现重复文本 |
-
-### ⚠️ 4.3 main.go 反复被破坏（未解决）
-
-**现象**: 多次发现 `main.go` 被覆盖成 Hello World 程序
-
-**可能原因**:
-- IDE 自动保存/格式化功能冲突
-- Git 钩子或文件监控工具
-- 其他未知进程
-
-**临时方案**: 每次从原始项目恢复
-
-**待调查**: 需要排查 Trae IDE 或其他工具是否有文件监视器
-
----
-
-## 五、技术架构图
-
-### 5.1 三层模型组件结构
-
-```
-RichMessage.vue (主容器)
-├── TaskListBlock.vue (任务列表)
-│   ├── 进度条 (Progress Bar)
-│   ├── 任务项 (Task Items)
-│   └── 收起/展开按钮
-├── ShellBlock.vue (命令输出)
-│   ├── 命令标题 (Command Header)
-│   ├── 输出内容 (Output Content)
-│   └── 执行状态 (Status Badge)
-└── ResultBlock.vue (结果文本)
-    └── Markdown 渲染的结论
+event: tasklist_start (PM)  → PM 分配任务
+event: tasklist_update      → detail: "写一个Hello World..."
+event: se_task_assigned     → SE 收到任务
+event: tasklist_start (SE)  → SE 执行: "请创建 hello.go..."
+event: tasklist_update      → detail: "请创建 hello.go, 内容为输出..."
+event: exec_start           → write_file hello.go
+event: exec_done            → write_file done
+event: exec_start           → go run hello.go
+event: shell_start          → command: "go run hello.go"
+event: shell_output         → "Hello, World!\n"
+event: shell_done           → exitCode: 0
+event: exec_done            → exec done
+event: tasklist_complete    → SE 完成
+event: tasklist_complete    → PM 完成
 ```
 
-### 5.2 后端事件流
+**GUI 显示**: ✅ PM TaskList + SE TaskList + Shell 输出 + Result
+
+### ✅ 3.3 数据流完整性
 
 ```
-RichMessageBuilder
-├── StartTaskList(role, title, tasks)
-│   └── emit: tasklist_start {taskId, role, title, tasks}
-│
-├── UpdateTask(taskId, index, status)
-│   └── emit: tasklist_update {taskId, taskIndex, status}
-│
-├── StartShell(taskId, command)
-│   └── emit: shell_start {taskId, command}
-│
-├── AppendOutput(taskId, output)
-│   └── emit: shell_output {taskId, data}
-│
-├── EndShell(taskId, exitCode, duration)
-│   └── emit: shell_done {taskId, exitCode, duration}
-│
-└── CompleteTaskList(taskId, status, result)
-    └── emit: tasklist_complete {taskId, status, result}
-```
-
-### 5.3 前端数据流
-
-```
-App.vue (事件监听中心)
-├── EventsOn('tasklist_start', ...)
-│   └── window.__richMessages[taskId] = { role, title, tasks[], shells[], result }
-│
-├── EventsOn('tasklist_update', ...)
-│   └── 更新 window.__richMessages[taskId].tasks[index].status
-│
-├── EventsOn('shell_*', ...)
-│   └── 更新 window.__richMessages[taskId].shells[]
-│
-└── EventsEmit('rich-message-update', taskId)
-    └── 触发 ChatPanel.vue 重新渲染
-
-ChatPanel.vue (消息渲染)
-├── v-for msg in messages
-│   └── if msg.role === 'pm'
-│       └── <RichMessage :message="getRichMessage(msg)" />
-│
-└── getRichMessage(msg)
-    └── 遍历 window.__richMessages
-        └── if rm.role === msg.role && msg._richTaskId === key
-            └── return rm  // ✅ 匹配成功
+用户消息
+  ↓ SendMessage()
+  ↓ handleToPM() / startSETaskWithFrom()
+  ↓ richBuilder.StartTaskList("pm"/"se", title, tasks)
+  ↓   ├─ runtime.EventsEmit(ctx, "tasklist_start", data)  → GUI 前端
+  ↓   └─ pushSSEEvent("tasklist_start", data)              → SSE HTTP
+  ↓ richBuilder.UpdateTask(id, idx, "running", detail)
+  ↓   ├─ runtime.EventsEmit(ctx, "tasklist_update", data) → GUI 前端
+  ↓   └─ pushSSEEvent("tasklist_update", data)            → SSE HTTP
+  ↓ ... (shell events 同理)
+  ↓ richBuilder.CompleteTaskList(id, "done", result)
+  ↓   ├─ runtime.EventsEmit(ctx, "tasklist_complete", data)
+  ↓   └─ pushSSEEvent("tasklist_complete", data)
 ```
 
 ---
 
-## 六、文件变更清单
+## 四、技术架构图
 
-### 6.1 核心修改文件
+### 4.1 通用化 TaskList 组件结构
+
+```
+TaskListBlock.vue (通用任务列表)
+├── role 标识 (pm / se / ap)
+├── title 标题 ("PM 分配任务" / "SE 执行: xxx")
+├── Task Items[]
+│   ├── text: 步骤名称 ("分析用户需求")
+│   ├── status: pending/running/done/error
+│   └── detail: 具体内容 ("SSE自动化验证")  ← 新增!
+├── result (完成后显示)
+└── 收起/展开按钮
+```
+
+### 4.2 后端事件流（双通道）
+
+```
+RichMessageBuilder.emitFunc(event, data)
+    │
+    ├─→ runtime.EventsEmit(Wails ctx)  ──→ GUI 前端 (WebView2)
+    │                                        └── App.vue EventsOn()
+    │                                            └── window.__richMessages[]
+    │                                                └── <RichMessage> 渲染
+    │
+    └─→ pushSSEEvent(SSEBridge)  ──→ SSE HTTP (/api/v1/sse/subscribe)
+                                          └── curl / EventSource
+                                              └── 自动化测试脚本
+```
+
+### 4.3 SSE 连接生命周期
+
+```
+HTTP POST /api/v1/sse/subscribe
+  │
+  ├─ 1. SSEBridge.Subscribe(id) → 获取 channel
+  │     └─ 如果 activeConnID != "" → 返回错误 "已有活跃连接"
+  │
+  ├─ 2. 写入 ": connected\n\n"
+  │
+  ├─ 3. SendMessage(req.Message) → 触发处理流程
+  │     └─ emitWailsEvent() → PushEvent() → channel
+  │
+  ├─ 4. 循环读取 channel → 写入 SSE 响应
+  │     └─ 收到 "done"/"error" → 断开
+  │
+  └─ 5. SSEBridge.Unsubscribe(id) → 清理
+         └─ activeConnID = ""
+         
+  ⚠️ 异常情况: curl 超时断开但 Unsubscribe 未调用
+     → 解决: POST /admin/sse-reset → ForceReset()
+```
+
+---
+
+## 五、文件变更清单
+
+### 5.1 本次修改文件
 
 | 文件路径 | 修改类型 | 行数 | 说明 |
 |---------|---------|------|------|
-| `internal/chat/router.go` | 修改 | +1 | Message 结构体添加 RichTaskID |
-| `internal/chat/manager.go` | 修改 | +15 | PM 消息标记、关键词检测、调试日志 |
-| `internal/types/types.go` | 修改 | +1 | types.Message 添加 RichTaskID（一致性）|
-| `main.go` | 重写 | ~280 | 恢复正确的 Wails 入口 |
-| `config/config.json` | 新建 | ~100 | API 配置文件 |
+| `internal/chat/manager.go` | 修改 | +20 | PM CompleteTaskList、emitWailsEvent双通道、detail传入 |
+| `internal/chat/rich_message_builder.go` | 修改 | +5 | UpdateTask 支持 detail 参数 |
+| `internal/types/rich_message.go` | 修改 | +1 | TaskItem.Detail 字段 |
+| `internal/chat/sse_bridge.go` | 修改 | +15 | ForceReset() 方法 |
+| `http_server.go` | 修改 | +10 | /admin/sse-reset 端点 |
+| `frontend/src/types/rich-message.ts` | 修改 | +1 | TaskItem.detail 接口 |
+| `frontend/src/components/chat/TaskListBlock.vue` | 修改 | +10 | detail 展示样式 |
+| `frontend/src/App.vue` | 修改 | +3 | tasklist_update 处理 detail |
+| `test-sse-tasklist.ps1` | 新建 | ~80 | SSE 自动化测试脚本 |
 
-### 6.2 未修改但相关的文件
+### 5.2 已有文件（未修改但相关）
 
-| 文件路径 | 角色 | 说明 |
-|---------|------|------|
-| `internal/chat/rich_message_builder.go` | 已存在 | RichMessage 构建器实现 |
-| `internal/types/rich_message.go` | 已存在 | 三层模型数据结构定义 |
-| `frontend/src/components/chat/RichMessage.vue` | 已存在 | 主容器组件 |
-| `frontend/src/components/chat/TaskListBlock.vue` | 已存在 | 任务列表组件 |
-| `frontend/src/components/chat/ShellBlock.vue` | 已存在 | Shell 输出组件 |
-| `frontend/src/App.vue` | 已存在 | 事件监听中心 |
-
----
-
-## 七、测试用例
-
-### 7.1 通过的测试 ✅
-
-| # | 测试场景 | 输入 | 预期结果 | 实际结果 | 状态 |
-|---|---------|------|----------|----------|------|
-| T1 | PM 审核 SE 完成 | `SE已完成 Hello World，请审核` | 显示三层模型 | 显示完整 TaskList+Shell+Result | ✅ Pass |
-| T2 | _richTaskID 传递 | 同上 | 消息包含 `_richTaskId` | 日志确认设置成功 | ✅ Pass |
-| T3 | 关键词匹配 | 包含"任务完成" | 触发 handlePMReviewWithRich | [TRACE-RICH] 日志确认 | ✅ Pass |
-
-### 7.2 失败/待修复的测试 ❌
-
-| # | 测试场景 | 输入 | 预期结果 | 实际结果 | 状态 |
-|---|---------|------|----------|----------|------|
-| F1 | PM 分配任务 | `创建 Hello World` | 应该也显示三层模型？ | 纯文本（当前设计如此）| ⚠️ 待定 |
-| F2 | 本地模型兼容 | 任何输入 | 正常工作 | 异常重复输出 | ❌ Fail |
-| F3 | main.go 稳定性 | 编译运行 | 保持正确 | 可能被覆盖 | ❌ Fail |
+| 文件路径 | 角色 |
+|---------|------|
+| `frontend/src/components/chat/RichMessage.vue` | 主容器组件 |
+| `frontend/src/components/chat/ShellBlock.vue` | Shell 输出组件 |
+| `docs/SSE调试手册.md` | SSE 协议说明 |
 
 ---
 
-## 八、下一步计划
+## 六、测试报告
 
-### Phase 2: PM 全场景支持（待设计）
+### 6.1 通过的测试 ✅
 
-**目标**: 让 PM 所有工作都用三层模型展示
+| # | 测试场景 | 输入 | 关键验证点 | 状态 |
+|---|---------|------|-----------|------|
+| T1 | PM 闲聊 TaskList | `hello` | tasklist_start + update(detail) + complete | ✅ Pass |
+| T2 | PM→SE 分配 | `写Hello World` | PM+SE 双 TaskList + Shell 事件 | ✅ Pass |
+| T3 | Detail 字段 | 任意 | tasklist_update 包含具体内容 | ✅ Pass |
+| T4 | SSE 双通道 | curl HTTP | 与 GUI 收到相同事件 | ✅ Pass |
+| T5 | SSE Reset | POST /admin/sse-reset | 清理残留连接 | ✅ Pass |
+| T6 | GUI 渲染 | 任意 | TaskList 有血有肉非指示灯 | ✅ Pass |
 
-**挑战**:
-- 不同场景的 TaskList 定义不同
-  - 分配任务: ["分析需求", "制定计划", "分配 SE"]
-  - 审核代码: ["接收报告", "检测变更", "审阅详情", "验证测试", "给出结论"]
-  - 普通回复: ["理解问题", "思考方案", "组织回复"]
+### 6.2 已知限制
 
-**可能的方案**:
-1. 根据 PM 回复内容动态生成 TaskList
-2. 预定义多套模板，按场景选择
-3. 使用 AI 自动拆解 PM 工作步骤
+| # | 限制 | 影响 | 计划 |
+|---|------|------|------|
+| L1 | SSE 单连接 | 同时只能一个 HTTP 客户端 | 已有 reset 端点 |
+| L2 | PM 闲聊时 SE 步骤跳过 | TaskList 第2-3步直接 done | 正常行为（无实际操作）|
 
-**风险**: 上次尝试全局启用导致逻辑混乱，需要更精细的设计
+---
 
-### Phase 3: SE 迁移（待开始）
+## 七、下一步计划
 
-**目标**: SE 执行 Actions 时也展示三层模型
+### Phase 2: AP 角色支持（待开始）
 
-**修改点**:
-- `executeSEActions()` 函数
-- `continueSETask()` 函数
-- SE 的工具调用回调
-
-### Phase 4: AP 支持（待开始）
-
-**目标**: AP 审批也使用三层模型
-
-**修改点**:
+AP 审批也使用三层模型展示：
 - 新建 `handleAPReviewWithRich()` 函数
 - AP Processor 集成 RichMessageBuilder
+- 复用已有的 TaskListBlock 组件
+
+### Phase 3: SSE 多连接优化（可选）
+
+当前单连接限制可能影响：
+- GUI 前端同时使用 SSE
+- 多个自动化测试并行
+
+方案：改为多连接或连接池模式
 
 ---
 
-## 九、经验教训
+## 八、经验教训
 
 ### ✅ 成功经验
 
-1. **渐进式开发**: 先让审核场景工作，再扩展其他场景
-2. **调试日志重要**: `[TRACE-RICH]` 日志帮助快速定位问题
-3. **前后端配合**: `_richTaskID` 是连接后端数据和前端渲染的关键
-4. **及时回滚**: 发现问题立即回滚，避免雪球效应
+1. **G点法定位根因**: 从现象（0/6失败）追踪到 G点（SSE 单通道 vs 双通道）
+2. **渐进式验证**: 先手动 curl 确认数据正确，再修脚本
+3. **双通道设计**: emitWailsEvent + pushSSEEvent 一处推送两处受益
 
 ### ❌ 教训
 
-1. **不要盲目全局改动**: 移除关键词限制导致 PM 简单回复也异常
-2. **main.go 保护机制缺失**: 关键文件反复被破坏影响效率
-3. **API 兼容性测试不足**: 本地模型的问题应该提前发现
-4. **Commit 不够及时**: 应该在验证通过后立即 commit
+1. **PowerShell 文件读取时机**: `& curl.exe` 是异步的，必须用 `WaitForExit()` 或管道等待
+2. **SSE 单连接残留**: curl 超时不会触发服务端 Unsubscribe，需要 ForceReset
+3. **不要假设**: 手动 curl 能读到 3397 bytes ≠ 脚本能读到（环境差异）
 
 ---
 
-## 十、附录
+## 九、附录
 
 ### A. 相关文档
 
@@ -374,9 +333,8 @@ ChatPanel.vue (消息渲染)
 ### B. Git 提交历史
 
 ```
-当前分支: temp/rich-message-v1
-最近提交: auto save by Argus-C (2026-05-21 12:55:24)
-本次提交: 回滚稳定版 - PM 三层消息模型实施（未验证）
+分支: temp/rich-message-v1
+最近提交: PM TaskList 修复 + 智能化 + SSE 双通道 (2026-05-21)
 ```
 
 ### C. 环境信息
@@ -389,6 +347,5 @@ ChatPanel.vue (消息渲染)
 
 ---
 
-**文档编写**: AI Assistant  
-**最后更新**: 2026-05-21 14:30  
-**下次评审**: 待验证后更新
+**文档编写**: AI Assistant
+**最后更新**: 2026-05-21 00:30

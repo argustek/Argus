@@ -1243,16 +1243,24 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	// === 检测是否为 SE 审核交接场景 ===
 	isReviewScenario := strings.Contains(content, "已完成") ||
-		strings.Contains(content, "任务完成") ||
 		strings.Contains(content, "审核") ||
 		strings.Contains(content, "SE已完成")
 
-	fmt.Printf("[TRACE-RICH] isReviewScenario=%v richBuilder=%v content_head=%q\n",
-		isReviewScenario, m.richBuilder != nil, content[:min(60, len(content))])
-
 	if isReviewScenario && m.richBuilder != nil {
-		fmt.Println("[TRACE-RICH] ✅ 调用 handlePMReviewWithRich (审核场景)")
 		return m.handlePMReviewWithRich(content, pmCtx)
+	}
+
+	if m.richBuilder != nil && !isReviewScenario {
+		taskPreview := content
+		if len(taskPreview) > 80 {
+			taskPreview = taskPreview[:80] + "..."
+		}
+		m.richBuilder.StartTaskList("pm", "PM 分配任务", []types.TaskItemDef{
+			{Text: "分析用户需求"},
+			{Text: "分配 SE 任务"},
+			{Text: "审核 SE 结果"},
+		})
+		m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", taskPreview)
 	}
 
 	// 🔴 Wails事件: PM开始处理（前端用 runtime.EventsOn 监听）
@@ -1312,6 +1320,14 @@ func (m *Manager) handleToPM(content string) (err error) {
 			filteredErr := filterDuplicateMentions(errContent)
 			m.sendToDingTalk(fmt.Sprintf("[PM] %s", filteredErr))
 		}()
+
+		if m.richBuilder != nil {
+			pmTaskId := m.richBuilder.GetCurrentTaskID()
+			if pmTaskId != "" {
+				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
+				m.richBuilder.Reset()
+			}
+		}
 
 		return fmt.Errorf("PM process failed: %v", err)
 	}
@@ -1482,6 +1498,15 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 		m.addPMToSEMsg(finalTask)
 
+		pmTaskId := ""
+		if m.richBuilder != nil {
+			pmTaskId = m.richBuilder.GetCurrentTaskID()
+			if pmTaskId != "" {
+				m.richBuilder.UpdateTask(pmTaskId, 0, "done")
+				m.richBuilder.UpdateTask(pmTaskId, 1, "running")
+			}
+		}
+
 		// 📋 记录 PM→SE 任务分配
 		taskPreview := finalTask
 		if len(taskPreview) > 80 {
@@ -1500,7 +1525,15 @@ func (m *Manager) handleToPM(content string) (err error) {
 		// 启动SE执行任务
 		err := m.startSETaskWithFrom(finalTask, "pm")
 
-		// SE 完成后由 handlePMReview 回复用户，这里不回复
+		if pmTaskId != "" && m.richBuilder != nil {
+			if err != nil {
+				m.richBuilder.UpdateTask(pmTaskId, 1, "error")
+				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
+			} else {
+				m.richBuilder.UpdateTask(pmTaskId, 2, "running")
+			}
+		}
+
 		return err
 	}
 
@@ -1528,6 +1561,20 @@ func (m *Manager) handleToPM(content string) (err error) {
 	// 没有@SE/没有任务 = 普通对话，PM回复用户（已在上面 addPMToUserMsg）
 	fmt.Printf("[TRACE-PM-ROUTE] ⚠️ PM走【闲聊分支】! to=%q hasTasks=%v content_head=%q | AP不会启动!\n",
 		parsedMsg.To, resp.HasTasks, resp.Content[:min(100, len(resp.Content))])
+
+	if m.richBuilder != nil {
+		pmTaskId := m.richBuilder.GetCurrentTaskID()
+		if pmTaskId != "" {
+			m.richBuilder.UpdateTask(pmTaskId, 0, "done")
+			m.richBuilder.UpdateTask(pmTaskId, 1, "done")
+			m.richBuilder.UpdateTask(pmTaskId, 2, "done")
+			m.richBuilder.CompleteTaskList(pmTaskId, "done", &types.ResultBlock{
+				Text: resp.Content,
+			})
+			m.richBuilder.Reset()
+		}
+	}
+
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 	m.syncBackendStatus("pm_chat", "PM闲聊回复")
 
@@ -1769,6 +1816,20 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 		seCtx, seCancel := context.WithTimeout(safeCtx, seTimeout)
 		m.seProcessor.SetContext(seCtx)
+
+		if m.richBuilder != nil && attempt == 0 {
+			taskDefs := []types.TaskItemDef{
+				{Text: "分析任务需求"},
+				{Text: "执行操作"},
+				{Text: "验证结果"},
+			}
+			m.richBuilder.StartTaskList("se", "SE 执行: "+taskDesc[:min(30, len(taskDesc))], taskDefs)
+			seTaskPreview := taskDesc
+			if len(seTaskPreview) > 100 {
+				seTaskPreview = seTaskPreview[:100] + "..."
+			}
+			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", seTaskPreview)
+		}
 
 		resp, err = m.seProcessor.ProcessTaskStream(taskDesc, func(delta string) {
 			m.cMonitor.UpdateSeChunkTime()
@@ -2151,16 +2212,25 @@ func (m *Manager) continueSETask() (err error) {
 	return nil
 }
 
-// emitWailsEvent 安全触发Wails前端事件（ctx为nil时跳过）
+// emitWailsEvent 安全触发Wails前端事件（ctx为nil时跳过），同时推送到SSE
 func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, eventName, data)
 	}
+	m.pushSSEEvent(eventName, data)
 }
 
 // executeSEActions 执行SE的actions
 func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	totalActions := len(actions)
+	seTaskId := ""
+	if m.richBuilder != nil {
+		seTaskId = m.richBuilder.GetCurrentTaskID()
+		if seTaskId != "" {
+			m.richBuilder.UpdateTask(seTaskId, 1, "running")
+		}
+	}
+
 	for i, action := range actions {
 		actionLabel := fmt.Sprintf("%s %s", action.Type, func() string {
 			switch action.Type {
@@ -2282,7 +2352,13 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 			}
 
+			if seTaskId != "" && m.richBuilder != nil {
+				m.richBuilder.PushShellStart("se", seTaskId, 1, "exec", action.Command, nil)
+			}
 			output, err := m.seExecutor.Exec(action.Command, 30*time.Second)
+			if seTaskId != "" && m.richBuilder != nil {
+				m.richBuilder.PushShellOutput(seTaskId, output)
+			}
 			if err != nil {
 				errMsg := fmt.Sprintf("执行失败: %v", err)
 				m.emitWailsEvent("exec_done", map[string]interface{}{
@@ -2314,6 +2390,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"label":    actionLabel,
 				"status":   "done",
 			})
+			if seTaskId != "" && m.richBuilder != nil {
+				m.richBuilder.PushShellDone("se", seTaskId, 0, "", "done")
+			}
 			m.emitWailsEvent("exec_output", map[string]interface{}{
 				"executor":  "se",
 				"command":   action.Command,
@@ -2365,6 +2444,10 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		default:
 			return fmt.Errorf("unknown action type: %s", action.Type)
 		}
+	}
+	if seTaskId != "" && m.richBuilder != nil {
+		m.richBuilder.UpdateTask(seTaskId, 2, "done")
+		m.richBuilder.CompleteTaskList(seTaskId, "done", nil)
 	}
 	return nil
 }
@@ -3406,16 +3489,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	}
 
 	m.addPMToUserMsg(resp.Content)
-
-	// ✅ 标记此消息关联到三层模型任务（前端用于渲染 RichMessage 组件）
-	m.mu.Lock()
-	if len(m.history) > 0 {
-		m.history[len(m.history)-1].RichTaskID = pmTaskId
-		fmt.Printf("[TRACE-RICH] ✅ 设置 _richTaskId=%s for PM message (content_head=%q)\n",
-			pmTaskId, resp.Content[:min(60, len(resp.Content))])
-	}
-	m.mu.Unlock()
-
 	m.resetPMHealth()
 
 	parsedMsg := m.router.Parse("pm", resp.Content)

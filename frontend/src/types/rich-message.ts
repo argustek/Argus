@@ -1,6 +1,7 @@
 export interface TaskItem {
   id: string
   text: string
+  detail?: string
   status: 'pending' | 'running' | 'done' | 'error' | 'skipped'
   startedAt?: number
   completedAt?: number

@@ -19,6 +19,7 @@ type ShellEventEmitter interface {
 type TaskItem struct {
 	ID          string `json:"id"`
 	Text        string `json:"text"`
+	Detail      string `json:"detail,omitempty"`
 	Status      string `json:"status"`
 	StartedAt   int64  `json:"started_at"`
 	CompletedAt int64  `json:"completed_at"`

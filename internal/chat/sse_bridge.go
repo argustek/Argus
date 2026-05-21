@@ -89,6 +89,21 @@ func (b *SSEBridge) PushEvent(eventType string, data interface{}) {
 	b.Push(SSEEvent{Type: eventType, Data: data})
 }
 
+func (b *SSEBridge) ForceReset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, ch := range b.subscribers {
+		close(ch)
+		delete(b.subscribers, id)
+	}
+	b.activeConnID = ""
+	if b.heartbeatStop != nil {
+		close(b.heartbeatStop)
+		b.heartbeatStop = nil
+	}
+	fmt.Printf("[SSEBridge] ForceReset: 清理所有残留连接\n")
+}
+
 func (b *SSEBridge) StartHeartbeat() {
 	b.mu.Lock()
 	if b.heartbeatStop != nil {

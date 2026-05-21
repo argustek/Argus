@@ -65,7 +65,7 @@ func (b *RichMessageBuilder) StartTaskList(role, title string, taskDefs []types.
 	return taskId
 }
 
-func (b *RichMessageBuilder) UpdateTask(taskId string, index int, status string) {
+func (b *RichMessageBuilder) UpdateTask(taskId string, index int, status string, detail ...string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.current == nil || b.current.taskList == nil || index >= len(b.current.taskList.Tasks) {
@@ -73,6 +73,9 @@ func (b *RichMessageBuilder) UpdateTask(taskId string, index int, status string)
 	}
 	item := &b.current.taskList.Tasks[index]
 	item.Status = status
+	if len(detail) > 0 && detail[0] != "" {
+		item.Detail = detail[0]
+	}
 	now := time.Now().Unix()
 	switch status {
 	case "running":
@@ -90,6 +93,9 @@ func (b *RichMessageBuilder) UpdateTask(taskId string, index int, status string)
 	}
 	if item.Error != "" {
 		updateData["error"] = item.Error
+	}
+	if item.Detail != "" {
+		updateData["detail"] = item.Detail
 	}
 	b.emitFunc("tasklist_update", updateData)
 }

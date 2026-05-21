@@ -25,7 +25,10 @@
             <template v-else-if="task.status === 'error'">❌</template>
             <template v-else-if="task.status === 'skipped'">⏭</template>
           </span>
-          <span class="step-text">{{ task.text }}</span>
+          <div class="step-content">
+            <span class="step-text">{{ task.text }}</span>
+            <span v-if="task.detail" class="step-detail">{{ task.detail }}</span>
+          </div>
           <span v-if="task.duration" class="step-duration">{{ task.duration }}</span>
           <span v-if="task.error" class="step-error">{{ task.error }}</span>
         </div>
@@ -97,7 +100,9 @@ const progressPercent = computed(() => (total.value > 0 ? Math.round(doneCount.v
   border-left-color: #ef4444;
 }
 .step-icon { font-size: 13px; min-width: 18px; text-align: center; }
-.step-text { flex: 1; }
+.step-content { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.step-text { font-weight: 500; }
+.step-detail { font-size: 11.5px; color: #666; font-family: 'Cascadia Code', 'Fira Code', monospace; background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 3px; word-break: break-all; }
 .step-duration { font-size: 11px; color: #888; }
 .step-error { font-size: 11px; color: #ef4444; }
 

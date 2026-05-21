@@ -75,6 +75,7 @@ func (a *App) registerSSERoutes(mux *http.ServeMux) {
 
 func (a *App) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/status", a.localOnlyMiddleware(http.HandlerFunc(a.handleStatus)).ServeHTTP)
+	mux.HandleFunc("POST /admin/sse-reset", a.localOnlyMiddleware(http.HandlerFunc(a.handleSSEReset)).ServeHTTP)
 	mux.HandleFunc("GET /admin/backend-status", a.localOnlyMiddleware(http.HandlerFunc(a.handleBackendStatus)).ServeHTTP)
 	mux.HandleFunc("GET /admin/memory", a.localOnlyMiddleware(http.HandlerFunc(a.handleMemory)).ServeHTTP)
 	mux.HandleFunc("GET /admin/monitor", a.localOnlyMiddleware(http.HandlerFunc(a.handleMonitor)).ServeHTTP)
@@ -206,6 +207,15 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := a.chatManager.GetCMonitor().GetSystemStatus()
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (a *App) handleSSEReset(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "error": "未初始化"})
+		return
+	}
+	a.chatManager.GetSSEBridge().ForceReset()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "SSE connection reset"})
 }
 
 func (a *App) handleBackendStatus(w http.ResponseWriter, r *http.Request) {
