@@ -64,11 +64,12 @@ const (
 
 // Message 聊天消息
 type Message struct {
-	ID        string    `json:"id"`
-	Role      string    `json:"role"` // user, pm, se
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-	ReplyTo   string    `json:"reply_to,omitempty"` // 引用消息ID
+	ID         string    `json:"id"`
+	Role       string    `json:"role"` // user, pm, se
+	Content    string    `json:"content"`
+	Timestamp  time.Time `json:"timestamp"`
+	ReplyTo    string    `json:"reply_to,omitempty"` // 引用消息ID
+	RichTaskID string    `json:"_richTaskId,omitempty"` // 三层模型任务ID（用于前端渲染RichMessage）
 }
 
 // Task 任务

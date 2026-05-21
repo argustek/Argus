@@ -3401,6 +3401,14 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	}
 
 	m.addPMToUserMsg(resp.Content)
+
+	// ✅ 标记此消息关联到三层模型任务（前端用于渲染 RichMessage 组件）
+	m.mu.Lock()
+	if len(m.history) > 0 {
+		m.history[len(m.history)-1].RichTaskID = pmTaskId
+	}
+	m.mu.Unlock()
+
 	m.resetPMHealth()
 
 	parsedMsg := m.router.Parse("pm", resp.Content)
