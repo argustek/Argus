@@ -264,6 +264,7 @@ func NewManager(config types.Config, workDir string) (*Manager, error) {
 		currentRole:   "user",
 		workDir:       workDir,
 		config:        config,
+		taskManager:   task.NewTaskManager(nil),
 		ReplyLanguage: "zh",
 		stopCh:        make(chan struct{}),
 		todoMaxSize:   5,
@@ -720,9 +721,27 @@ func (m *Manager) SetTerminalWriter(writer func(string) error) {
 // SetContext 设置Wails context（供App调用）
 func (m *Manager) SetContext(ctx context.Context) {
 	m.ctx = ctx
+	m.taskManager.SetEmitFn(m.emitWailsEvent)
+}
+
+func (m *Manager) GetAllTasks() []*types.GlobalTask {
 	if m.taskManager == nil {
-		m.taskManager = task.NewTaskManager(m.emitWailsEvent)
+		return nil
 	}
+	return m.taskManager.GetAllTasks()
+}
+
+// WriteDebugLog 写调试日志到 conversation.log
+func (m *Manager) WriteDebugLog(content string) {
+	m.writeConversationLog(Message{
+		From:    "DEBUG",
+		To:      "debug",
+		Role:    "debug",
+		Content: content,
+		Raw:     content,
+		Source:  "debug",
+		Timestamp: time.Now(),
+	})
 }
 
 // StopCMonitor 停止ChatManager中的C监控
@@ -1734,6 +1753,33 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	fmt.Printf("[TRACE-SE] 🚀 startSETask入口 from=%s task=%q (时间:%s)\n", from, taskDesc[:min(60, len(taskDesc))], time.Now().Format("15:04:05"))
 	m.writeRouteLog(fmt.Sprintf("[SE-TASK] from=%s task='%s'", from, taskDesc))
 
+	// 创建PM任务记录（PM分配的任务）
+	if from == "pm" && m.taskManager != nil {
+		cleanDesc := strings.TrimSpace(taskDesc)
+		// 去掉末尾的 JSON 元数据（AI常附加 {"current_task":...}）
+		for {
+			idx := strings.LastIndex(cleanDesc, "\n{")
+			if idx < 0 {
+				break
+			}
+			remainder := cleanDesc[idx+1:]
+			if strings.Contains(remainder, "current_task") ||
+				strings.Contains(remainder, "total_steps") ||
+				strings.Contains(remainder, "action") ||
+				strings.Contains(remainder, "state") {
+				cleanDesc = strings.TrimSpace(cleanDesc[:idx])
+			} else {
+				break
+			}
+		}
+		// 截断过长描述
+		if len(cleanDesc) > 60 {
+			cleanDesc = cleanDesc[:60] + "..."
+		}
+		m.taskManager.CreateTask("分配："+cleanDesc, "PM")
+		m.taskManager.CompleteLastTaskByRole("PM")
+	}
+
 	// 防御：过滤纯状态确认消息
 	if isStatusOnlyMessage(taskDesc) {
 		m.writeRouteLog(fmt.Sprintf("[SE-TASK] ❌ BLOCKED: status-only message '%s'", taskDesc))
@@ -1831,17 +1877,10 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.seProcessor.SetContext(seCtx)
 
 		if m.richBuilder != nil && attempt == 0 {
-			taskDefs := []types.TaskItemDef{
-				{Text: "分析任务需求"},
-				{Text: "执行操作"},
-				{Text: "验证结果"},
-			}
-			m.richBuilder.StartTaskList("se", "SE 执行: "+taskDesc[:min(30, len(taskDesc))], taskDefs)
-			seTaskPreview := taskDesc
-			if len(seTaskPreview) > 100 {
-				seTaskPreview = seTaskPreview[:100] + "..."
-			}
-			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", seTaskPreview)
+			m.richBuilder.StartTaskList("se", "SE 执行: "+taskDesc[:min(30, len(taskDesc))], []types.TaskItemDef{
+				{Text: "⏳ 规划操作..."},
+			})
+			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running")
 		}
 
 		resp, err = m.seProcessor.ProcessTaskStream(taskDesc, func(delta string) {
@@ -2239,8 +2278,26 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	seTaskId := ""
 	if m.richBuilder != nil {
 		seTaskId = m.richBuilder.GetCurrentTaskID()
-		if seTaskId != "" {
-			m.richBuilder.UpdateTask(seTaskId, 1, "running")
+		if seTaskId != "" && totalActions > 0 {
+			taskDefs := make([]types.TaskItemDef, totalActions)
+			for i, a := range actions {
+				label := ""
+				switch a.Type {
+				case "write_file":
+					label = "创建 " + a.Path
+				case "edit_file":
+					label = "修改 " + a.Path
+				case "exec":
+					label = "执行 " + a.Command
+				case "read_file":
+					label = "读取 " + a.Path
+				default:
+					label = a.Type
+				}
+				taskDefs[i] = types.TaskItemDef{Text: label}
+			}
+			m.richBuilder.ReplaceTaskList(seTaskId, taskDefs)
+			m.richBuilder.UpdateTask(seTaskId, 0, "running")
 		}
 	}
 
@@ -2259,15 +2316,13 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		}())
 
 		var currentTask *types.GlobalTask
-		if m.taskManager != nil {
-			desc := fmt.Sprintf("%s %s", map[string]string{
-				"write_file": "创建",
-				"edit_file":   "修改",
-				"exec":        "执行",
-				"read_file":   "读取",
-			}[action.Type], actionLabel)
-			currentTask = m.taskManager.CreateTask(desc, "SE")
-		}
+		desc := fmt.Sprintf("%s%s", map[string]string{
+			"write_file": "创建文件：",
+			"edit_file":   "修改文件：",
+			"exec":        "执行命令：",
+			"read_file":   "读取文件：",
+		}[action.Type], actionLabel)
+		currentTask = m.taskManager.CreateTask(desc, "SE")
 
 		m.emitWailsEvent("exec_start", map[string]interface{}{
 			"executor": "se",
@@ -3479,6 +3534,11 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) error {
 	fmt.Println("[RichPM] === 启动 PM 三层模型审核 ===")
 
+	// 创建PM审核任务
+	if m.taskManager != nil {
+		m.taskManager.CreateTask("审核：验证SE执行结果", "PM")
+	}
+
 	pmTaskId := m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
 		{Text: "接收 SE 完成报告"},
 		{Text: "自动检测代码变更 (git status / list_files)"},
@@ -3548,6 +3608,10 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.SetHandoverPending(HandoverPMToAP)
+		// 标记PM审核任务为完成
+		if m.taskManager != nil {
+			m.taskManager.CompleteLastTaskByRole("PM")
+		}
 		if m.apProcessor != nil {
 			return m.handleAPReview(parsedMsg.Content)
 		}
@@ -3568,6 +3632,10 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	}
 
 	m.SetHandoverPending(HandoverPMToAP)
+	// 标记PM审核任务为完成（fallback路径）
+	if m.taskManager != nil {
+		m.taskManager.CompleteLastTaskByRole("PM")
+	}
 	return m.handleAPReview("请AP进行最终质量审批")
 }
 
@@ -3619,6 +3687,12 @@ func (m *Manager) handleAPDirectChat(input string) (string, error) {
 func (m *Manager) handleAPReview(reviewMsg string) error {
 	fmt.Printf("[TRACE-AP] 🔥 handleAPReview入口! msg=%q apEnabled=%v state=%v (时间:%s)\n",
 		reviewMsg[:min(60, len(reviewMsg))], m.apProcessor != nil, m.cMonitor.GetProjectState(), time.Now().Format("15:04:05"))
+
+	// 创建AP任务记录（AP审核任务）
+	if m.taskManager != nil {
+		m.taskManager.CreateTask("审核：任务完成情况及质量审批", "AP")
+	}
+
 	if allowed, reason := m.router.CheckTurnInternal("ap", "ap_review", true); !allowed {
 		fmt.Printf("[TRACE-AP] ❌ AP被轮换拦截: %s\n", reason)
 		return nil
@@ -3829,6 +3903,11 @@ func (m *Manager) forceProjectApproved() {
 	m.seAskPMCount = 0
 	m.seReportedComplete = false
 
+	// 标记AP审核任务为完成
+	if m.taskManager != nil {
+		m.taskManager.CompleteLastTaskByRole("AP")
+	}
+
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "approved"})
 	}
@@ -3941,6 +4020,11 @@ func (m *Manager) ExecuteReset(reason string, trigger string) error {
 		m.memoryManager.ClearState()
 	}
 
+	// 清空全局任务列表
+	if m.taskManager != nil {
+		m.taskManager.ClearTasks()
+	}
+
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "reset", map[string]string{
 			"reason":  reason,
@@ -3950,6 +4034,13 @@ func (m *Manager) ExecuteReset(reason string, trigger string) error {
 
 	fmt.Printf("[RESET] ✅ 复位完成\n")
 	return nil
+}
+
+// ClearGlobalTasks 清空全局任务列表（供 App.ClearMessages 调用）
+func (m *Manager) ClearGlobalTasks() {
+	if m.taskManager != nil {
+		m.taskManager.ClearTasks()
+	}
 }
 
 func (m *Manager) archiveResetLog(reason, trigger string) error {

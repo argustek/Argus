@@ -79,21 +79,23 @@
           </div>
         </template>
 
-        <!-- SE 消息 - 朴素文本模式 -->
+        <!-- SE 消息 - 操作卡片 -->
         <template v-else-if="msg.role === 'se'">
           <div class="message-header">
             <span class="role-badge se">SE</span>
             <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
+            <span v-if="getSEActionCount(msg)" class="action-count">{{ getSEActionCount(msg) }} 个操作</span>
           </div>
-          <div class="message-content se-content">
-            <div v-if="getSEActions(msg)" class="se-simple-list">
-              <div v-for="(action, i) in getSEActions(msg)" :key="i" class="se-line">
-                <span class="se-dot">{{ action.status === 'error' ? '✗' : '✓' }}</span>
-                <span v-if="action.type === 'write_file'">创建 <code>{{ action.path }}</code></span>
-                <span v-else-if="action.type === 'exec'">执行 <code>{{ action.command || action.path }}</code></span>
-                <span v-else>{{ action.type }} {{ action.path || action.command }}</span>
-              </div>
-            </div>
+          <div class="message-content se-content structured-msg">
+            <SERichMessage
+              v-if="getSEActions(msg)"
+              :message="msg"
+              :actions="getSEActions(msg)"
+              :shellOutput="getSEShellOutput(msg)"
+              @open-file-in-editor="onOpenFileInEditor"
+              @run-in-terminal="onRunInTerminal"
+            />
+            <RichMessage v-else-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
             <div v-else class="se-plain" v-html="renderSEText(msg)"></div>
           </div>
         </template>
@@ -348,6 +350,11 @@ const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'vie
 
 const inputMessage = ref('')
 const globalTasks = ref<GlobalTask[]>([])
+
+// 前端调试日志函数
+const LogPrint = (msg: string) => {
+  console.log('[ChatPanel] ' + msg)
+}
 const pmWaiting = ref(false)
 const showThinking = ref(false)
 const currentThinkingStep = ref(0)
@@ -410,6 +417,7 @@ const searchInputRef = ref<HTMLInputElement>()
 // #2 CLI相关
 import CliPanel from './CliPanel.vue'
 import GlobalTaskBar from './GlobalTaskBar.vue'
+import SERichMessage from './chat/SERichMessage.vue'
 import type { GlobalTask } from '../../types/task'
 const showCli = ref(false)
 const cliCommand = ref('')
@@ -579,15 +587,16 @@ onMounted(() => {
 
   EventsOn('task_added', (data: any) => {
     LogPrint('[GLOBAL-TASK-BAR] 📥 task_added received: ' + JSON.stringify(data))
-    globalTasks.push({ id: data.id, description: data.description, role: data.role || 'SE', status: 'doing' })
-    LogPrint('[GLOBAL-TASK-BAR] 📋 globalTasks now: ' + globalTasks.length)
+    globalTasks.value.push({ id: data.id, description: data.description, role: data.role || 'SE', status: 'doing', createdAt: new Date(), updatedAt: new Date() })
+    LogPrint('[GLOBAL-TASK-BAR] 📋 globalTasks now: ' + globalTasks.value.length)
   })
 
   EventsOn('task_updated', (data: any) => {
     LogPrint('[GLOBAL-TASK-BAR] 📥 task_updated received: ' + JSON.stringify(data))
-    const idx = globalTasks.findIndex(t => t.id === data.id)
+    const idx = globalTasks.value.findIndex(t => t.id === data.id)
     if (idx >= 0) {
-      globalTasks[idx].status = data.status || 'done'
+      globalTasks.value[idx].status = data.status || 'done'
+      globalTasks.value[idx].updatedAt = new Date()
     }
   })
 
@@ -596,11 +605,59 @@ onMounted(() => {
     LogPrint('[PM-WAITING] 🚨 PM正在等待用户回复')
   })
 
+  EventsOn('debug-query', () => {
+    const state = (window as any).__debugState || {}
+    LogPrint('[DEBUG-QUERY] 📤 前端状态: ' + JSON.stringify(state))
+    EventsEmit('debug-query-response', JSON.stringify(state))
+  })
+
+  EventsOn('reset', () => {
+    globalTasks.value.length = 0
+    LogPrint('[GLOBAL-TASK-BAR] 🗑️ reset事件: 任务列表已清空')
+  })
+
+  EventsOn('tasks_cleared', () => {
+    globalTasks.value.length = 0
+    LogPrint('[GLOBAL-TASK-BAR] 🗑️ tasks_cleared事件: 任务列表已清空')
+  })
+
+  EventsOn('messages-cleared', () => {
+    globalTasks.value.length = 0
+    LogPrint('[GLOBAL-TASK-BAR] 🗑️ messages-cleared事件: 任务列表已清空')
+  })
+
+  // 初始化时从后端拉取已有任务
+  loadGlobalTasks()
+
   loadPendingQueue()
 
   document.addEventListener('keydown', handleGlobalKeydown)
   document.addEventListener('click', closeContextMenu)
 })
+
+// 💡 debug hook: 随时可查前端状态池
+watch(globalTasks, (val) => {
+  ;(window as any).__debugState = {
+    globalTasks: JSON.parse(JSON.stringify(val)),
+    globalTasksCount: val.length,
+    updatedAt: new Date().toISOString(),
+  }
+}, { deep: true })
+
+async function loadGlobalTasks() {
+  try {
+    const raw = await (window as any)['go']['main']['App']['GetGlobalTasks']()
+    LogPrint('[GLOBAL-TASK-BAR] 🔍 GetGlobalTasks returned: ' + raw)
+    if (raw && raw !== '[]') {
+      const tasks = JSON.parse(raw)
+      globalTasks.value.length = 0
+      tasks.forEach((t: any) => globalTasks.value.push(t))
+      LogPrint('[GLOBAL-TASK-BAR] 📋 loaded ' + globalTasks.value.length + ' tasks from backend')
+    }
+  } catch (e) {
+    LogPrint('[GLOBAL-TASK-BAR] ❌ GetGlobalTasks error: ' + e)
+  }
+}
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleGlobalKeydown)
@@ -874,6 +931,19 @@ function getSEActionCount(msg: any): number | null {
 
 function getSEActions(msg: any): any[] | null {
   try {
+    const execData = (msg as any)._execData
+    if (execData?.actions && Array.isArray(execData.actions) && execData.actions.length > 0) {
+      return execData.actions.map((a: any) => ({
+        type: a.type,
+        path: a.path || a.label || '',
+        command: a.command || '',
+        status: a.status || 'pending',
+        content: a.content,
+        output: a.output,
+        duration: a.duration,
+        size: a.content ? new Blob([a.content]).size : undefined
+      }))
+    }
     const content = msg.content || ''
     const jsonMatch = content.match(/\{[\s\S]*"actions"[\s]*:\s*\[[\s\S]*\][\s]*\}/)
     if (jsonMatch) {
@@ -882,7 +952,7 @@ function getSEActions(msg: any): any[] | null {
         return parsed.actions
       }
     }
-    
+
     const directMatch = content.match(/^\{[\s\S]*\}$/)
     if (directMatch) {
       const parsed = JSON.parse(directMatch[0])
@@ -895,6 +965,25 @@ function getSEActions(msg: any): any[] | null {
   } catch (e) {
     return null
   }
+}
+
+function getSEShellOutput(msg: any): string {
+  const execData = (msg as any)._execData
+  if (!execData?.outputs) return ''
+  return execData.outputs.map((o: any) => {
+    let line = ''
+    if (o.command) line += '$ ' + o.command + '\n'
+    if (o.output) line += o.output
+    return line
+  }).filter(Boolean).join('\n')
+}
+
+function onOpenFileInEditor(data: { path: string }) {
+  emit('open-file-in-editor', data)
+}
+
+function onRunInTerminal(data: { command: string }) {
+  emit('run-in-terminal', data)
 }
 
 function renderSEText(msg: any): string {
@@ -1867,8 +1956,8 @@ defineExpose({ toggleSearch })
 }
 
 .global-task-bar-wrapper {
-  border-top: 1px solid #e5e7eb;
-  background: #ffffff;
+  border-top: 1px solid rgba(128,128,128,0.1);
+  background: transparent;
 }
 
 .pm-waiting-bar {

@@ -150,6 +150,10 @@ export function GetGitStatus() {
   return window['go']['main']['App']['GetGitStatus']();
 }
 
+export function GetGlobalTasks() {
+  return window['go']['main']['App']['GetGlobalTasks']();
+}
+
 export function GetLogs() {
   return window['go']['main']['App']['GetLogs']();
 }

@@ -12,15 +12,18 @@ import (
 type EventCallback func(eventName string, data interface{})
 
 type TaskManager struct {
-	mu      sync.RWMutex
-	tasks   map[string]*types.GlobalTask
-	emitFn  EventCallback
+	mu          sync.RWMutex
+	tasks       map[string]*types.GlobalTask
+	emitFn      EventCallback
+	LogFn       func(format string, args ...interface{})
+	lastTaskIDs map[string]string // role -> last task id
 }
 
 func NewTaskManager(emitFn EventCallback) *TaskManager {
 	return &TaskManager{
-		tasks:  make(map[string]*types.GlobalTask),
-		emitFn: emitFn,
+		tasks:       make(map[string]*types.GlobalTask),
+		emitFn:      emitFn,
+		lastTaskIDs: make(map[string]string),
 	}
 }
 
@@ -37,9 +40,21 @@ func (tm *TaskManager) CreateTask(description, role string) *types.GlobalTask {
 	}
 	tm.mu.Lock()
 	tm.tasks[id] = task
+	tm.lastTaskIDs[role] = id
 	tm.mu.Unlock()
+	tm.log("[TASK-MANAGER-1] CreateTask: id=%s desc=%q role=%s", id, description, role)
 	tm.emit("task_added", task)
 	return task
+}
+
+func (tm *TaskManager) SetEmitFn(fn EventCallback) {
+	tm.emitFn = fn
+}
+
+func (tm *TaskManager) log(format string, args ...interface{}) {
+	if tm.LogFn != nil {
+		tm.LogFn(format, args...)
+	}
 }
 
 func (tm *TaskManager) GetTask(id string) (*types.GlobalTask, bool) {
@@ -64,6 +79,7 @@ func (tm *TaskManager) UpdateStatus(id, status string) {
 	defer tm.mu.Unlock()
 	t, ok := tm.tasks[id]
 	if !ok {
+		tm.log("[TASK-MANAGER-2] UpdateStatus: task not found id=%s status=%s", id, status)
 		return
 	}
 	t.Status = status
@@ -72,6 +88,7 @@ func (tm *TaskManager) UpdateStatus(id, status string) {
 		now := time.Now()
 		t.CompletedAt = &now
 	}
+	tm.log("[TASK-MANAGER-2] UpdateStatus: id=%s desc=%q status=%s", id, t.Description, status)
 	tm.emit("task_updated", t)
 }
 
@@ -91,6 +108,36 @@ func (tm *TaskManager) ClearDone() {
 	}
 	tm.mu.Unlock()
 	tm.emit("tasks_cleared", nil)
+}
+
+func (tm *TaskManager) ClearTasks() {
+	tm.mu.Lock()
+	tm.tasks = make(map[string]*types.GlobalTask)
+	tm.mu.Unlock()
+	tm.log("[TASK-MANAGER] ClearTasks: all tasks cleared")
+	tm.emit("tasks_cleared", nil)
+}
+
+// CompleteLastTaskByRole 标记指定角色的最后一个任务为完成
+func (tm *TaskManager) CompleteLastTaskByRole(role string) {
+	tm.mu.Lock()
+	id, ok := tm.lastTaskIDs[role]
+	if !ok {
+		tm.mu.Unlock()
+		return
+	}
+	task, exists := tm.tasks[id]
+	if !exists {
+		tm.mu.Unlock()
+		return
+	}
+	task.Status = "done"
+	now := time.Now()
+	task.UpdatedAt = now
+	task.CompletedAt = &now
+	tm.mu.Unlock()
+	tm.log("[TASK-MANAGER] CompleteLastTaskByRole: role=%s id=%s", role, id)
+	tm.emit("task_updated", task)
 }
 
 func (tm *TaskManager) emit(name string, data interface{}) {

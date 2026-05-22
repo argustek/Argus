@@ -54,6 +54,9 @@ func main() {
 		case "--recover":
 			handleCLICommand(app, "recover")
 			return
+		case "--dump-tasks":
+			// fall through to wails.Run → SingleInstanceLock → 查询运行中实例
+			break
 		case "--send":
 			break
 		default:
@@ -64,6 +67,7 @@ func main() {
 			fmt.Println("  --memory         查看记忆系统状态")
 			fmt.Println("  --monitor        查看 C 监控状态")
 			fmt.Println("  --recover        强制恢复未完成任务")
+			fmt.Println("  --dump-tasks     查看全局任务列表")
 			return
 		}
 	}
@@ -117,6 +121,12 @@ func main() {
 						msg := secondArgs[i+1]
 						fmt.Printf("[SecondInstance] 收到消息: %s\n", msg)
 						app.SendMessage(msg)
+						return
+					}
+					if arg == "--dump-tasks" {
+						tasksJSON := app.GetGlobalTasks()
+						app.chatManager.WriteDebugLog("[DUMP-TASKS] " + tasksJSON)
+						fmt.Println("[SecondInstance] [DUMP-TASKS] " + tasksJSON)
 						return
 					}
 				}
@@ -187,6 +197,10 @@ func handleCLICommand(app *App, command string) {
 		printMemoryStatus(app)
 	case "monitor":
 		printMonitorStatus(app)
+	case "dump-tasks":
+		fmt.Println("\n📋 ===== 全局任务列表 =====\n")
+		fmt.Println(app.GetGlobalTasks())
+		fmt.Println()
 	case "recover":
 		forceRecoverTask(app)
 	}

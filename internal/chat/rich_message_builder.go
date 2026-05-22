@@ -200,6 +200,32 @@ func (b *RichMessageBuilder) GetLastShellTimestamp() int64 {
 	return b.current.shells[len(b.current.shells)-1].Timestamp
 }
 
+func (b *RichMessageBuilder) ReplaceTaskList(taskId string, taskDefs []types.TaskItemDef) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.current == nil || b.current.taskList == nil || b.current.taskList.ID != taskId {
+		return
+	}
+	items := make([]types.TaskItem, len(taskDefs))
+	for i, t := range taskDefs {
+		items[i] = types.TaskItem{
+			ID:     fmt.Sprintf("t%d", i+1),
+			Text:   t.Text,
+			Status: "pending",
+		}
+	}
+	b.current.taskList.Tasks = items
+	tasksData := make([]map[string]interface{}, len(items))
+	for i, item := range items {
+		tasksData[i] = map[string]interface{}{
+			"id": item.ID, "text": item.Text, "status": item.Status,
+		}
+	}
+	b.emitFunc("tasklist_replace", map[string]interface{}{
+		"taskId": taskId, "tasks": tasksData,
+	})
+}
+
 func (b *RichMessageBuilder) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()

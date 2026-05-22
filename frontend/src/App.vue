@@ -548,6 +548,14 @@ onMounted(async () => {
     }
   })
 
+  EventsOn('tasklist_replace', (data: { taskId: string; tasks: Array<{id:string;text:string;status:string}> }) => {
+    const rm = window.__richMessages?.[data.taskId]
+    if (rm?.taskList) {
+      rm.taskList.tasks = data.tasks.map(t => ({ ...t }))
+      EventsEmit('rich-message-update', data.taskId)
+    }
+  })
+
   EventsOn('tasklist_complete', (data: { taskId: string; status: string; result?: { text?: string } }) => {
     const rm = window.__richMessages?.[data.taskId]
     if (rm) {

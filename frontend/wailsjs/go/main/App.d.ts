@@ -79,6 +79,8 @@ export function GetFileDiff(arg1:string):Promise<Record<string, any>>;
 
 export function GetGitStatus():Promise<Array<main.GitStatusEntry>>;
 
+export function GetGlobalTasks():Promise<string>;
+
 export function GetLogs():Promise<Array<string>>;
 
 export function GetMessages():Promise<Array<main.ChatMessage>>;

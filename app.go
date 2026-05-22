@@ -661,6 +661,9 @@ func (a *App) initChatManagerCLI() {
 
 	a.chatManager = chatManager
 	a.chatManager.SetDingTalkEnabled(a.isDingTalkEnabled())
+	if a.ctx != nil {
+		a.chatManager.SetContext(a.ctx)
+	}
 	// 初始化AP配置
 	if a.config.APEnabled {
 		if a.config.APConfig != nil && a.config.APConfig.BaseURL != "" && a.config.APConfig.APIKey != "" {
@@ -1297,6 +1300,11 @@ func (a *App) ClearMessages() {
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()
 	a.addLog("✅ 已清空聊天记录")
+
+	// 清空全局任务列表
+	if a.chatManager != nil {
+		a.chatManager.ClearGlobalTasks()
+	}
 
 	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 }
@@ -2650,6 +2658,20 @@ func (a *App) GetPendingQueue() []string {
 		return []string{}
 	}
 	return a.chatManager.GetPendingQueue()
+}
+
+// GetGlobalTasks 获取当前所有全局任务（供前端/调试查询）
+func (a *App) GetGlobalTasks() string {
+	if a.chatManager == nil {
+		return "[]"
+	}
+	tasks := a.chatManager.GetAllTasks()
+	data, err := json.Marshal(tasks)
+	if err != nil {
+		a.addLog("[GetGlobalTasks] json marshal error")
+		return "[]"
+	}
+	return string(data)
 }
 
 // CheckUnfinishedTask 检查是否有未完成任务（前端启动时调用）
