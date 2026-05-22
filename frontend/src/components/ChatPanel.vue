@@ -79,25 +79,22 @@
           </div>
         </template>
 
-        <!-- SE 消息 - 结构化渲染 -->
+        <!-- SE 消息 - 朴素文本模式 -->
         <template v-else-if="msg.role === 'se'">
           <div class="message-header">
             <span class="role-badge se">SE</span>
             <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
-            <span v-if="getSEActionCount(msg)" class="action-count">已执行 {{ getSEActionCount(msg) }} 个操作</span>
           </div>
-          <div class="message-content se-content structured-msg">
-            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
-            <div v-else>
-            <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
-              <span class="summary-text">{{ getSummary(msg) }}</span>
-              <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
+          <div class="message-content se-content">
+            <div v-if="getSEActions(msg)" class="se-simple-list">
+              <div v-for="(action, i) in getSEActions(msg)" :key="i" class="se-line">
+                <span class="se-dot">{{ action.status === 'error' ? '✗' : '✓' }}</span>
+                <span v-if="action.type === 'write_file'">创建 <code>{{ action.path }}</code></span>
+                <span v-else-if="action.type === 'exec'">执行 <code>{{ action.command || action.path }}</code></span>
+                <span v-else>{{ action.type }} {{ action.path || action.command }}</span>
+              </div>
             </div>
-            <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
-            <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
-              {{ getPreviewText(msg) }}
-            </div>
-            </div>
+            <div v-else class="se-plain" v-html="renderSEText(msg)"></div>
           </div>
         </template>
 
@@ -241,6 +238,20 @@
       </div>
     </div>
 
+    <!-- 全局任务栏 (opencode 模式) -->
+    <GlobalTaskBar
+      :tasks="globalTasks"
+      @task-click="handleTaskClick"
+      class="global-task-bar-wrapper"
+    />
+
+    <!-- PM等待回复状态条 -->
+    <div v-if="pmWaiting" class="pm-waiting-bar" @click="focusInput">
+      <span class="pm-waiting-icon">🚨</span>
+      <span class="pm-waiting-text">PM 正在等待您的回复... 请在下方输入框回答</span>
+      <button class="pm-waiting-dismiss" @click.stop="pmWaiting = false">✕</button>
+    </div>
+
     <!-- 输入框 -->
     <div class="input-area">
       <div class="input-wrapper" :class="{ focused: inputFocused }">
@@ -333,9 +344,11 @@ const props = defineProps<{
   supportsMultimodal?: boolean
 }>()
 
-const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message'])
+const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message', 'open-file-in-editor', 'run-in-terminal'])
 
 const inputMessage = ref('')
+const globalTasks = ref<GlobalTask[]>([])
+const pmWaiting = ref(false)
 const showThinking = ref(false)
 const currentThinkingStep = ref(0)
 const messagesRef = ref<HTMLElement>()
@@ -396,8 +409,8 @@ const searchInputRef = ref<HTMLInputElement>()
 
 // #2 CLI相关
 import CliPanel from './CliPanel.vue'
-import RichMessage from './chat/RichMessage.vue'
-import type { RichMessage as RichMessageType } from '../../types/rich-message'
+import GlobalTaskBar from './GlobalTaskBar.vue'
+import type { GlobalTask } from '../../types/task'
 const showCli = ref(false)
 const cliCommand = ref('')
 
@@ -564,6 +577,25 @@ onMounted(() => {
     currentThinkingText.value = data.text
   })
 
+  EventsOn('task_added', (data: any) => {
+    LogPrint('[GLOBAL-TASK-BAR] 📥 task_added received: ' + JSON.stringify(data))
+    globalTasks.push({ id: data.id, description: data.description, role: data.role || 'SE', status: 'doing' })
+    LogPrint('[GLOBAL-TASK-BAR] 📋 globalTasks now: ' + globalTasks.length)
+  })
+
+  EventsOn('task_updated', (data: any) => {
+    LogPrint('[GLOBAL-TASK-BAR] 📥 task_updated received: ' + JSON.stringify(data))
+    const idx = globalTasks.findIndex(t => t.id === data.id)
+    if (idx >= 0) {
+      globalTasks[idx].status = data.status || 'done'
+    }
+  })
+
+  EventsOn('pm-waiting-decision', () => {
+    pmWaiting.value = true
+    LogPrint('[PM-WAITING] 🚨 PM正在等待用户回复')
+  })
+
   loadPendingQueue()
 
   document.addEventListener('keydown', handleGlobalKeydown)
@@ -617,7 +649,12 @@ const thinkingSteps = computed(() => [
   { icon: '✅', text: t('chatPanel.verifying') }
 ])
 
+function handleTaskClick(task: GlobalTask) {
+  console.log('[ChatPanel] 任务点击:', task)
+}
+
 function handleSend() {
+  pmWaiting.value = false
   if (inputMessage.value.trim()) {
     emit('send-message', inputMessage.value)
     inputMessage.value = ''
@@ -625,6 +662,10 @@ function handleSend() {
   } else {
     emit('send-message', '')
   }
+}
+
+function focusInput() {
+  textareaRef.value?.focus()
 }
 
 function handleEnterKey(e: KeyboardEvent) {
@@ -829,6 +870,49 @@ function getPreviewText(msg: any): string {
 function getSEActionCount(msg: any): number | null {
   const match = (msg.content || '').match(/已执行操作[:\s]*(\d+)/)
   return match ? parseInt(match[1]) : null
+}
+
+function getSEActions(msg: any): any[] | null {
+  try {
+    const content = msg.content || ''
+    const jsonMatch = content.match(/\{[\s\S]*"actions"[\s]*:\s*\[[\s\S]*\][\s]*\}/)
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0])
+      if (parsed.actions && Array.isArray(parsed.actions) && parsed.actions.length > 0) {
+        return parsed.actions
+      }
+    }
+    
+    const directMatch = content.match(/^\{[\s\S]*\}$/)
+    if (directMatch) {
+      const parsed = JSON.parse(directMatch[0])
+      if (parsed.actions && Array.isArray(parsed.actions)) {
+        return parsed.actions
+      }
+    }
+    
+    return null
+  } catch (e) {
+    return null
+  }
+}
+
+function renderSEText(msg: any): string {
+  const c = msg.content || ''
+  if (!c) return ''
+  let text = c
+  text = text.replace(/\{[\s\S]*"actions"[\s]*:\s*\[[\s\S]*\][\s\S]*\}/g, '')
+  text = text.replace(/^\{[\s\S]*\}$/g, '')
+  text = text.replace(/```json[\s\S]*?```/g, '')
+  const lines = text.split('\n').filter(l => {
+    const t = l.trim()
+    if (!t) return false
+    if (t.match(/^\[.*\]$/) && t.includes(':')) return false
+    if (t.match(/^\{.*\}$/)) return false
+    if (t.match(/"task_status"|"review_result"|"approval_result"/)) return false
+    return true
+  })
+  return lines.map(l => `<div class="se-plain-line">${escapeHtml(l)}</div>`).join('')
 }
 
 function renderStructured(msg: any): string {
@@ -1183,6 +1267,12 @@ defineExpose({ toggleSearch })
 .user-content { color: var(--text-primary); }
 .pm-content { color: #e0d4ff; }
 .se-content { color: #d1fae5; }
+.se-simple-list { display: flex; flex-direction: column; gap: 2px; }
+.se-line { display: flex; align-items: center; gap: 6px; font-size: 13px; line-height: 1.6; }
+.se-dot { font-size: 12px; flex-shrink: 0; width: 14px; }
+.se-line code { font-family: Consolas, monospace; font-size: 12px; background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 2px; }
+.se-plain { font-size: 13px; line-height: 1.6; }
+.se-plain-line { padding: 2px 0; }
 .ap-content { color: #fef3c7; }
 .mc-content { color: var(--text-secondary); font-size: 12px; }
 .error-content { color: #fca5a5; }
@@ -1774,6 +1864,39 @@ defineExpose({ toggleSearch })
 @media (max-width: 700px) {
   .shortcut-hint { display: none; }
   .msg-timestamp { opacity: 0.4; }
+}
+
+.global-task-bar-wrapper {
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+}
+
+.pm-waiting-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  border-top: 1px solid #f59e0b;
+  cursor: pointer;
+  font-size: 13px;
+  animation: pulse-warning 2s infinite;
+}
+.pm-waiting-bar:hover { background: linear-gradient(135deg, #fde68a, #fcd34d); }
+.pm-waiting-icon { font-size: 16px; flex-shrink: 0; }
+.pm-waiting-text { color: #92400e; font-weight: 500; }
+.pm-waiting-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #92400e;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+}
+@keyframes pulse-warning {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 </style>
 

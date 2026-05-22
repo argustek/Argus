@@ -54,6 +54,8 @@
         @send-message="handleSendMessage"
         @expand-thinking="toggleThinking"
         @upload-file="handleUploadFile"
+        @open-file-in-editor="handleOpenFileInEditor"
+        @run-in-terminal="handleRunInTerminal"
         class="chat-panel"
         :style="{ width: chatWidth + 'px' }"
       />
@@ -328,7 +330,12 @@ onMounted(async () => {
     }
 
     // ✅ 增强版流式消息替换逻辑：检查最近3条消息
-    if (streamingRole.value === msg.role || msg.role === 'pm' || msg.role === 'se' || msg.role === 'ap') {
+    // 注意：PM消息由专用pm_message通道处理，new-message不再处理PM防止覆盖
+    if (msg.role === 'pm') {
+      LogPrint(`[NEW-MSG] ⏭️ PM消息跳过(由pm_message通道处理): content="${(msg.content||'').substring(0,60)}"`)
+      return
+    }
+    if (streamingRole.value === msg.role || msg.role === 'se' || msg.role === 'ap') {
       const lastMsgs = messages.value.slice(-3).reverse()
       const streamingIdx = lastMsgs.findIndex(m =>
         m.role === msg.role && ((m as any)._streaming || (m as any).content === msg.content)
@@ -372,9 +379,10 @@ onMounted(async () => {
     }
   })
 
-  // 监听AI流式输出事件
+  // 监听AI流式输出事件（注意：PM有专用pm_message通道，这里不处理PM）
   EventsOff('ai-stream-chunk')
   EventsOn('ai-stream-chunk', (data: { role: string; delta: string }) => {
+    if (data.role === 'pm') return
     if (streamingRole.value !== data.role) {
       streamingRole.value = data.role
       messages.value.push({
@@ -887,6 +895,39 @@ function openFile(file: any) {
 function openFileInEditor(filePath: string) {
   const fileName = filePath.split(/[/\\]/).pop() || 'untitled'
   openFile({ name: fileName, path: filePath })
+}
+
+// 全局任务追踪器
+const globalTasks = ref<GlobalTask[]>([])
+
+// 处理来自 SERichMessage 的文件打开请求（事件通信机制）
+async function handleOpenFileInEditor(data: { path: string }) {
+  console.log('[App] 打开文件到编辑器:', data.path)
+  
+  activeWindows.editor = true
+  
+  try {
+    const content = await ReadFile(data.path)
+    EventsEmit('editor:open-file', {
+      path: data.path,
+      content: content,
+      timestamp: new Date().toISOString()
+    })
+  } catch (error) {
+    console.error('[App] 读取文件失败:', error)
+  }
+}
+
+// 处理来自 SERichMessage 的命令执行请求（事件通信机制）
+function handleRunInTerminal(data: { command: string }) {
+  console.log('[App] 在终端执行:', data.command)
+  
+  activeWindows.terminal = true
+  
+  EventsEmit('terminal:execute', {
+    command: data.command,
+    timestamp: new Date().toISOString()
+  })
 }
 
 // 恢复未完成任务

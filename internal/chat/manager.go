@@ -18,6 +18,7 @@ import (
 	"argus/internal/executor"
 	"argus/internal/i18n"
 	"argus/internal/monitor"
+	"argus/internal/task"
 	"argus/internal/types"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -121,6 +122,7 @@ type Manager struct {
 	envMemory       *EnvMemory
 	terminalWriter  func(string) error
 	sseBridge       *SSEBridge
+	taskManager     *task.TaskManager
 	backendStatus   *BackendStatus
 	ReplyLanguage   string
 	dingTalkEnabled bool
@@ -718,6 +720,9 @@ func (m *Manager) SetTerminalWriter(writer func(string) error) {
 // SetContext 设置Wails context（供App调用）
 func (m *Manager) SetContext(ctx context.Context) {
 	m.ctx = ctx
+	if m.taskManager == nil {
+		m.taskManager = task.NewTaskManager(m.emitWailsEvent)
+	}
 }
 
 // StopCMonitor 停止ChatManager中的C监控
@@ -1255,12 +1260,20 @@ func (m *Manager) handleToPM(content string) (err error) {
 		if len(taskPreview) > 80 {
 			taskPreview = taskPreview[:80] + "..."
 		}
-		m.richBuilder.StartTaskList("pm", "PM 分配任务", []types.TaskItemDef{
-			{Text: "分析用户需求"},
-			{Text: "分配 SE 任务"},
-			{Text: "审核 SE 结果"},
-		})
-		m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", taskPreview)
+		isLikelyChat := len(content) < 20 || (!strings.Contains(content, "@SE") &&
+			!strings.Contains(content, "创建") && !strings.Contains(content, "执行") &&
+			!strings.Contains(content, "编写") && !strings.Contains(content, "实现") &&
+			!strings.Contains(content, "修改") && !strings.Contains(content, "修复"))
+		if !isLikelyChat {
+			m.richBuilder.StartTaskList("pm", "PM 分配任务", []types.TaskItemDef{
+				{Text: "分析用户需求"},
+				{Text: "分配 SE 任务"},
+				{Text: "审核 SE 结果"},
+			})
+			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", taskPreview)
+		} else {
+			fmt.Printf("[handleToPM] 💬 检测到闲聊模式(短消息/无任务关键词)，跳过RichMessage\n")
+		}
 	}
 
 	// 🔴 Wails事件: PM开始处理（前端用 runtime.EventsOn 监听）
@@ -2245,6 +2258,17 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 		}())
 
+		var currentTask *types.GlobalTask
+		if m.taskManager != nil {
+			desc := fmt.Sprintf("%s %s", map[string]string{
+				"write_file": "创建",
+				"edit_file":   "修改",
+				"exec":        "执行",
+				"read_file":   "读取",
+			}[action.Type], actionLabel)
+			currentTask = m.taskManager.CreateTask(desc, "SE")
+		}
+
 		m.emitWailsEvent("exec_start", map[string]interface{}{
 			"executor": "se",
 			"index":    i + 1,
@@ -2270,6 +2294,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"status":   "blocked",
 					"error":    errMsg,
 				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
 				continue
 			}
 			if err := m.seExecutor.WriteFile(action.Path, action.Content); err != nil {
@@ -2290,6 +2317,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"output":    errMsg,
 					"exit_code": -1,
 				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
 				continue
 			}
 			fmt.Printf("[Action] Write file: %s\n", action.Path)
@@ -2300,6 +2330,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"label":    actionLabel,
 				"status":   "done",
 			})
+			if currentTask != nil {
+				m.taskManager.UpdateStatus(currentTask.ID, "done")
+			}
 
 		case "exec":
 			if m.configManager != nil {
@@ -2323,6 +2356,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 						"exit_code": -1,
 						"blocked":   true,
 					})
+					if currentTask != nil {
+						m.taskManager.UpdateStatus(currentTask.ID, "failed")
+					}
 					continue
 				}
 				if level == types.CmdBlockAsk {
@@ -2347,6 +2383,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 							"exit_code": -1,
 							"blocked":   true,
 						})
+						if currentTask != nil {
+							m.taskManager.UpdateStatus(currentTask.ID, "failed")
+						}
 						continue
 					}
 				}
@@ -2375,6 +2414,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"output":    output + "\n" + errMsg,
 					"exit_code": -1,
 				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
 				return fmt.Errorf("exec failed: %v, output: %s", err, output)
 			}
 			fmt.Printf("[Action] Exec: %s\nOutput: %s\n", action.Command, output)
@@ -2390,6 +2432,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"label":    actionLabel,
 				"status":   "done",
 			})
+			if currentTask != nil {
+				m.taskManager.UpdateStatus(currentTask.ID, "done")
+			}
 			if seTaskId != "" && m.richBuilder != nil {
 				m.richBuilder.PushShellDone("se", seTaskId, 0, "", "done")
 			}
@@ -2424,6 +2469,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"status":   "blocked",
 					"error":    errMsg,
 				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
 				continue
 			}
 			content, err := m.seExecutor.ReadFile(action.Path)
@@ -2436,6 +2484,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"status":   "error",
 					"error":    err.Error(),
 				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
 				return fmt.Errorf("read file failed: %v", err)
 			}
 			fmt.Printf("[Action] Read file: %s (%d bytes)\n", action.Path, len(content))

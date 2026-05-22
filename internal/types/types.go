@@ -72,6 +72,22 @@ type Message struct {
 	RichTaskID string    `json:"_richTaskId,omitempty"` // 三层模型任务ID（用于前端渲染RichMessage）
 }
 
+// GlobalTask 全局任务（用于底部任务栏追踪）
+type GlobalTask struct {
+	ID              string                 `json:"id"`
+	Description     string                 `json:"description"` // 具体任务描述（如"创建 hello.go"、"执行 go run"）
+	Role            string                 `json:"role"`         // PM | SE | AP | USR
+	Status          string                 `json:"status"`       // pending | doing | done | failed
+	Progress        string                 `json:"progress,omitempty"`       // 进度文本（如"3/5"）
+	ProgressPercent int                    `json:"progressPercent,omitempty"` // 百分比 0-100
+	MessageID       string                 `json:"messageId,omitempty"`      // 关联消息ID（用于跳转）
+	ParentID        string                 `json:"parentId,omitempty"`       // 父任务ID
+	CreatedAt       time.Time              `json:"createdAt"`
+	UpdatedAt       time.Time              `json:"updatedAt"`
+	CompletedAt     *time.Time             `json:"completedAt,omitempty"`
+	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+}
+
 // Task 任务
 type Task struct {
 	ID           string   `json:"id"`
