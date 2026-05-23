@@ -494,6 +494,36 @@ onMounted(async () => {
       currentExecMsg._streaming = false
       currentExecMsg = null
     }
+    const seMsgs = messages.value.filter(m => m.role === 'se')
+    for (const msg of seMsgs) {
+      if ((msg as any)._streaming) {
+        ;(msg as any)._streaming = false
+      }
+    }
+    LogPrint('[EXEC-DONE] 所有SE消息_streaming已重置')
+  })
+
+  EventsOn('pm_review_completed', (data: { taskId: string; status: string; result: string }) => {
+    const pmMsgs = messages.value.filter(m => m.role === 'pm')
+    for (const msg of pmMsgs) {
+      if ((msg as any)._streaming) {
+        ;(msg as any)._streaming = false
+      }
+    }
+    streamingRole.value = ''
+    aiThinking.value = false
+    LogPrint(`[PM-REVIEW] PM审核完成: status=${data.status}`)
+  })
+
+  EventsOn('pm_streaming_done', () => {
+    const pmMsgs = messages.value.filter(m => m.role === 'pm')
+    for (const msg of pmMsgs) {
+      if ((msg as any)._streaming) {
+        ;(msg as any)._streaming = false
+      }
+    }
+    streamingRole.value = ''
+    LogPrint(`[PM-STREAM] PM消息流式输出完成`)
   })
 
   EventsOn('se-file-written', async (relPath: string) => {

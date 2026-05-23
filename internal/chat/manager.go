@@ -2894,6 +2894,7 @@ func (m *Manager) addPMToUserMsg(content string) {
 
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "pm_message", map[string]string{"delta": content})
+		runtime.EventsEmit(m.ctx, "pm_streaming_done", map[string]interface{}{"content": content})
 	}
 
 	isCompletion := strings.Contains(content, "✅") || strings.Contains(content, "完成") || strings.Contains(content, "已完成")
@@ -3467,15 +3468,21 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 	})
 	var pmReviewResult string
 	defer func() {
-		status := "completed"
+		status := "done"
 		if pmReviewResult == "" {
-			status = "error"
-			pmReviewResult = i18n.T("err.pm_review_failed", fmt.Errorf("no response"))
+			pmReviewResult = i18n.T("msg.task_complete")
 		}
 		m.richBuilder.CompleteTaskList(pmTaskId, status, &types.ResultBlock{
 			Text: pmReviewResult,
 		})
 		m.richBuilder.Reset()
+		if m.ctx != nil {
+			runtime.EventsEmit(m.ctx, "pm_review_completed", map[string]interface{}{
+				"taskId": pmTaskId,
+				"status": status,
+				"result":  pmReviewResult,
+			})
+		}
 	}()
 
 	m.richBuilder.UpdateTask(pmTaskId, 0, "running")
