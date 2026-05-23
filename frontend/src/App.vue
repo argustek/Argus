@@ -416,6 +416,18 @@ onMounted(async () => {
     }
   })
 
+  // 监听AP消息事件（AP审批结果）
+  EventsOff('ap_message')
+  EventsOn('ap_message', (data: { delta: string }) => {
+    if (!data.delta) return
+    messages.value.push({
+      role: 'ap',
+      content: data.delta,
+      timestamp: Date.now()
+    } as any)
+    LogPrint(`[AP-MSG] AP消息: ${(data.delta||'').substring(0,80)}`)
+  })
+
   // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）
   EventsOn('messages-cleared', () => {
     messages.value = []
@@ -589,7 +601,9 @@ onMounted(async () => {
   })
 
   EventsOn('shell_done', (data: { roleId: string; taskId: string; exitCode: number; duration: string; status: string }) => {
+    console.log('[shell_done] 收到事件:', JSON.stringify(data))
     const rm = window.__richMessages?.[data.taskId]
+    console.log('[shell_done] rm存在:', !!rm, 'shells数量:', rm?.shells?.length)
     if (rm && rm.shells.length > 0) {
       const lastShell = rm.shells[rm.shells.length - 1]
       lastShell.exitCode = data.exitCode

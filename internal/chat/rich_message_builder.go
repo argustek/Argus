@@ -149,7 +149,9 @@ func (b *RichMessageBuilder) PushShellOutput(taskId, output string) {
 func (b *RichMessageBuilder) PushShellDone(role, taskId string, exitCode int, duration string, status string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	fmt.Printf("[RichBuilder] PushShellDone role=%s taskId=%s status=%s shells=%d\n", role, taskId, status, len(b.current.shells))
 	if b.current == nil || len(b.current.shells) == 0 {
+		fmt.Printf("[RichBuilder] ⚠️ PushShellDone 跳过: current=nil或shells为空\n")
 		return
 	}
 	last := &b.current.shells[len(b.current.shells)-1]
@@ -168,6 +170,11 @@ func (b *RichMessageBuilder) CompleteTaskList(taskId, status string, result *typ
 	defer b.mu.Unlock()
 	if b.current == nil || b.current.taskList == nil {
 		return
+	}
+	for i := range b.current.shells {
+		if b.current.shells[i].Status == "running" {
+			b.current.shells[i].Status = "done"
+		}
 	}
 	b.current.taskList.Status = status
 	b.current.taskList.EndedAt = time.Now().Unix()

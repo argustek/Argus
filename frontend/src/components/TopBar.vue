@@ -84,10 +84,10 @@
       </div>
       <div class="divider"></div>
       <div class="ai-status">
-        <span class="status-item pm" :class="{ busy: aiStatus.pmBusy }" title="PM">PM</span>
-        <span class="status-item mc" :class="{ 'mc-running': aiStatus.cBusy }" title="MC">MC</span>
-        <span class="status-item se" :class="{ busy: aiStatus.seBusy }" title="SE">SE</span>
-        <span class="status-item ap" :class="{ busy: aiStatus.apBusy }" title="AP 审批者">AP</span>
+        <span class="status-item pm" :class="{ busy: aiStatus.pmStatus === 'busy' }" title="PM">PM</span>
+        <span class="status-item mc" :class="{ 'mc-running': aiStatus.cRunning }" title="MC">MC</span>
+        <span class="status-item se" :class="{ busy: aiStatus.seStatus === 'busy' }" title="SE">SE</span>
+        <span class="status-item ap" :class="{ busy: aiStatus.apStatus === 'busy' }" title="AP 审批者">AP</span>
       </div>
       <button class="icon-btn" @click.stop="$emit('open-settings')" :title="t('topBar.settings')">⚙️</button>
       <div class="divider"></div>
@@ -152,7 +152,7 @@ const { t } = useI18n()
 
 const props = defineProps<{
   activeWindows: { fileTree: boolean; editor: boolean; terminal: boolean; changes: boolean }
-  aiStatus: { pmBusy: boolean; cBusy: boolean; seBusy: boolean; currentTask: string }
+  aiStatus: { pmStatus: string; seStatus: string; apStatus: string; cRunning: boolean; currentTask: string }
   workDir: string
   recentProjects: string[]
   cMonitorEnabled: boolean

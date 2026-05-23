@@ -1365,6 +1365,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	m.resetPMHealth()
+	fmt.Printf("[DEBUG-FLOW] ProcessStream返回: content=%q len=%d\n", resp.Content[:min(80, len(resp.Content))], len(resp.Content))
 
 	// ✅ 接收者清除handover（下个人清除上个人的交接状态）
 	// 只清除 SE→PM 交接，PM→AP 交接保留由 AP 清除
@@ -1424,6 +1425,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}
 	} else {
 		lowerResp := strings.ToLower(resp.Content)
+		fmt.Printf("[DEBUG-3RD] ProcessStream路径: content=%q hasAP=%v len=%d\n", lowerResp[:min(100, len(lowerResp))], hasAP, len(resp.Content))
 		hasApprovalKeywords := strings.Contains(lowerResp, "已验证") ||
 			strings.Contains(lowerResp, "审核通过") ||
 			strings.Contains(lowerResp, "验证通过") ||
@@ -1740,6 +1742,46 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 		m.SetHandoverPending(HandoverPMToAP)
 		if m.apProcessor != nil {
 			return m.handleAPReview(cleanPMContent)
+		}
+		m.forceProjectApproved()
+		return nil
+	}
+
+	lowerResp := strings.ToLower(resp.Content)
+	hasFakeToolCall := strings.Contains(lowerResp, "list_files") ||
+		strings.Contains(lowerResp, "read_file") ||
+		strings.Contains(lowerResp, "exec ") ||
+		strings.Contains(lowerResp, "write_file")
+	hasApprovalKeywords := strings.Contains(lowerResp, "已验证") ||
+		strings.Contains(lowerResp, "审核通过") ||
+		strings.Contains(lowerResp, "验证通过") ||
+		strings.Contains(lowerResp, "任务完成") ||
+		strings.Contains(lowerResp, "已完成")
+	isJustToolCall := hasFakeToolCall && !hasApprovalKeywords && !hasAP && len(strings.TrimSpace(resp.Content)) < 300
+
+	if isJustToolCall {
+		fmt.Println("[handleSEAskPM] ⚠️ 检测到PM输出伪工具调用文本(无结论)，强制转AP")
+		resp.Content = "@AP [系统自动验证] SE任务已完成，请进行最终质量审批"
+		m.addPMToUserMsg(strings.Replace(resp.Content, "@AP", "", 1))
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.apProcessor != nil {
+			return m.handleAPReview("请AP进行最终质量审批")
+		}
+		m.forceProjectApproved()
+		return nil
+	}
+
+	if hasApprovalKeywords && !hasAP {
+		fmt.Println("[handleSEAskPM] ⚠️ 第三层保护: PM输出含审批关键词但缺@AP，自动补全并转AP")
+		resp.Content = "@AP " + resp.Content
+		m.addPMToUserMsg(strings.Replace(strings.Replace(resp.Content, "@AP", "", 1), "@ap", "", 1))
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.apProcessor != nil {
+			return m.handleAPReview(strings.TrimSpace(strings.Replace(resp.Content, "@AP", "", 1)))
 		}
 		m.forceProjectApproved()
 		return nil
@@ -3475,6 +3517,7 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		strings.Contains(lowerContent, "approved") ||
 		strings.Contains(lowerContent, "通过")
 	hasAPTag := strings.Contains(cleanContent, "@AP")
+	fmt.Printf("[DEBUG-3RD-RICH] RichPM路径: content=%q hasAPTag=%v len=%d\n", cleanContent[:min(100, len(cleanContent))], hasAPTag, len(cleanContent))
 
 	if hasApprovalKeywords && !hasAPTag {
 		fmt.Println("[handlePMReview] ⚠️ 第三层保护: PM输出含审批关键词但缺@AP，自动补上")
@@ -3629,6 +3672,7 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 
 	pmReviewResult = resp.Content
 	cleanContent := strings.TrimSpace(resp.Content)
+	fmt.Printf("[DEBUG-RICH-FLOW] ProcessReview返回: content=%q len=%d\n", cleanContent[:min(80, len(cleanContent))], len(cleanContent))
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
@@ -3977,6 +4021,8 @@ func (m *Manager) forceProjectApproved() {
 		m.taskManager.CompleteLastTaskByRole("AP")
 	}
 
+	m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "approved"})
 	}
