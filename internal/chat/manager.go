@@ -2618,6 +2618,19 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		m.richBuilder.UpdateTask(seTaskId, 2, "done")
 		m.richBuilder.CompleteTaskList(seTaskId, "done", nil)
 	}
+
+	if m.ctx != nil {
+		fmt.Println("[executeSEActions] ✅ 发送 exec_completed 事件")
+		runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+			"executor":  "se",
+			"result":    "completed",
+			"status":    "completed",
+			"timestamp": time.Now().Unix(),
+		})
+	} else {
+		fmt.Println("[executeSEActions] ⚠️ m.ctx 为 nil，无法发送 exec_completed")
+	}
+
 	return nil
 }
 
