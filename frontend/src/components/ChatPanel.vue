@@ -131,8 +131,8 @@
           </div>
         </template>
 
-        <!-- 执行输出面板（通用：SE/PM均可） -->
-        <template v-if="(msg as any)._execData && !getRichMessage(msg)">
+        <!-- 执行输出面板（通用：SE/PM均可）—— 必须接在角色链上，禁止独立 v-if -->
+        <template v-else-if="(msg as any)._execData && !getRichMessage(msg)">
           <div class="message-header">
             <span class="role-badge" :class="(msg as any)._execData?.executor === 'pm' ? 'pm' : 'se'">
               {{ (msg as any)._execData?.executor === 'pm' ? '⚡ PM' : '⚡ SE' }}
@@ -166,7 +166,7 @@
         </template>
 
         <!-- 其他未捕获的消息（仅渲染已知role之外的fallback） -->
-        <template v-else-if="!['user','pm','se','mc','error'].includes(msg.role || '') && !(msg.role || '').startsWith('Sys_')">
+        <template v-else-if="!['user','pm','se','ap','mc','error'].includes(msg.role || '') && !(msg.role || '').startsWith('Sys_')">
           <div class="message-header">
             <span class="role-badge" :class="getRoleClass(msg.role)">{{ getRoleDisplayName(msg.role) }}</span>
           </div>
@@ -247,12 +247,14 @@
       class="global-task-bar-wrapper"
     />
 
-    <!-- PM等待回复状态条 -->
-    <div v-if="pmWaiting" class="pm-waiting-bar" @click="focusInput">
-      <span class="pm-waiting-icon">🚨</span>
-      <span class="pm-waiting-text">PM 正在等待您的回复... 请在下方输入框回答</span>
-      <button class="pm-waiting-dismiss" @click.stop="pmWaiting = false">✕</button>
-    </div>
+    <!-- 需求澄清（仅PM接收任务时触发） -->
+    <TaskClarify
+      :visible="clarifyVisible"
+      :questions="clarifyQuestions"
+      :is-follow-up="clarifyFollowUp"
+      @submit="handleClarifySubmit"
+      ref="clarifyRef"
+    />
 
     <!-- 输入框 -->
     <div class="input-area">
@@ -355,9 +357,12 @@ const globalTasks = ref<GlobalTask[]>([])
 const LogPrint = (msg: string) => {
   console.log('[ChatPanel] ' + msg)
 }
-const pmWaiting = ref(false)
 const showThinking = ref(false)
 const currentThinkingStep = ref(0)
+const clarifyVisible = ref(false)
+const clarifyQuestions = ref<Array<{ text: string; type: string; options?: any[] }>>([])
+const clarifyFollowUp = ref(false)
+const clarifyRef = ref<any>(null)
 const messagesRef = ref<HTMLElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const debugInfo = ref('')
@@ -417,6 +422,7 @@ const searchInputRef = ref<HTMLInputElement>()
 // #2 CLI相关
 import CliPanel from './CliPanel.vue'
 import GlobalTaskBar from './GlobalTaskBar.vue'
+import TaskClarify from './TaskClarify.vue'
 import SERichMessage from './chat/SERichMessage.vue'
 import type { GlobalTask } from '../../types/task'
 const showCli = ref(false)
@@ -600,9 +606,14 @@ onMounted(() => {
     }
   })
 
-  EventsOn('pm-waiting-decision', () => {
-    pmWaiting.value = true
-    LogPrint('[PM-WAITING] 🚨 PM正在等待用户回复')
+  EventsOn('task-clarify', (data: any) => {
+    LogPrint('[TASK-CLARIFY] 📋 收到需求澄清请求: ' + JSON.stringify(data))
+    if (data && data.questions && data.questions.length > 0) {
+      clarifyQuestions.value = data.questions
+      clarifyFollowUp.value = !!data.isFollowUp
+      clarifyVisible.value = true
+      if (clarifyRef.value) clarifyRef.value.reset()
+    }
   })
 
   EventsOn('debug-query', () => {
@@ -710,8 +721,13 @@ function handleTaskClick(task: GlobalTask) {
   console.log('[ChatPanel] 任务点击:', task)
 }
 
+function handleClarifySubmit(answers: Record<number, string | string[]>, custom?: string) {
+  LogPrint('[CLARIFY-SUBMIT] 用户回答: ' + JSON.stringify({ answers, custom }))
+  clarifyVisible.value = false
+  emit('send-message', JSON.stringify({ type: 'clarify', answers, custom }))
+}
+
 function handleSend() {
-  pmWaiting.value = false
   if (inputMessage.value.trim()) {
     emit('send-message', inputMessage.value)
     inputMessage.value = ''
@@ -743,17 +759,22 @@ function getChangeIcon(type: string): string {
 
 function getRoleDisplayName(role: string): string {
   const roleMap: Record<string, string> = { user: 'USR', pm: 'PM', se: 'SE', ap: 'AP', mc: 'MC', error: 'ERR', system: 'SYS' }
-  if (role?.startsWith('Sys_')) return roleMap[role.replace('Sys_', '')] || role.toUpperCase()
-  return roleMap[role] || role || 'UNKNOWN'
+  const lowerRole = (role || '').toLowerCase()
+  if (lowerRole.startsWith('sys_')) {
+    const sub = role.slice(4)
+    return roleMap[sub] || sub.toUpperCase() || 'SYS'
+  }
+  return roleMap[lowerRole] || role || 'UNKNOWN'
 }
 
 function getRoleClass(role: string): string {
-  if (role === 'pm') return 'pm'
-  if (role === 'se') return 'se'
-  if (role === 'ap') return 'ap'
-  if (role === 'mc' || role?.startsWith('Sys_')) return 'mc'
-  if (role === 'error') return 'err'
-  if (role === 'user') return 'usr'
+  const lower = (role || '').toLowerCase()
+  if (lower === 'pm') return 'pm'
+  if (lower === 'se') return 'se'
+  if (lower === 'ap') return 'ap'
+  if (lower === 'mc' || lower.startsWith('sys_')) return 'mc'
+  if (lower === 'error') return 'err'
+  if (lower === 'user') return 'usr'
   return 'default'
 }
 
@@ -1960,33 +1981,6 @@ defineExpose({ toggleSearch })
   background: transparent;
 }
 
-.pm-waiting-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 14px;
-  background: linear-gradient(135deg, #fef3c7, #fde68a);
-  border-top: 1px solid #f59e0b;
-  cursor: pointer;
-  font-size: 13px;
-  animation: pulse-warning 2s infinite;
-}
-.pm-waiting-bar:hover { background: linear-gradient(135deg, #fde68a, #fcd34d); }
-.pm-waiting-icon { font-size: 16px; flex-shrink: 0; }
-.pm-waiting-text { color: #92400e; font-weight: 500; }
-.pm-waiting-dismiss {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: #92400e;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 6px;
-}
-@keyframes pulse-warning {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
 </style>
 
 <!-- 全局样式：v-html 渲染的内容需要全局样式 -->

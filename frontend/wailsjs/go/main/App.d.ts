@@ -47,6 +47,8 @@ export function CreateFile(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteFile(arg1:string):Promise<void>;
 
+export function EmitTaskClarify(arg1:string):Promise<void>;
+
 export function EnvMemorySummary():Promise<string>;
 
 export function ExecuteReset(arg1:string):Promise<void>;

@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed frontend/dist
@@ -96,6 +97,11 @@ func main() {
 			Assets: assets,
 		},
 		BackgroundColour: &options.RGBA{R: 24, G: 24, B: 24, A: 255},
+		Windows: &windows.Options{
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:   false,
+			WebviewUserDataPath:   "",
+		},
 		OnStartup: func(ctx context.Context) {
 			fmt.Println("🚀 [0] OnStartup CALLBACK")
 			app.Startup(ctx)

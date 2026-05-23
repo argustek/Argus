@@ -36,6 +36,8 @@ defineProps<{
   status: {
     pmStatus: string
     seStatus: string
+    apStatus: string
+    cRunning: boolean
     currentTask: string
     progress: string
   }

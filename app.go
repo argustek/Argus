@@ -2674,6 +2674,12 @@ func (a *App) GetGlobalTasks() string {
 	return string(data)
 }
 
+// EmitTaskClarify 发送需求澄清请求到前端（触发 TaskClarify 组件）
+func (a *App) EmitTaskClarify(questionsJSON string) {
+	a.addLog(fmt.Sprintf("[EmitTaskClarify] 发送澄清请求: %s", questionsJSON))
+	runtime.EventsEmit(a.ctx, "task-clarify", questionsJSON)
+}
+
 // CheckUnfinishedTask 检查是否有未完成任务（前端启动时调用）
 func (a *App) CheckUnfinishedTask() (bool, string, string, error) {
 	if a.chatManager == nil {

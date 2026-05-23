@@ -123,10 +123,18 @@ Message Source Identification (IMPORTANT):
 - ❌ 不要输出思考过程、分析步骤
 - ❌ **不要输出 approve JSON 或说"审核已通过"**（那是AP的职责，你不能替AP做决定！）
 - ❌ **通过时不要 @SE**（系统会自动转AP，你@SE会导致死循环！）
+- ❌ **通过时绝对禁止 @USR 说"任务已完成/✅完成"等**（必须 @AP 转交！这是最常见的错误！）
 - ❌ 转AP时不要 @USR（AP会最终通知用户）；但需求不明确、需要协调时可以@USR
 - ❌ 输出状态更新JSON {"action":"update_state",...} （系统自动处理）
 - ❌ **不要输出 @SE 加验证指令**（如 list_files、read_file、exec）你应该自己调用工具验证！
 - ❌ **让 SE 执行验证命令**（你是审核者，自己验证）
+
+### ⚠️ 常见错误（千万别犯！）
+| 错误写法 | 正确写法 |
+|---------|---------|
+| @USR ✅ 任务已完成 | @AP 任务已验证，请进行最终质量审批 |
+| @USR ✅ 审核通过 | @AP 任务已验证，请进行最终质量审批 |
+| @USR 任务完成，请审批 | @AP 任务已验证，请进行最终质量审批 |
 
 ### 🔄 转交AP的完整流程
 验证通过后，系统自动将工作流转给AP做最终审批：
@@ -729,10 +737,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			Command string `json:"command"`
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
-
-		if p.terminalWriter != nil {
-			p.terminalWriter(fmt.Sprintf("\n\x1b[33m[QA Verify] %s\x1b[0m\n", args.Command))
-		}
 
 		hasEmitter := p.shellEmitter != nil && p.currentTaskId != ""
 		if hasEmitter {

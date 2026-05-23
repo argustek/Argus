@@ -86,6 +86,10 @@ export function DeleteFile(arg1) {
   return window['go']['main']['App']['DeleteFile'](arg1);
 }
 
+export function EmitTaskClarify(arg1) {
+  return window['go']['main']['App']['EmitTaskClarify'](arg1);
+}
+
 export function EnvMemorySummary() {
   return window['go']['main']['App']['EnvMemorySummary']();
 }

@@ -218,11 +218,12 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 
 // AI 状态
 const aiStatus = reactive({
-  pmBusy: false,
-  cBusy: false,
-  seBusy: false,
-  apBusy: false,
-  currentTask: ''
+  pmStatus: 'idle',
+  seStatus: 'idle',
+  apStatus: 'idle',
+  cRunning: false,
+  currentTask: '',
+  progress: ''
 })
 
 // C监控状态
@@ -303,7 +304,6 @@ onMounted(async () => {
         playUrgentSound()
         showSystemTrayNotification(t('app.notificationTaskErrorTitle'), t('app.notificationTaskErrorBody'))
       }
-      EventsEmit('pm-waiting-decision')
     }
   })
 
@@ -373,7 +373,6 @@ onMounted(async () => {
         if (isPMNeedsDecision(cleanContent)) {
           playUrgentSound()
           showSystemTrayNotification(msg.role === 'ap' ? '✅ AP 审批结果' : '🚨 PM 需要您决策', cleanContent.substring(0, 80))
-          EventsEmit('pm-waiting-decision')
         }
       }
     }
@@ -562,7 +561,7 @@ onMounted(async () => {
       rm.taskList.status = data.status
       rm.taskList.endedAt = Date.now()
       if (data.result) rm.result = data.result
-      const lastRoleMsg = [...messages.value].reverse().find(m => m.role === rm.role)
+      const lastRoleMsg = [...messages.value].reverse().find(m => m.role === rm.role && !(m as any)._richTaskId)
       if (lastRoleMsg) (lastRoleMsg as any)._richTaskId = data.taskId
       EventsEmit('rich-message-complete', data.taskId)
     }
@@ -677,10 +676,10 @@ onMounted(async () => {
       const seRunning = await IsSERunning()
       const apThinking = await IsAPThinking()
 
-      aiStatus.pmBusy = pmThinking
-      aiStatus.cBusy = cRunning
-      aiStatus.seBusy = seRunning
-      aiStatus.apBusy = apThinking
+      aiStatus.pmStatus = pmThinking ? 'busy' : 'idle'
+      aiStatus.cRunning = cRunning
+      aiStatus.seStatus = seRunning ? 'busy' : 'idle'
+      aiStatus.apStatus = apThinking ? 'busy' : 'idle'
 
       // 同步 aiThinking 状态，确保发送按钮状态正确
       aiThinking.value = pmThinking || apThinking
