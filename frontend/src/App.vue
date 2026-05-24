@@ -407,33 +407,35 @@ onMounted(async () => {
   })
 
   // 监听PM消息事件（PM回复用户时触发）
-  // [G49] 仅用于PM闲聊场景；审核场景已通过ai-stream-chunk处理
+  // [G54修复] pm_message只负责填充空消息，不覆盖已有内容
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string }) => {
     if (!data.delta) return
     
-    // [G49去重] 检查是否已存在PM streaming消息（通过ai-stream-chunk创建）
-    const hasPMStreaming = messages.value.some(
-      (msg) => msg.role === 'pm' && (msg as any)._streaming
-    )
+    console.log(`[G54-PM-MSG] 收到PM消息: len=${data.delta.length}`)
     
-    if (hasPMStreaming) {
-      console.warn(`[SSE-AUDIT] ⚠️ 忽略pm_message: PM已通过ai-stream-chunk创建消息 (防止重复)`)
-      return // 已有streaming消息，忽略此事件
-    }
+    // 查找最近的PM streaming消息
+    const pmMsgs = messages.value.filter(m => m.role === 'pm')
+    const lastPmMsg = pmMsgs[pmMsgs.length - 1]
     
-    if (streamingRole.value !== 'pm') {
-      streamingRole.value = 'pm'
+    if (lastPmMsg && (lastPmMsg as any)._streaming) {
+      // 有streaming消息：只在内容为空或更短时填充（保留ai-stream-chunk累积的丰富内容）
+      if (!lastPmMsg.content || lastPmMsg.content.length < 10) {
+        lastPmMsg.content = data.delta
+        console.log(`[G54-PM-MSG] 填充空PM消息`)
+      } else {
+        console.log(`[G54-PM-MSG] 保留已有内容(${lastPmMsg.content.length}字符)，忽略pm_message(${data.delta.length}字符)`)
+      }
+      ;(lastPmMsg as any)._streaming = false
+    } else if (!lastPmMsg || !(lastPmMsg as any)._messageId) {
+      // 没有通过ai-stream-chunk创建的消息，创建新的
       messages.value.push({
         role: 'pm',
         content: data.delta,
-        _streaming: true
+        _streaming: false,
+        timestamp: Date.now()
       } as any)
-    } else if (messages.value.length > 0) {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === 'pm' && (lastMsg as any)._streaming) {
-        lastMsg.content += data.delta
-      }
+      console.log(`[G54-PM-MSG] 创建新PM消息`)
     }
   })
 
@@ -470,7 +472,7 @@ onMounted(async () => {
     if (!currentExecMsg) {
       currentExecMsg = {
         role: data.executor === 'pm' ? 'pm' : 'se',
-        content: '',
+        content: '',  // 初始为空，后续填充
         timestamp: Date.now(),
         _streaming: true,
         _execData: {

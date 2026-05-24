@@ -898,6 +898,19 @@ function toggleExpand(index: number) {
 
 function getRichMessage(msg: any): RichMessageType | null {
   if (!msg || !window.__richMessages) return null
+  
+  // [G54调试] PM消息状态检查
+  if (msg.role === 'pm') {
+    console.log('[G54-PM] getRichMessage调用:', {
+      content: msg.content,
+      contentLen: msg.content?.length,
+      _messageId: (msg as any)._messageId,
+      _richTaskId: (msg as any)._richTaskId,
+      _streaming: (msg as any)._streaming,
+      richMessagesKeys: Object.keys(window.__richMessages)
+    })
+  }
+  
   const keys = Object.keys(window.__richMessages)
   for (const k of keys) {
     const rm = window.__richMessages[k]
