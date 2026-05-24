@@ -1758,10 +1758,33 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 				return nil
 			}
 		} else {
+			hasUSR := strings.Contains(strings.ToUpper(resp.Content), "@USR")
+			if hasUSR {
+				fmt.Println("[handleSEAskPM] 🛡️ G46第三层保护：检测到@USR，强制转AP审批")
+				cleanContent := strings.TrimPrefix(strings.TrimSpace(resp.Content), "@USR")
+				cleanContent = strings.TrimPrefix(cleanContent, "@usr")
+				cleanContent = strings.TrimSpace(cleanContent)
+
+				if cleanContent == "" || len(cleanContent) < 5 {
+					cleanContent = "任务已验证，请进行最终质量审批"
+				}
+
+				m.addPMToUserMsg(cleanContent)
+
+				m.currentRole = ""
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				m.SetHandoverPending(HandoverPMToAP)
+				if m.apProcessor != nil {
+					return m.handleAPReview(cleanContent)
+				}
+				m.forceProjectApproved()
+				return nil
+			}
+
 			m.addPMToUserMsg(resp.Content)
 		}
 		return nil
-}
+	}
 
 // handleUserDirectToSE 用户直接@SE
 func (m *Manager) handleUserDirectToSE(content string) error {
