@@ -1690,118 +1690,77 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 	seQuestion = m.ensureSEToPM(seQuestion)
 	fmt.Printf("[SE→PM] %s\n", seQuestion)
 
-	resp, err := m.pmProcessor.ProcessStream(seQuestion, nil, func(delta string) {
-		m.emitStreamChunk("pm", delta)
-	})
-	if err != nil {
-		errMsg := fmt.Sprintf("❌ PM处理SE提问失败: %v", err)
-		m.addPMToUserMsg(errMsg)
-		return fmt.Errorf("PM process SE question failed: %w", err)
+	pmHistoryRaw := m.GetHistory()
+	pmHistory := make([]ai.ChatMessage, len(pmHistoryRaw))
+	for i, msg := range pmHistoryRaw {
+		pmHistory[i] = ai.ChatMessage{Role: msg.Role, Content: msg.Content}
 	}
 
-	parsedResp := m.router.Parse("pm", resp.Content)
-	if parsedResp.To == "se" {
-		reviewCheck := m.extractReviewResult(parsedResp.Content)
-		currentState := m.cMonitor.GetProjectState()
+	fmt.Println("[handleSEAskPM] 🔍 使用ProcessReview（带工具验证）进行PM审核")
+	resp, err := m.pmProcessor.ProcessReview(seQuestion, pmHistory, func(delta string) {
+			m.emitStreamChunk("pm", delta)
+		})
+		if err != nil {
+			errMsg := fmt.Sprintf("❌ PM审核失败: %v", err)
+			m.addPMToUserMsg(errMsg)
+			return fmt.Errorf("PM review failed: %w", err)
+		}
 
-		if reviewCheck.Found && reviewCheck.Result == "approve" {
-			fmt.Printf("[handleSEAskPM] ✅ PM回复含approve JSON → 转AP: %s [TAG-D2]\n",
-				parsedResp.Content[:min(60, len(parsedResp.Content))])
-			m.currentRole = ""
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			m.cMonitor.UpdateProjectState(types.ProjectStateDone)
-			m.SetHandoverPending(HandoverPMToAP)
-			if m.apProcessor != nil {
-				return m.handleAPReview("请AP进行最终质量审批")
+		parsedResp := m.router.Parse("pm", resp.Content)
+		if parsedResp.To == "se" {
+			currentState := m.cMonitor.GetProjectState()
+			if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
+				fmt.Printf("[handleSEAskPM] 🛡️ 审核模式拦截@SE(state=%d)\n", currentState)
+				m.currentRole = ""
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				m.SetHandoverPending(HandoverPMToAP)
+				if m.apProcessor != nil {
+					return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
+				}
+				m.forceProjectApproved()
+				return nil
 			}
-			m.forceProjectApproved()
-			return nil
-		}
 
-		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
-			fmt.Printf("[handleSEAskPM] 🛡️ 审核模式拦截@SE(state=%d): %s\n",
-				currentState, parsedResp.Content[:min(60, len(parsedResp.Content))])
-			m.currentRole = ""
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			m.SetHandoverPending(HandoverPMToAP)
-			if m.apProcessor != nil {
-				return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
+			finalTask := parsedResp.Content
+			idx := strings.LastIndex(finalTask, "\n{")
+			if idx > 0 {
+				remainder := finalTask[idx+1:]
+				if strings.Contains(remainder, "current_task") || strings.Contains(remainder, "total_steps") {
+					finalTask = strings.TrimSpace(finalTask[:idx])
+				}
 			}
-			m.forceProjectApproved()
-			return nil
+
+			if isStatusOnlyMessage(finalTask) {
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				return nil
+			}
+
+			m.addPMToSEMsg(finalTask)
+			return m.startSETaskWithFrom(finalTask, "pm")
 		}
 
-		fmt.Printf("[PM→SE] PM回复SE: %s\n", parsedResp.Content)
-		m.addPMToSEMsg(parsedResp.Content)
-		return m.startSETaskWithFrom(parsedResp.Content, "pm")
-	}
+		hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
+		if hasAP {
+			cleanPMContent := strings.Replace(resp.Content, "@AP", "", -1)
+			cleanPMContent = strings.Replace(cleanPMContent, "@ap", "", -1)
+			cleanPMContent = strings.TrimSpace(cleanPMContent)
+			m.addPMToUserMsg(cleanPMContent)
 
-	// 🔴 G点修复：handleSEAskPM 的 else 分支也需要检测 @AP！
-	// 当 PM 输出 "@USR @AP 任务已验证" 时，router.Parse 只匹配 @USR，
-	// 走到这个 else 分支，但之前完全没有 @AP 路由逻辑
-	hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
-	fmt.Printf("[handleSEAskPM] PM回复非@SE: to=%q hasAP=%v content=%q [TAG-AP-FIX]\n",
-		parsedResp.To, hasAP, resp.Content[:min(100, len(resp.Content))])
-
-	if hasAP {
-		cleanPMContent := strings.Replace(resp.Content, "@AP", "", -1)
-		cleanPMContent = strings.Replace(cleanPMContent, "@ap", "", -1)
-		cleanPMContent = strings.TrimSpace(cleanPMContent)
-		m.addPMToUserMsg(cleanPMContent)
-		fmt.Println("[handleSEAskPM] ✅ @AP命中，路由到AP审批 [TAG-AP-FIX]")
-		m.currentRole = ""
-		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverPMToAP)
-		if m.apProcessor != nil {
-			return m.handleAPReview(cleanPMContent)
+			seStatus := m.cMonitor.GetSeStatus()
+			if seStatus != types.RoleStatusBusy {
+				m.currentRole = ""
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				m.SetHandoverPending(HandoverPMToAP)
+				if m.apProcessor != nil {
+					return m.handleAPReview(cleanPMContent)
+				}
+				m.forceProjectApproved()
+				return nil
+			}
+		} else {
+			m.addPMToUserMsg(resp.Content)
 		}
-		m.forceProjectApproved()
 		return nil
-	}
-
-	lowerResp := strings.ToLower(resp.Content)
-	hasFakeToolCall := strings.Contains(lowerResp, "list_files") ||
-		strings.Contains(lowerResp, "read_file") ||
-		strings.Contains(lowerResp, "exec ") ||
-		strings.Contains(lowerResp, "write_file")
-	hasApprovalKeywords := strings.Contains(lowerResp, "已验证") ||
-		strings.Contains(lowerResp, "审核通过") ||
-		strings.Contains(lowerResp, "验证通过") ||
-		strings.Contains(lowerResp, "任务完成") ||
-		strings.Contains(lowerResp, "已完成")
-	isJustToolCall := hasFakeToolCall && !hasApprovalKeywords && !hasAP && len(strings.TrimSpace(resp.Content)) < 300
-
-	if isJustToolCall {
-		fmt.Println("[handleSEAskPM] ⚠️ 检测到PM输出伪工具调用文本(无结论)，强制转AP")
-		resp.Content = "@AP [系统自动验证] SE任务已完成，请进行最终质量审批"
-		m.addPMToUserMsg(strings.Replace(resp.Content, "@AP", "", 1))
-		m.currentRole = ""
-		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverPMToAP)
-		if m.apProcessor != nil {
-			return m.handleAPReview("请AP进行最终质量审批")
-		}
-		m.forceProjectApproved()
-		return nil
-	}
-
-	if hasApprovalKeywords && !hasAP {
-		fmt.Println("[handleSEAskPM] ⚠️ 第三层保护: PM输出含审批关键词但缺@AP，自动补全并转AP")
-		resp.Content = "@AP " + resp.Content
-		m.addPMToUserMsg(strings.Replace(strings.Replace(resp.Content, "@AP", "", 1), "@ap", "", 1))
-		m.currentRole = ""
-		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverPMToAP)
-		if m.apProcessor != nil {
-			return m.handleAPReview(strings.TrimSpace(strings.Replace(resp.Content, "@AP", "", 1)))
-		}
-		m.forceProjectApproved()
-		return nil
-	}
-
-	m.addPMToUserMsg(resp.Content)
-	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-	return nil
 }
 
 // handleUserDirectToSE 用户直接@SE
