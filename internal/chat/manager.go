@@ -1457,7 +1457,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 			m.forceProjectApproved()
 			return nil
 		}
-		m.addPMToUserMsg(resp.Content)
 	}
 
 	state := m.cMonitor.GetProjectState()
@@ -1624,9 +1623,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 		return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
-	// 没有@SE/没有任务 = 普通对话，PM回复用户（已在上面 addPMToUserMsg）
+	// 没有@SE/没有任务 = 普通对话，PM回复用户
 	fmt.Printf("[TRACE-PM-ROUTE] ⚠️ PM走【闲聊分支】! to=%q hasTasks=%v content_head=%q | AP不会启动!\n",
 		parsedMsg.To, resp.HasTasks, resp.Content[:min(100, len(resp.Content))])
+
+	m.addPMToUserMsg(resp.Content)
 
 	if m.richBuilder != nil {
 		pmTaskId := m.richBuilder.GetCurrentTaskID()
