@@ -1744,7 +1744,8 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 			cleanPMContent := strings.Replace(resp.Content, "@AP", "", -1)
 			cleanPMContent = strings.Replace(cleanPMContent, "@ap", "", -1)
 			cleanPMContent = strings.TrimSpace(cleanPMContent)
-			m.addPMToUserMsg(cleanPMContent)
+
+			fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
 
 			seStatus := m.cMonitor.GetSeStatus()
 			if seStatus != types.RoleStatusBusy {
@@ -1769,7 +1770,7 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 					cleanContent = "任务已验证，请进行最终质量审批"
 				}
 
-				m.addPMToUserMsg(cleanContent)
+				fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
 
 				m.currentRole = ""
 				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
@@ -1781,7 +1782,7 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 				return nil
 			}
 
-			m.addPMToUserMsg(resp.Content)
+			fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
 		}
 		return nil
 	}
