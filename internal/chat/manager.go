@@ -106,6 +106,15 @@ func (m *Manager) sendToDingTalk(msg string) {
 // MessageCallback 消息回调函数类型
 type MessageCallback func(msg Message)
 
+// [G52] 送水审计条目（用于前后端一致性校验）
+type StreamAuditEntry struct {
+	Timestamp time.Time
+	Role      string
+	MessageID string
+	Delta     string
+	DeltaLen  int
+}
+
 // Manager 对话管理器
 type Manager struct {
 	router          *Router
@@ -133,6 +142,7 @@ type Manager struct {
 	msgCounter int64             // 消息ID计数器（原子递增）
 	lastMsgIDs map[string]string // 每个角色的最后一条消息ID (role -> msgID)
 	streamingMsgIDs map[string]string // 流式消息ID追踪 (role -> messageId) [G49: 前后端一致性]
+	streamAuditLog []StreamAuditEntry // [G52] 送水审计日志（用于前后端一致性校验）
 
 	reviewCount   int // PM审核轮次计数（防死循环）
 	apReviewCount int // AP审核轮次计数（防死循环）
@@ -875,6 +885,8 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 	fmt.Println("[ProcessMessage] ==================== 开始处理消息 ====================")
 	fmt.Printf("[ProcessMessage] 收到消息: %s\n", input)
 	fmt.Printf("[ProcessMessage] pmProcessor: %v, router: %v\n", m.pmProcessor != nil, m.router != nil)
+
+	m.clearStreamMessageIDs() // [G50] 每个新任务清理旧messageId，防止复用
 
 	trimmedInput := strings.TrimSpace(input)
 
@@ -1702,8 +1714,9 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 			m.emitStreamChunk("pm", delta)
 		})
 		if err != nil {
-			errMsg := fmt.Sprintf("❌ PM审核失败: %v", err)
-			m.addPMToUserMsg(errMsg)
+		errMsg := fmt.Sprintf("❌ PM审核失败: %v", err)
+		m.PrintStreamAuditReport()
+		m.addPMToUserMsg(errMsg)
 			return fmt.Errorf("PM review failed: %w", err)
 		}
 
@@ -1800,12 +1813,64 @@ func (m *Manager) startSETask(taskDesc string) error {
 
 func (m *Manager) emitStreamChunk(role string, delta string) {
 	if m.ctx != nil {
+		msgId := m.getOrCreateStreamID(role)
+		fmt.Printf("[SSE-AUDIT] 💧 送水: role=%s messageId=%s delta=%q (len=%d)\n", role, msgId, delta, len(delta))
+
+		m.mu.Lock()
+		if m.streamAuditLog == nil {
+			m.streamAuditLog = make([]StreamAuditEntry, 0)
+		}
+		m.streamAuditLog = append(m.streamAuditLog, StreamAuditEntry{
+			Timestamp: time.Now(),
+			Role:      role,
+			MessageID: msgId,
+			Delta:     delta,
+			DeltaLen:  len(delta),
+		})
+		m.mu.Unlock()
+
 		runtime.EventsEmit(m.ctx, "ai-stream-chunk", map[string]interface{}{
 			"role":     role,
 			"delta":    delta,
-			"messageId": m.getOrCreateStreamID(role),
+			"messageId": msgId,
 		})
 	}
+}
+
+func (m *Manager) PrintStreamAuditReport() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if len(m.streamAuditLog) == 0 {
+		fmt.Println("[SSE-AUDIT-REPORT] 📊 送水报告: 无送水记录")
+		return
+	}
+
+	fmt.Println("\n═════════════════════════════════════════════════════")
+	fmt.Println("📊 [SSE-AUDIT-REPORT] 后端送水审计报告")
+	fmt.Println("═════════════════════════════════════════════════════")
+
+	roleStats := make(map[string]int)
+	totalBytes := 0
+
+	for i, entry := range m.streamAuditLog {
+		roleStats[entry.Role]++
+		totalBytes += entry.DeltaLen
+		preview := entry.Delta
+		if len(preview) > 50 {
+			preview = preview[:50] + "..."
+		}
+		fmt.Printf("  #%03d [%s] role=%-5s id=%-40s | %s\n",
+			i+1, entry.Timestamp.Format("15:04:05.000"), entry.Role, entry.MessageID, preview)
+	}
+
+	fmt.Println("───────────────────────────────────────────────────────")
+	fmt.Printf("📈 统计: 总送水%d次 | 总字节数:%d\n", len(m.streamAuditLog), totalBytes)
+	fmt.Println("📦 按角色:")
+	for role, count := range roleStats {
+		fmt.Printf("   %-5s: %d次\n", role, count)
+	}
+	fmt.Println("═════════════════════════════════════════════════════\n")
 }
 
 func (m *Manager) getOrCreateStreamID(role string) string {
@@ -1824,6 +1889,81 @@ func (m *Manager) getOrCreateStreamID(role string) string {
 	m.streamingMsgIDs[role] = id
 	fmt.Printf("[SSE-AUDIT] 📤 送水: role=%s messageId=%s (第1次创建)\n", role, id)
 	return id
+}
+
+func (m *Manager) clearStreamMessageIDs() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.streamingMsgIDs) > 0 {
+		fmt.Printf("[SSE-AUDIT] 🗑️ 清理旧messageIds: %d个角色\n", len(m.streamingMsgIDs))
+		m.streamingMsgIDs = make(map[string]string)
+	}
+}
+
+func (m *Manager) cleanSEJSONContent(jsonStr string) string {
+	fmt.Printf("[G51-FIX] 开始清理SE JSON内容, 原始长度: %d\n", len(jsonStr))
+
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		fmt.Printf("[G51-FIX] JSON解析失败: %v, 返回原始内容\n", err)
+		return ""
+	}
+
+	var actions []map[string]interface{}
+	if actionsRaw, ok := data["actions"].([]interface{}); ok {
+		for _, a := range actionsRaw {
+			if actionMap, ok := a.(map[string]interface{}); ok {
+				actions = append(actions, actionMap)
+			}
+		}
+	}
+
+	if len(actions) == 0 {
+		fmt.Printf("[G51-FIX] 未找到actions数组\n")
+		return ""
+	}
+
+	var actionDescs []string
+	for _, action := range actions {
+		actionType, _ := action["type"].(string)
+
+		switch actionType {
+		case "write_file":
+			if path, ok := action["path"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("创建文件: %s", path))
+			}
+		case "edit_file":
+			if path, ok := action["path"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("修改文件: %s", path))
+			}
+		case "exec":
+			if cmd, ok := action["command"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("执行命令: %s", cmd))
+			}
+		case "read_file":
+			if path, ok := action["path"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("读取文件: %s", path))
+			}
+		default:
+			actionDescs = append(actionDescs, fmt.Sprintf("操作: %s", actionType))
+		}
+	}
+
+	result := "✅ SE已完成任务执行，请审核结果"
+	if len(actionDescs) > 0 {
+		result += "\n\n**执行的操作**:\n"
+		for _, desc := range actionDescs {
+			result += fmt.Sprintf("- %s\n", desc)
+		}
+	}
+
+	if returnVal, ok := data["return"].(bool); ok && returnVal {
+		result += "\n\n📋 **需要验证**: 请用工具检查上述操作结果"
+	}
+
+	fmt.Printf("[G51-FIX] 清理完成, 新内容长度: %d\n", len(result))
+	return result
 }
 
 // startSETaskWithFrom 启动SE任务，指定来源
@@ -2078,15 +2218,18 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 				m.cMonitor.UpdateProjectState(types.ProjectStateDone)
 				m.syncBackendStatus("done", "SE语义完成，兜底路由到PM")
 				summary := "✅ SE报告任务完成（语义检测），请审核"
-				if from != "pm" {
-					m.addSEToUserMsg(summary)
-				}
-				runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
-					"executor":  "se",
-					"result":    "",
-					"timestamp": time.Now().Unix(),
-					"content":   resp.Content,
-				})
+			if from != "pm" {
+				m.addSEToUserMsg(summary)
+			}
+			// [G53] 移除过早的exec_completed！原因：后续可能还有continueSETask()导致第2批SE actions
+			// 前端收到此事件会重置所有SE消息的_streaming状态，导致后续SE chunk丢失
+			// 正确的exec_completed应在最终完成时发送（TAG-D4路径或executeSEActions末尾）
+			// runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+			// 	"executor":  "se",
+			// 	"result":    "",
+			// 	"timestamp": time.Now().Unix(),
+			// 	"content":   resp.Content,
+			// })
 			_, err := m.ProcessMessageFrom("se", "@PM ✅ 任务完成(语义检测)\n"+resp.Content) // [TAG-D3-RETURN]
 			return err
 			}
@@ -2173,6 +2316,15 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.syncBackendStatus("se_content_only", "SE有内容无操作，路由到PM [TAG-D5]")
 
 			seContent := strings.TrimSpace(resp.Content)
+
+			if strings.HasPrefix(seContent, "{") && strings.Contains(seContent, `"actions"`) {
+				fmt.Printf("[G51-FIX] 🧹 检测到SE返回JSON格式，清理后发送给PM\n")
+				cleanContent := m.cleanSEJSONContent(seContent)
+				if cleanContent != "" {
+					seContent = cleanContent
+				}
+			}
+
 			if from != "pm" && len(seContent) > 200 {
 				m.addSEToUserMsg(seContent[:200] + "...")
 			}
@@ -2308,6 +2460,17 @@ func (m *Manager) continueSETask() (err error) {
 		fmt.Println("[System] SE actions completed, routing to PM via @layer (Router)... [TAG-C1]")
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+
+		// [G53] 在最终完成路径发送exec_completed（只发一次！）
+		if m.ctx != nil {
+			runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+				"executor":  "se",
+				"result":    "completed",
+				"status":    "completed",
+				"timestamp": time.Now().Unix(),
+			})
+		}
+
 		_, err := m.ProcessMessageFrom("se", "SE已完成任务执行，请审核结果") // [TAG-C1]
 		return err
 	}
@@ -2636,13 +2799,16 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	}
 
 	if m.ctx != nil {
-		fmt.Println("[executeSEActions] ✅ 发送 exec_completed 事件")
-		runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
-			"executor":  "se",
-			"result":    "completed",
-			"status":    "completed",
-			"timestamp": time.Now().Unix(),
-		})
+		// [G53] 移除executeSEActions中的exec_completed！
+		// 原因：此函数可能被多次调用（如continueSETask场景），每次都发会导致前端过早重置_streaming
+		// 正确做法：只在最终完成路径（TAG-D4/TAG-C1）发送一次exec_completed
+		fmt.Println("[executeSEActions] ⚠️ [G53] 不在此处发送exec_completed，由调用方负责")
+		// runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+		// 	"executor":  "se",
+		// 	"result":    "completed",
+		// 	"status":    "completed",
+		// 	"timestamp": time.Now().Unix(),
+		// })
 	} else {
 		fmt.Println("[executeSEActions] ⚠️ m.ctx 为 nil，无法发送 exec_completed")
 	}
@@ -4059,6 +4225,8 @@ func (m *Manager) handleAPReview(reviewMsg string) error {
 // forceProjectApproved AP批准后项目正式完成（状态=done_approved）
 func (m *Manager) forceProjectApproved() {
 	fmt.Printf("[TRACE-AP] 🏁 forceProjectApproved! 项目正式完成 (时间:%s)\n", time.Now().Format("15:04:05"))
+	m.PrintStreamAuditReport()
+	m.clearStreamMessageIDs()
 	m.ClearHandover()
 	m.currentRole = ""
 	m.reviewCount = 0

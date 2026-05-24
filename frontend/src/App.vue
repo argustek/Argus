@@ -388,7 +388,7 @@ onMounted(async () => {
   EventsOff('ai-stream-chunk')
   EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string }) => {
     const msgId = data.messageId || data.role + '_unknown'
-    
+
     if (!receivedMessageIds.has(msgId)) {
       receivedMessageIds.add(msgId)
       streamingRole.value = data.role
@@ -398,9 +398,9 @@ onMounted(async () => {
         _streaming: true,
         _messageId: msgId
       } as any)
-    } else if (messages.value.length > 0) {
-      const lastMsg = messages.value[messages.value.length - 1]
-      if (lastMsg.role === data.role && (lastMsg as any)._streaming) {
+    } else {
+      const lastMsg = [...messages.value].reverse().find(m => (m as any)._messageId === msgId)
+      if (lastMsg) {
         lastMsg.content += data.delta
       }
     }
