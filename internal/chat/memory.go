@@ -133,16 +133,18 @@ func (mm *MemoryManager) HasUnfinishedTask() (bool, *types.TaskMemory, error) {
 
 	// 判断条件1: 状态是 working 或 waiting
 	isUnfinished := memory.CurrentState == "working" || memory.CurrentState == "waiting"
-	
-	// 判断条件2: 时间窗口保护（10分钟内有活动视为未完成）
+
+	// ⚠️ G点35修复：增加时间窗口保护，但排除已完成状态
 	// 防止 PM 回复后状态被覆盖为 idle 导致误判
 	if !isUnfinished {
 		timeSinceLastActive := time.Since(memory.LastActiveTime)
-		timeWindow := 10 * time.Minute // 可配置的时间窗口
-		
-		if timeSinceLastActive < timeWindow && memory.MessageCount > 0 {
+		timeWindow := 3 * time.Minute // 从10分钟改为3分钟（G点35修复）
+
+		// 只在非终态时才使用时间窗口保护
+		finishedStates := map[string]bool{"idle": true, "done": true, "error": true, "approved": true}
+		if !finishedStates[memory.CurrentState] && timeSinceLastActive < timeWindow && memory.MessageCount > 0 {
 			isUnfinished = true
-			fmt.Printf("[Memory] ⚠️ 状态=%s 但 %.0f 分钟内有活动，视为未完成任务\n", 
+			fmt.Printf("[Memory] ⚠️ 状态=%s 但 %.1f 分钟内有活动，视为未完成任务\n",
 				memory.CurrentState, timeSinceLastActive.Minutes())
 		}
 	}

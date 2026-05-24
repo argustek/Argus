@@ -582,7 +582,7 @@ func (a *App) initChatManager() {
 		}
 		if !a.emittedMsgIDs[msgID] {
 			a.emittedMsgIDs[msgID] = true
-			if msg.Source != "pm_to_user" && msg.Source != "pm_to_se" {
+			if msg.Source != "pm_to_user" && msg.Source != "pm_to_se" && msg.Source != "se_to_user" && msg.Source != "se_to_pm" {
 				runtime.EventsEmit(a.ctx, "new-message", chatMsg)
 				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s content=%s", msgID, msg.Role, truncate(msg.Content, 40)))
 			} else {
@@ -614,6 +614,21 @@ func (a *App) initChatManager() {
 	fmt.Println("[initChatManager] ✅ 初始化完成，已关闭 readyChan")
 
 	a.addLog("【ChatManager】初始化完成")
+
+	// ⚠️ G点36修复：启动时如果任务已完成，清空旧消息防止显示历史任务
+	if a.chatManager != nil {
+		state := a.chatManager.GetProjectState()
+		if state == "done" || state == "approved" || state == "idle" {
+			if len(a.messages) > 0 {
+				fmt.Printf("[G36-FIX] ✅ 状态=%s，清空 %d 条旧消息\n", state, len(a.messages))
+				a.messages = make([]ChatMessage, 0)
+				a.saveMessages()
+				if a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "messages-cleared", nil)
+				}
+			}
+		}
+	}
 
 	// 启动C守护进程（此时chatManager已初始化，startCGuardian会跳过旧cMonitorLoop）
 	go a.startCGuardian()

@@ -322,11 +322,16 @@ onMounted(async () => {
     }
 
     // 第2层去重：同角色最后一条消息内容比对（防止后端不同ID但同内容双发）
-    const lastSameRole = [...messages.value].reverse().find(m => m.role === msg.role)
-    if (lastSameRole && (lastSameRole.content || '').trim() === (msg.content || '').trim()) {
-      LogPrint(`[FRONTEND-SKIP] ❌ 内容去重: role="${msg.role}"`)
-      console.log(`[NEW-MSG] SKIP content-duplicate role=${msg.role}`)
-      return
+    // ⚠️ G点34修复：SE/AP消息不进行内容去重！
+    // 原因：用户可能多次发送相同任务，每次都产生独立的SE执行记录
+    // 如果去重，会导致后续任务的执行面板丢失
+    if (msg.role !== 'se' && msg.role !== 'ap') {
+      const lastSameRole = [...messages.value].reverse().find(m => m.role === msg.role)
+      if (lastSameRole && (lastSameRole.content || '').trim() === (msg.content || '').trim()) {
+        LogPrint(`[FRONTEND-SKIP] ❌ 内容去重: role="${msg.role}"`)
+        console.log(`[NEW-MSG] SKIP content-duplicate role=${msg.role}`)
+        return
+      }
     }
 
     // ✅ 增强版流式消息替换逻辑：检查最近3条消息
@@ -524,6 +529,21 @@ onMounted(async () => {
     }
     streamingRole.value = ''
     LogPrint(`[PM-STREAM] PM消息流式输出完成`)
+  })
+
+  // ⚠️ G点36修复：监听 AP approved 事件，清空消息防止旧任务显示
+  EventsOn('project_approved', (data: { timestamp: number; action: string }) => {
+    LogPrint(`[APPROVED] ✅ 项目已批准，清空消息历史 (action=${data.action})`)
+    messages.value = []
+    seenMsgIds.clear()
+    streamingRole.value = ''
+
+    const { ClearMessages } = require('../wailsjs/go/main/App')
+    ClearMessages().then(() => {
+      LogPrint('[APPROVED] ✅ messages.json 已清空')
+    }).catch((e: any) => {
+      console.error('[APPROVED] 清空messages失败:', e)
+    })
   })
 
   EventsOn('se-file-written', async (relPath: string) => {
@@ -986,18 +1006,21 @@ async function recoverTask() {
   try {
     const { RecoverTask } = await import('../wailsjs/go/main/App')
     const recoveredMessages = await RecoverTask()
-    
+
     if (recoveredMessages && recoveredMessages.length > 0) {
+      // ⚠️ G点35修复：恢复消息时必须重置 _streaming 状态，防止蓝块闪烁
       messages.value = recoveredMessages.map((msg: any) => ({
         role: msg.role,
         content: msg.content,
-        timestamp: msg.timestamp
+        timestamp: msg.timestamp,
+        _streaming: false  // ← 强制重置流式状态
       }))
       if (config.value.pmDecisionAlert) {
         showSystemTrayNotification('✅ 任务已恢复', `恢复了 ${recoveredMessages.length} 条消息`)
       }
+      LogPrint(`[RECOVERY] ✅ 恢复 ${recoveredMessages.length} 条消息，所有 _streaming 已重置为 false`)
     }
-    
+
     showRecoveryDialog.value = false
     unfinishedTask.value.hasUnfinished = false
   } catch (e) {

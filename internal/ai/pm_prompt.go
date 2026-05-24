@@ -529,6 +529,11 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage) (*P
 		reviewMsg = "[工具结果已返回，请继续审核并给出最终结论]"
 	}
 
+	if strings.TrimSpace(finalContent) == "" {
+		fmt.Printf("[PM Review] ⚠️ AI返回空内容，使用默认审核通过消息 (G38修复)\n")
+		finalContent = "@AP 任务已验证，请进行最终质量审批"
+	}
+
 	p.extractAndUpdateState(finalContent)
 	tasks := p.extractTasks(finalContent)
 

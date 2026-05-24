@@ -516,6 +516,16 @@ func (m *Manager) clearSessionState() {
 	if m.memoryManager != nil {
 		m.memoryManager.ClearState()
 	}
+
+	// ⚠️ G点36修复：AP approved 时通知前端清空 messages
+	// 防止下次启动时显示已完成的旧任务
+	if m.ctx != nil {
+		runtime.EventsEmit(m.ctx, "project_approved", map[string]interface{}{
+			"timestamp": time.Now().Unix(),
+			"action":    "clear_messages",
+		})
+		fmt.Println("[TRACE-AP] ✅ 发送 project_approved 事件（清空messages）")
+	}
 	m.boardManager.Reset()
 	m.currentRole = ""
 	m.pmWaitingForUserSince = 0
@@ -1084,6 +1094,7 @@ func (m *Manager) ProcessMessageFrom(fromRole, input string) (string, error) {
 
 	msg := m.router.Parse(fromRole, input)
 	msg.Role = fromRole
+	msg.Source = fromRole + "_to_pm"
 
 	fmt.Printf("[ProcessMessageFrom] Router解析: From=%q To=%q Content_head=%q\n",
 		msg.From, msg.To, msg.Content[:min(80, len(msg.Content))])
@@ -2271,6 +2282,7 @@ func (m *Manager) continueSETask() (err error) {
 				Role:    "se",
 				Content: resp2.Content,
 				Raw:     resp2.Content,
+				Source:  "se_to_pm",
 			}
 			m.addHistory(seMsg2)
 			fmt.Printf("[SE→PM] %s\n", resp2.Content)
@@ -3522,10 +3534,14 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 
 	cleanContent := strings.TrimSpace(resp.Content)
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
-		fmt.Printf("[handlePMReview] ⚠️ PM审核回复为空或只有@标记，发送默认完成消息\n")
+		fmt.Printf("[handlePMReview] ⚠️ PM审核回复为空，强制转AP审批 (G37修复)\n")
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		m.addPMToUserMsg(i18n.T("msg.task_complete"))
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.apProcessor != nil {
+			return m.handleAPReview("SE任务已完成，请AP进行最终质量审批")
+		}
+		m.forceProjectApproved()
 		return nil
 	}
 
@@ -3541,6 +3557,8 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 
 	if hasApprovalKeywords && !hasAPTag {
 		fmt.Println("[handlePMReview] ⚠️ 第三层保护: PM输出含审批关键词但缺@AP，自动补上")
+		cleanContent = strings.TrimPrefix(cleanContent, "@USR ")
+		cleanContent = strings.TrimPrefix(cleanContent, "@USR")
 		resp.Content = "@AP " + cleanContent
 		cleanContent = resp.Content
 		fmt.Printf("[handlePMReview] ✅ 补全后内容: %s\n", cleanContent[:min(80, len(cleanContent))])
@@ -3694,9 +3712,14 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	cleanContent := strings.TrimSpace(resp.Content)
 	fmt.Printf("[DEBUG-RICH-FLOW] ProcessReview返回: content=%q len=%d\n", cleanContent[:min(80, len(cleanContent))], len(cleanContent))
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
+		fmt.Printf("[RichPM] ⚠️ PM审核回复为空，强制转AP审批 (G37修复)\n")
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		m.addPMToUserMsg(i18n.T("msg.task_complete"))
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.apProcessor != nil {
+			return m.handleAPReview("SE任务已完成，请AP进行最终质量审批")
+		}
+		m.forceProjectApproved()
 		return nil
 	}
 
@@ -3711,6 +3734,8 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 
 	if hasApprovalKeywords && !hasAPTag {
 		fmt.Println("[RichPM] ⚠️ 第三层保护: PM输出含审批关键词但缺@AP，自动补上")
+		cleanContent = strings.TrimPrefix(cleanContent, "@USR ")
+		cleanContent = strings.TrimPrefix(cleanContent, "@USR")
 		resp.Content = "@AP " + cleanContent
 		cleanContent = resp.Content
 		fmt.Printf("[RichPM] ✅ 补全后内容: %s\n", cleanContent[:min(80, len(cleanContent))])
@@ -4356,6 +4381,26 @@ func (m *Manager) Shutdown() {
 // GetCMonitor 获取C监控（用于外部调用）
 func (m *Manager) GetCMonitor() *monitor.CMonitor {
 	return m.cMonitor
+}
+
+// GetProjectState 获取当前项目状态（用于启动时判断是否清空旧消息）
+func (m *Manager) GetProjectState() string {
+	state, err := m.cMonitor.ReadState()
+	if err != nil {
+		return "unknown"
+	}
+	switch state.ProjectState {
+	case types.ProjectStateIdle:
+		return "idle"
+	case types.ProjectStateRunning:
+		return "running"
+	case types.ProjectStateDone:
+		return "done"
+	case types.ProjectStateApproved:
+		return "approved"
+	default:
+		return fmt.Sprintf("%d", state.ProjectState)
+	}
 }
 
 // GetChatManagerStatus 获取 ChatManager 状态（供 C 监控调用）
