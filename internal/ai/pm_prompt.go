@@ -436,8 +436,12 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 }
 
 // ProcessReview 带Code Review能力的审核处理（使用工具调用）
-func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage) (*PMResponse, error) {
+func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onChunk func(delta string)) (*PMResponse, error) {
 	fmt.Printf("[PM Review] Processing review: %s\n", reviewMsg)
+
+	if onChunk != nil {
+		onChunk("🔍 **PM开始审核...**\n\n")
+	}
 
 	aiHistory := make([]Message, 0, len(history))
 	for _, msg := range history {
@@ -518,7 +522,17 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage) (*P
 		aiHistory = append(aiHistory, msg)
 
 		for _, tc := range msg.ToolCalls {
+			if onChunk != nil {
+				onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", tc.Function.Name))
+			}
 			toolResult := p.executeTool(tc.Function.Name, tc.Function.Arguments)
+			if onChunk != nil {
+				resultPreview := toolResult
+				if len(resultPreview) > 200 {
+					resultPreview = resultPreview[:200] + "..."
+				}
+				onChunk(fmt.Sprintf("✅ **工具结果** (%d bytes):\n```\n%s\n```\n\n", len(toolResult), resultPreview))
+			}
 			aiHistory = append(aiHistory, Message{
 				Role:       "tool",
 				Content:    toolResult,
@@ -532,6 +546,14 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage) (*P
 	if strings.TrimSpace(finalContent) == "" {
 		fmt.Printf("[PM Review] ⚠️ AI返回空内容，使用默认审核通过消息 (G38修复)\n")
 		finalContent = "@AP 任务已验证，请进行最终质量审批"
+	}
+
+	if onChunk != nil {
+		onChunk("\n---\n📝 **PM审核结论**:\n")
+		for _, ch := range finalContent {
+			onChunk(string(ch))
+		}
+		onChunk("\n")
 	}
 
 	p.extractAndUpdateState(finalContent)

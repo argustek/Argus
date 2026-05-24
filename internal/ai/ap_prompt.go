@@ -174,6 +174,10 @@ type APResponse struct {
 func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onChunk func(delta string)) (*APResponse, error) {
 	fmt.Printf("[AP Review] 开始审核: %s\n", reviewMsg[:min(100, len(reviewMsg))])
 
+	if onChunk != nil {
+		onChunk("📋 **AP开始审批...**\n\n")
+	}
+
 	aiHistory := make([]Message, 0, len(history))
 	for _, msg := range history {
 		if msg.Role == "user" {
@@ -234,10 +238,23 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 					break
 				}
 				fmt.Printf("[AP ChatWithTools] 🔧 调用了 %d 个工具\n", len(msg.ToolCalls))
+				if onChunk != nil {
+					onChunk(fmt.Sprintf("🔍 **AP审核进度** (Round %d/%d): 调用 %d 个工具\n\n", round+1, maxToolRounds, len(msg.ToolCalls)))
+				}
 				aiHistory = append(aiHistory, Message{Role: "user", Content: reviewMsg})
 				aiHistory = append(aiHistory, msg)
 				for _, tc := range msg.ToolCalls {
+					if onChunk != nil {
+						onChunk(fmt.Sprintf("  - `%s`(", tc.Function.Name))
+					}
 					toolResult := p.executeTool(tc.Function.Name, tc.Function.Arguments)
+					if onChunk != nil {
+						resultPreview := toolResult
+						if len(resultPreview) > 150 {
+							resultPreview = resultPreview[:150] + "..."
+						}
+						onChunk(fmt.Sprintf("%s bytes)\n", len(toolResult)))
+					}
 					aiHistory = append(aiHistory, Message{
 						Role:       "tool",
 						Content:    toolResult,
@@ -261,9 +278,11 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 
 	// 用 onChunk 逐字输出最终结论（前端流式展示）
 	if onChunk != nil && finalContent != "" {
+		onChunk("\n---\n✅ **AP审批结论**:\n")
 		for _, ch := range finalContent {
 			onChunk(string(ch))
 		}
+		onChunk("\n")
 	}
 
 	result := p.parseApprovalResult(finalContent)

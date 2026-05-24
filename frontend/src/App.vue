@@ -386,7 +386,6 @@ onMounted(async () => {
   // 监听AI流式输出事件（注意：PM有专用pm_message通道，这里不处理PM）
   EventsOff('ai-stream-chunk')
   EventsOn('ai-stream-chunk', (data: { role: string; delta: string }) => {
-    if (data.role === 'pm') return
     if (streamingRole.value !== data.role) {
       streamingRole.value = data.role
       messages.value.push({

@@ -3510,7 +3510,9 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 	}
 
 	// PM审核（使用带工具的ProcessReview，PM可读文件做Code Review）
-	resp, err := m.pmProcessor.ProcessReview(reviewMsg, pmHistory)
+	resp, err := m.pmProcessor.ProcessReview(reviewMsg, pmHistory, func(delta string) {
+		m.emitStreamChunk("pm", delta)
+	})
 	if err != nil {
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdateProjectState(types.ProjectStateError)
@@ -3694,7 +3696,9 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	}
 
 	m.pmProcessor.SetContext(pmCtx)
-	resp, err := m.pmProcessor.ProcessReview(content, pmHistory)
+	resp, err := m.pmProcessor.ProcessReview(content, pmHistory, func(delta string) {
+		m.emitStreamChunk("pm", delta)
+	})
 	if err != nil {
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdateProjectState(types.ProjectStateError)
