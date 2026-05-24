@@ -249,6 +249,7 @@ const supportsMultimodal = ref(false)
 
 const seenMsgIds = new Set<number>()
 const streamingRole = ref('')
+const receivedMessageIds = new Set<string>() // [G49] 已收到的消息ID（防止重复）
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
 const showSettings = ref(false)
 
@@ -383,15 +384,19 @@ onMounted(async () => {
     }
   })
 
-  // 监听AI流式输出事件（注意：PM有专用pm_message通道，这里不处理PM）
+  // 监听AI流式输出事件（G49: 基于messageId去重，确保前后端一致）
   EventsOff('ai-stream-chunk')
-  EventsOn('ai-stream-chunk', (data: { role: string; delta: string }) => {
-    if (streamingRole.value !== data.role) {
+  EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string }) => {
+    const msgId = data.messageId || data.role + '_unknown'
+    
+    if (!receivedMessageIds.has(msgId)) {
+      receivedMessageIds.add(msgId)
       streamingRole.value = data.role
       messages.value.push({
         role: data.role,
         content: data.delta,
-        _streaming: true
+        _streaming: true,
+        _messageId: msgId
       } as any)
     } else if (messages.value.length > 0) {
       const lastMsg = messages.value[messages.value.length - 1]
@@ -402,9 +407,21 @@ onMounted(async () => {
   })
 
   // 监听PM消息事件（PM回复用户时触发）
+  // [G49] 仅用于PM闲聊场景；审核场景已通过ai-stream-chunk处理
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string }) => {
     if (!data.delta) return
+    
+    // [G49去重] 检查是否已存在PM streaming消息（通过ai-stream-chunk创建）
+    const hasPMStreaming = messages.value.some(
+      (msg) => msg.role === 'pm' && (msg as any)._streaming
+    )
+    
+    if (hasPMStreaming) {
+      console.warn(`[SSE-AUDIT] ⚠️ 忽略pm_message: PM已通过ai-stream-chunk创建消息 (防止重复)`)
+      return // 已有streaming消息，忽略此事件
+    }
+    
     if (streamingRole.value !== 'pm') {
       streamingRole.value = 'pm'
       messages.value.push({
@@ -524,6 +541,13 @@ onMounted(async () => {
     for (const msg of pmMsgs) {
       if ((msg as any)._streaming) {
         ;(msg as any)._streaming = false
+        
+        // [G49] 清理已完成的messageId
+        const msgId = (msg as any)._messageId
+        if (msgId && receivedMessageIds.has(msgId)) {
+          receivedMessageIds.delete(msgId)
+          console.log(`[SSE-AUDIT] 🗑️ 清理完成消息: messageId=${msgId} (池子中剩余${receivedMessageIds.size}条)`)
+        }
       }
     }
     streamingRole.value = ''

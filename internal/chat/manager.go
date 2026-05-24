@@ -132,6 +132,7 @@ type Manager struct {
 
 	msgCounter int64             // 消息ID计数器（原子递增）
 	lastMsgIDs map[string]string // 每个角色的最后一条消息ID (role -> msgID)
+	streamingMsgIDs map[string]string // 流式消息ID追踪 (role -> messageId) [G49: 前后端一致性]
 
 	reviewCount   int // PM审核轮次计数（防死循环）
 	apReviewCount int // AP审核轮次计数（防死循环）
@@ -1800,10 +1801,29 @@ func (m *Manager) startSETask(taskDesc string) error {
 func (m *Manager) emitStreamChunk(role string, delta string) {
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "ai-stream-chunk", map[string]interface{}{
-			"role":  role,
-			"delta": delta,
+			"role":     role,
+			"delta":    delta,
+			"messageId": m.getOrCreateStreamID(role),
 		})
 	}
+}
+
+func (m *Manager) getOrCreateStreamID(role string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.streamingMsgIDs == nil {
+		m.streamingMsgIDs = make(map[string]string)
+	}
+
+	if id, exists := m.streamingMsgIDs[role]; exists {
+		return id
+	}
+
+	id := fmt.Sprintf("%s_%d_%d", role, time.Now().UnixNano(), len(m.history))
+	m.streamingMsgIDs[role] = id
+	fmt.Printf("[SSE-AUDIT] 📤 送水: role=%s messageId=%s (第1次创建)\n", role, id)
+	return id
 }
 
 // startSETaskWithFrom 启动SE任务，指定来源
