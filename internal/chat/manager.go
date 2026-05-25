@@ -115,6 +115,16 @@ type StreamAuditEntry struct {
 	DeltaLen  int
 }
 
+// [G60] 收水审计条目（前端回传，用于对比校验）
+type ReceiveAuditEntry struct {
+	Timestamp time.Time
+	Role      string
+	MessageID string
+	Content   string
+	ContentLen int
+	Source    string // 事件来源: ai-stream-chunk/pm_message/ap_message/new-message/exec_start
+}
+
 // Manager 对话管理器
 type Manager struct {
 	router          *Router
@@ -143,6 +153,7 @@ type Manager struct {
 	lastMsgIDs map[string]string // 每个角色的最后一条消息ID (role -> msgID)
 	streamingMsgIDs map[string]string // 流式消息ID追踪 (role -> messageId) [G49: 前后端一致性]
 	streamAuditLog []StreamAuditEntry // [G52] 送水审计日志（用于前后端一致性校验）
+	receiveAuditLog []ReceiveAuditEntry // [G60] 收水审计日志（前端回传，用于对比校验）
 
 	reviewCount   int // PM审核轮次计数（防死循环）
 	apReviewCount int // AP审核轮次计数（防死循环）
@@ -1871,6 +1882,133 @@ func (m *Manager) PrintStreamAuditReport() {
 		fmt.Printf("   %-5s: %d次\n", role, count)
 	}
 	fmt.Println("═════════════════════════════════════════════════════\n")
+}
+
+// [G60] 前端调用：记录收到消息（用于前后端一致性校验）
+func (m *Manager) RecordReceive(role, messageID, content, source string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.receiveAuditLog == nil {
+		m.receiveAuditLog = make([]ReceiveAuditEntry, 0)
+	}
+	preview := content
+	if len(preview) > 80 {
+		preview = preview[:80] + "..."
+	}
+	fmt.Printf("[G60-RECEIVE] 🚰 收水: role=%s id=%s source=%s content=%q (len=%d)\n", role, messageID, source, preview, len(content))
+
+	m.receiveAuditLog = append(m.receiveAuditLog, ReceiveAuditEntry{
+		Timestamp:   time.Now(),
+		Role:        role,
+		MessageID:   messageID,
+		Content:     content,
+		ContentLen:  len(content),
+		Source:      source,
+	})
+}
+
+// [G60] 输出前后端一致性对比报告
+func (m *Manager) PrintConsistencyReport() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	fmt.Println("\n╔══════════════════════════════════════════════════════╗")
+	fmt.Println("║ [G60] 🔄 前后端消息一致性校验报告                      ║")
+	fmt.Println("╚══════════════════════════════════════════════════════╝")
+
+	sendCount := len(m.streamAuditLog)
+	receiveCount := len(m.receiveAuditLog)
+
+	fmt.Printf("\n📤 后端送水: %d 条\n", sendCount)
+	fmt.Printf("📥 前端收水: %d 条\n", receiveCount)
+
+	if sendCount == 0 && receiveCount == 0 {
+		fmt.Println("✅ 无数据（可能任务未开始或已清理）\n")
+		return
+	}
+
+	sendByRole := make(map[string]int)
+	receiveByRole := make(map[string]int)
+
+	for _, entry := range m.streamAuditLog {
+		sendByRole[entry.Role]++
+	}
+	for _, entry := range m.receiveAuditLog {
+		receiveByRole[entry.Role]++
+	}
+
+	fmt.Println("\n┌─────────────────────────────────────────────────────┐")
+	fmt.Println("│ 📊 按角色对比                                       │")
+	fmt.Println("├──────────┬──────────┬──────────┬────────────────────┤")
+	fmt.Println("│ 角色     │ 送水次数 │ 收水次数 │ 差异               │")
+	fmt.Println("├──────────┼──────────┼──────────┼────────────────────┤")
+
+	allRoles := make(map[string]bool)
+	for role := range sendByRole {
+		allRoles[role] = true
+	}
+	for role := range receiveByRole {
+		allRoles[role] = true
+	}
+
+	hasMismatch := false
+	for role := range allRoles {
+		s := sendByRole[role]
+		r := receiveByRole[role]
+		diff := r - s
+		status := "✅"
+		if diff != 0 {
+			status = "❌"
+			hasMismatch = true
+		}
+		fmt.Printf("│ %-8s │ %8d │ %8d │ %4d (%s)          │\n", role, s, r, diff, status)
+	}
+
+	fmt.Println("└──────────┴──────────┴──────────┴────────────────────┘")
+
+	if hasMismatch {
+		fmt.Println("\n⚠️ 发现不一致！详细差异:")
+		for role := range allRoles {
+			s := sendByRole[role]
+			r := receiveByRole[role]
+			if s != r {
+				if r < s {
+					fmt.Printf("   ❌ %s: 送水%d条 > 收水%d条 (丢失%d条)\n", role, s, r, s-r)
+				} else {
+					fmt.Printf("   ⚠️ %s: 收水%d条 > 送水%d条 (多余%d条)\n", role, r, s, r-s)
+				}
+			}
+		}
+	} else {
+		fmt.Println("\n✅ 前后端完全一致！")
+	}
+
+	if receiveCount > 0 {
+		fmt.Println("\n┌─────────────────────────────────────────────────────┐")
+		fmt.Println("│ 📥 前端收水明细                                     │")
+		fmt.Println("├──────────┬─────────────────────────────────────────┤")
+		for i, entry := range m.receiveAuditLog {
+			preview := entry.Content
+			if len(preview) > 40 {
+				preview = preview[:40] + "..."
+			}
+			fmt.Printf("│ #%03d [%-12s] %-20s | %s\n",
+				i+1, entry.Source, entry.Role, preview)
+		}
+		fmt.Println("└──────────┴─────────────────────────────────────────┘")
+	}
+
+	fmt.Println("╔══════════════════════════════════════════════════════╗\n")
+}
+
+// [G60] 清理审计日志（新任务开始时调用）
+func (m *Manager) ClearAuditLogs() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.streamAuditLog = nil
+	m.receiveAuditLog = nil
+	fmt.Println("[G60] 审计日志已清理")
 }
 
 func (m *Manager) getOrCreateStreamID(role string) string {

@@ -761,6 +761,22 @@ func (a *App) GetConfig() Config {
 	return a.config
 }
 
+// [G60] 前端调用：记录收到消息（用于前后端一致性校验）
+func (a *App) RecordReceive(role, messageID, content, source string) {
+	if a.chatManager != nil {
+		a.chatManager.RecordReceive(role, messageID, content, source)
+	}
+}
+
+// [G60] 获取一致性报告（前端可调用显示）
+func (a *App) GetConsistencyReport() string {
+	if a.chatManager == nil {
+		return "ChatManager未初始化"
+	}
+	a.chatManager.PrintConsistencyReport()
+	return "已输出到终端"
+}
+
 func (a *App) SaveConfig(config Config) error {
 	oldDingEnabled := a.isDingTalkEnabled()
 	oldHttpEnabled := a.config.HTTP.Enabled

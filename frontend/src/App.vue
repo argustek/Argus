@@ -250,6 +250,18 @@ const supportsMultimodal = ref(false)
 const seenMsgIds = new Set<number>()
 const streamingRole = ref('')
 const receivedMessageIds = new Set<string>() // [G49] 已收到的消息ID（防止重复）
+
+// [G60] 前端收水记录（用于前后端一致性校验）
+let recordReceiveCounter = 0
+function recordReceive(role: string, messageId: string, content: string, source: string) {
+  recordReceiveCounter++
+  if (recordReceiveCounter <= 500) { // 限制调用次数避免性能问题
+    try {
+      ;(window as any).go.main.App.RecordReceive(role, messageId, content, source)
+      LogPrint(`[G60-RECEIVE] 🚰 收水记录: role=${role} source=${source} len=${content.length}`)
+    } catch(e) { /* 静默失败 */ }
+  }
+}
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
 const showSettings = ref(false)
 
@@ -382,6 +394,8 @@ onMounted(async () => {
         }
       }
     }
+    // [G60] 记录收水
+    recordReceive(msg.role, (msg.id || 'newmsg_') + '_' + Date.now(), msg.content, 'new-message')
   })
 
   // [G57] 监听AI流式输出事件
@@ -408,6 +422,8 @@ onMounted(async () => {
         _streaming: true,
         _messageId: msgId
       } as any)
+      // [G60] 记录收水
+      recordReceive(data.role, msgId, data.delta, 'ai-stream-chunk')
     } else {
       const lastMsg = [...messages.value].reverse().find(m => (m as any)._messageId === msgId)
       if (lastMsg) {
@@ -424,11 +440,14 @@ onMounted(async () => {
     console.log(`[G57-PM-MSG] 收到PM消息: len=${data.delta.length} content="${data.delta.substring(0,60)}"`)
     
     // [G57] 简单可靠：像AP一样直接push新消息
-    messages.value.push({
+    const pmMsg = {
       role: 'pm',
       content: data.delta,
       timestamp: Date.now()
-    } as any)
+    } as any
+    messages.value.push(pmMsg)
+    // [G60] 记录收水
+    recordReceive('pm', 'pm_' + Date.now(), data.delta, 'pm_message')
   })
 
   // 监听AP消息事件（AP审批结果）
@@ -441,6 +460,8 @@ onMounted(async () => {
       timestamp: Date.now()
     } as any)
     LogPrint(`[AP-MSG] AP消息: ${(data.delta||'').substring(0,80)}`)
+    // [G60] 记录收水
+    recordReceive('ap', 'ap_' + Date.now(), data.delta, 'ap_message')
   })
 
   // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）
@@ -528,6 +549,10 @@ onMounted(async () => {
     streamingRole.value = ''
     aiThinking.value = false
     LogPrint(`[PM-REVIEW] PM审核完成: status=${data.status}`)
+    // [G60] 任务阶段完成，输出一致性报告
+    try {
+      ;(window as any).go.main.App.GetConsistencyReport()
+    } catch(e) { /* 静默 */ }
   })
 
   EventsOn('pm_streaming_done', () => {

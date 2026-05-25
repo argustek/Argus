@@ -130,6 +130,10 @@ export function GetConfig() {
   return window['go']['main']['App']['GetConfig']();
 }
 
+export function GetConsistencyReport() {
+  return window['go']['main']['App']['GetConsistencyReport']();
+}
+
 export function GetCurrentAPIConfigID() {
   return window['go']['main']['App']['GetCurrentAPIConfigID']();
 }
@@ -308,6 +312,10 @@ export function ParseTestResult(arg1) {
 
 export function ReadFile(arg1) {
   return window['go']['main']['App']['ReadFile'](arg1);
+}
+
+export function RecordReceive(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['RecordReceive'](arg1, arg2, arg3, arg4);
 }
 
 export function RecoverTask() {
