@@ -384,11 +384,21 @@ onMounted(async () => {
     }
   })
 
-  // 监听AI流式输出事件（G49: 基于messageId去重，确保前后端一致）
+  // [G57] 监听AI流式输出事件
+  // ⚠️ 统一方案：PM/AP不再使用ai-stream-chunk（各自有专用通道）
+  // - PM → pm_message (单一通道，像AP一样)
+  // - SE → ai-stream-chunk + exec_start/exec_completed (无专用通道)
+  // - AP → ap_message (单一通道)
   EventsOff('ai-stream-chunk')
   EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string }) => {
     const msgId = data.messageId || data.role + '_unknown'
-
+    
+    // [G57] PM/AP忽略ai-stream-chunk，由各自专用通道处理
+    if (data.role === 'pm' || data.role === 'ap') {
+      console.log(`[G57-SKIP] 忽略${data.role}的ai-stream-chunk(由专用通道处理)`)
+      return
+    }
+    
     if (!receivedMessageIds.has(msgId)) {
       receivedMessageIds.add(msgId)
       streamingRole.value = data.role
@@ -406,37 +416,19 @@ onMounted(async () => {
     }
   })
 
-  // 监听PM消息事件（PM回复用户时触发）
-  // [G54修复] pm_message只负责填充空消息，不覆盖已有内容
+  // [G57] 监听PM消息事件 - 统一为AP模式（单一通道，直接push）
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string }) => {
     if (!data.delta) return
     
-    console.log(`[G54-PM-MSG] 收到PM消息: len=${data.delta.length}`)
+    console.log(`[G57-PM-MSG] 收到PM消息: len=${data.delta.length} content="${data.delta.substring(0,60)}"`)
     
-    // 查找最近的PM streaming消息
-    const pmMsgs = messages.value.filter(m => m.role === 'pm')
-    const lastPmMsg = pmMsgs[pmMsgs.length - 1]
-    
-    if (lastPmMsg && (lastPmMsg as any)._streaming) {
-      // 有streaming消息：只在内容为空或更短时填充（保留ai-stream-chunk累积的丰富内容）
-      if (!lastPmMsg.content || lastPmMsg.content.length < 10) {
-        lastPmMsg.content = data.delta
-        console.log(`[G54-PM-MSG] 填充空PM消息`)
-      } else {
-        console.log(`[G54-PM-MSG] 保留已有内容(${lastPmMsg.content.length}字符)，忽略pm_message(${data.delta.length}字符)`)
-      }
-      ;(lastPmMsg as any)._streaming = false
-    } else if (!lastPmMsg || !(lastPmMsg as any)._messageId) {
-      // 没有通过ai-stream-chunk创建的消息，创建新的
-      messages.value.push({
-        role: 'pm',
-        content: data.delta,
-        _streaming: false,
-        timestamp: Date.now()
-      } as any)
-      console.log(`[G54-PM-MSG] 创建新PM消息`)
-    }
+    // [G57] 简单可靠：像AP一样直接push新消息
+    messages.value.push({
+      role: 'pm',
+      content: data.delta,
+      timestamp: Date.now()
+    } as any)
   })
 
   // 监听AP消息事件（AP审批结果）
