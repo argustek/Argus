@@ -354,6 +354,22 @@ onMounted(async () => {
       return
     }
     if (streamingRole.value === msg.role || msg.role === 'se' || msg.role === 'ap') {
+      // [G59] SE特殊处理：优先查找已有_execData的操作卡片，避免重复创建
+      if (msg.role === 'se') {
+        const existingExecCard = [...messages.value].reverse().find(m =>
+          m.role === 'se' && (m as any)._execData
+        )
+        if (existingExecCard) {
+          // 更新已有卡片的文本内容，保留_execData
+          existingExecCard.content = msg.content
+          existingExecCard.raw = msg.raw
+          if (msg.timestamp) existingExecCard.timestamp = msg.timestamp
+          delete (existingExecCard as any)._streaming
+          LogPrint(`[G59-SE] 更新已有SE卡片(保留execData), 不创建新消息`)
+          return
+        }
+      }
+
       const lastMsgs = messages.value.slice(-3).reverse()
       const streamingIdx = lastMsgs.findIndex(m =>
         m.role === msg.role && ((m as any)._streaming || (m as any).content === msg.content)
