@@ -592,13 +592,10 @@ onMounted(() => {
   })
 
   EventsOn('task_added', (data: any) => {
-    LogPrint('[GLOBAL-TASK-BAR] 📥 task_added received: ' + JSON.stringify(data))
     globalTasks.value.push({ id: data.id, description: data.description, role: data.role || 'SE', status: 'doing', createdAt: new Date(), updatedAt: new Date() })
-    LogPrint('[GLOBAL-TASK-BAR] 📋 globalTasks now: ' + globalTasks.value.length)
   })
 
   EventsOn('task_updated', (data: any) => {
-    LogPrint('[GLOBAL-TASK-BAR] 📥 task_updated received: ' + JSON.stringify(data))
     const idx = globalTasks.value.findIndex(t => t.id === data.id)
     if (idx >= 0) {
       globalTasks.value[idx].status = data.status || 'done'
@@ -607,7 +604,6 @@ onMounted(() => {
   })
 
   EventsOn('task-clarify', (data: any) => {
-    LogPrint('[TASK-CLARIFY] 📋 收到需求澄清请求: ' + JSON.stringify(data))
     if (data && data.questions && data.questions.length > 0) {
       clarifyQuestions.value = data.questions
       clarifyFollowUp.value = !!data.isFollowUp
@@ -618,23 +614,19 @@ onMounted(() => {
 
   EventsOn('debug-query', () => {
     const state = (window as any).__debugState || {}
-    LogPrint('[DEBUG-QUERY] 📤 前端状态: ' + JSON.stringify(state))
     EventsEmit('debug-query-response', JSON.stringify(state))
   })
 
   EventsOn('reset', () => {
     globalTasks.value.length = 0
-    LogPrint('[GLOBAL-TASK-BAR] 🗑️ reset事件: 任务列表已清空')
   })
 
   EventsOn('tasks_cleared', () => {
     globalTasks.value.length = 0
-    LogPrint('[GLOBAL-TASK-BAR] 🗑️ tasks_cleared事件: 任务列表已清空')
   })
 
   EventsOn('messages-cleared', () => {
     globalTasks.value.length = 0
-    LogPrint('[GLOBAL-TASK-BAR] 🗑️ messages-cleared事件: 任务列表已清空')
   })
 
   // 初始化时从后端拉取已有任务
@@ -658,15 +650,13 @@ watch(globalTasks, (val) => {
 async function loadGlobalTasks() {
   try {
     const raw = await (window as any)['go']['main']['App']['GetGlobalTasks']()
-    LogPrint('[GLOBAL-TASK-BAR] 🔍 GetGlobalTasks returned: ' + raw)
     if (raw && raw !== '[]') {
       const tasks = JSON.parse(raw)
       globalTasks.value.length = 0
       tasks.forEach((t: any) => globalTasks.value.push(t))
-      LogPrint('[GLOBAL-TASK-BAR] 📋 loaded ' + globalTasks.value.length + ' tasks from backend')
     }
   } catch (e) {
-    LogPrint('[GLOBAL-TASK-BAR] ❌ GetGlobalTasks error: ' + e)
+    // 静默失败
   }
 }
 
@@ -898,18 +888,6 @@ function toggleExpand(index: number) {
 
 function getRichMessage(msg: any): RichMessageType | null {
   if (!msg || !window.__richMessages) return null
-  
-  // [G54调试] PM消息状态检查
-  if (msg.role === 'pm') {
-    console.log('[G54-PM] getRichMessage调用:', {
-      content: msg.content,
-      contentLen: msg.content?.length,
-      _messageId: (msg as any)._messageId,
-      _richTaskId: (msg as any)._richTaskId,
-      _streaming: (msg as any)._streaming,
-      richMessagesKeys: Object.keys(window.__richMessages)
-    })
-  }
   
   const keys = Object.keys(window.__richMessages)
   for (const k of keys) {

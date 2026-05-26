@@ -5,6 +5,8 @@ import {git} from '../models';
 import {types} from '../models';
 import {context} from '../models';
 
+export function AckMessage(arg1:string):Promise<boolean>;
+
 export function AddCommandRule(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function AddPermissionRule(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:number):Promise<void>;
@@ -86,6 +88,12 @@ export function GetGitStatus():Promise<Array<main.GitStatusEntry>>;
 export function GetGlobalTasks():Promise<string>;
 
 export function GetLogs():Promise<Array<string>>;
+
+export function GetMessageBusLost():Promise<Array<Record<string, any>>>;
+
+export function GetMessageBusPending():Promise<Array<Record<string, any>>>;
+
+export function GetMessageBusStats():Promise<Record<string, any>>;
 
 export function GetMessages():Promise<Array<main.ChatMessage>>;
 
@@ -246,6 +254,8 @@ export function UpdateDecisionRule(arg1:string,arg2:string):Promise<void>;
 export function UpdateFile(arg1:string,arg2:string):Promise<void>;
 
 export function UpdateProjectState(arg1:string,arg2:string):Promise<void>;
+
+export function UserSendMessage(arg1:string):Promise<string>;
 
 export function VerifySEWork(arg1:string):Promise<Array<main.VerificationResult>>;
 
