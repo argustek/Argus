@@ -3,6 +3,10 @@
 **Vibe Coding Platform** — A desktop coding assistant powered by a four-role AI Agent architecture (PM / SE / AP / C) that understands your intent and executes coding tasks autonomously, with a built-in independent approver to ensure code quality.
 
 <p align="center">
+  <img src="0526(2).gif" alt="Argus Demo" width="700">
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go" alt="Go">
   <img src="https://img.shields.io/badge/Wails-v2.12-DF0000?logo=wails" alt="Wails">
   <img src="https://img.shields.io/badge/Vue-3.3+-4FC08D?logo=vue.js" alt="Vue">
