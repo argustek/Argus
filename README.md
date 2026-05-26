@@ -1,10 +1,14 @@
-# Argus
-
-**Vibe Coding Platform** — A desktop coding assistant powered by a four-role AI Agent architecture (PM / SE / AP / C) that understands your intent and executes coding tasks autonomously, with a built-in independent approver to ensure code quality.
-
 <p align="center">
   <img src="0526(2).gif" alt="Argus Demo" width="700">
 </p>
+
+<p align="center">
+  <strong>Argus: The AI coding assistant with PM/SE/AP/C roles – never gets stuck, never forgets.</strong>
+</p>
+
+# Argus
+
+**Vibe Coding Platform** — A desktop coding assistant powered by a four-role AI Agent architecture (PM / SE / AP / C) that understands your intent and executes coding tasks autonomously, with a built-in independent approver to ensure code quality.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go" alt="Go">
@@ -286,7 +290,8 @@ See `config/dingtalk.example.json` for the full template.
 
 ---
 
-## 📁 Project Structure
+<details>
+<summary><b>📁 Project Structure (click to expand)</b></summary>
 
 ```
 argus/
@@ -375,49 +380,10 @@ argus/
         └── argus-desktop.exe
 ```
 
----
+</details>
 
-## 🛠️ Development Guide
-
-### Dev Mode (Hot Reload)
-
-```bash
-wails dev
-```
-
-Starts the Go backend and Vue dev server with hot reload.
-
-### Build Pipeline
-
-```
-Vue Source Code
-    ↓ npm run build
-frontend/dist (static files)
-    ↓ wails build (embed)
-build/bin/argus-desktop.exe
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-go test ./...
-
-# Run specific package tests
-go test ./internal/chat/...
-go test ./internal/ai/...
-```
-
-### Code Quality Check
-
-```bash
-go vet ./...
-go fmt ./...
-```
-
----
-
-## ⚠️ Current Limitations
+<details>
+<summary><b>⚠️ Current Limitations & Recent Fixes (click to expand)</b></summary>
 
 ### Platform Support
 - **Windows only** (primary platform; macOS/Linux may work but are untested)
@@ -437,6 +403,8 @@ go fmt ./...
 - **SE status reset on MC retry**: Fixes SE status not being reset when MC auto-retries failed tasks
 
 > We are working hard to resolve these. Your issue reports are highly appreciated!
+
+</details>
 
 ---
 
@@ -519,3 +487,4 @@ This project is licensed under the MIT License - see the [LICENSE](./LICENSE) fi
 <p align="center">
   <strong>Built with ❤️ by the Argus maintainer</strong>
 </p>
+```
