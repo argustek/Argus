@@ -699,7 +699,7 @@ func (m *Manager) initCMonitor() {
 	})
 
 	m.cMonitor.SetRetryCallback(func() error {
-		fmt.Println("[C] 自动重试：清除记忆、复位看板")
+		fmt.Println("[C] 自动重试：清除记忆、复位看板、重置SE状态")
 		if m.memoryManager != nil {
 			m.memoryManager.ClearState()
 		}
@@ -708,6 +708,10 @@ func (m *Manager) initCMonitor() {
 		m.seContinueCount = 0
 		m.seAskPMCount = 0
 		m.seReportedComplete = false
+		m.currentRole = ""
+		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		fmt.Println("[C] ✅ SE/PM状态已强制重置为IDLE")
 		return nil
 	})
 
@@ -3885,6 +3889,8 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	pmReviewResult = resp.Content
 	cleanContent := strings.TrimSpace(resp.Content)
 	fmt.Printf("[DEBUG-RICH-FLOW] ProcessReview返回: content=%q len=%d\n", cleanContent[:min(80, len(cleanContent))], len(cleanContent))
+	fmt.Printf("[DEBUG-G57] 🔍 PM完整响应:\n---\n%s\n---\n", resp.Content)
+	fmt.Printf("[DEBUG-G57] 📊 HasTasks=%v | Tasks=%+v\n", resp.HasTasks, resp.Tasks)
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
 		fmt.Printf("[RichPM] ⚠️ PM审核回复为空，强制转AP审批 (G37修复)\n")
 		m.currentRole = ""
@@ -3935,8 +3941,9 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.resetPMHealth()
 
 	parsedMsg := m.router.Parse("pm", resp.Content)
+	fmt.Printf("[DEBUG-G57] 🔀 Router解析: To=%q | Content_head=%q\n", parsedMsg.To, parsedMsg.Content[:min(80, len(parsedMsg.Content))])
 	if parsedMsg.To == "ap" {
-		fmt.Println("[RichPM] PM @AP → 路由到AP审批")
+		fmt.Println("[RichPM] PM @AP → 路由到AP审批 [EXIT-1]")
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.SetHandoverPending(HandoverPMToAP)
@@ -3950,7 +3957,7 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	}
 
 	if parsedMsg.To == "se" {
-		fmt.Println("[RichPM] PM @SE → 返工")
+		fmt.Println("[RichPM] PM @SE → 返工 [EXIT-2]")
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		return m.startSETaskWithFrom(parsedMsg.Content, "pm")
@@ -3960,11 +3967,13 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 
 	if resp.HasTasks {
-		return m.startSETask(resp.Tasks.CurrentTask)
+		fmt.Println("[RichPM] ⚠️ [G56-FIX] 审核模式忽略HasTasks，PM审核职责是验证不是分配 [EXIT-3-SKIP]")
+		fmt.Printf("[RichPM] ℹ️ 残留任务JSON: current_task=%q status=%q\n",
+			resp.Tasks.CurrentTask, resp.Tasks.Status)
 	}
 
+	fmt.Println("[RichPM] → 走fallback路径 → handleAPReview [EXIT-4]")
 	m.SetHandoverPending(HandoverPMToAP)
-	// 标记PM审核任务为完成（fallback路径）
 	if m.taskManager != nil {
 		m.taskManager.CompleteLastTaskByRole("PM")
 	}
