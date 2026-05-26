@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/Vue-3.3+-4FC08D?logo=vue.js" alt="Vue">
   <img src="https://img.shields.io/badge/TypeScript-5.0+-3178C6?logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
-  <img src="https://img.shields.io/badge/version-v0.1.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-v0.1.1-green" alt="Version">
 </p>
 
 ---
@@ -419,12 +419,18 @@ go fmt ./...
 - **Windows only** (primary platform; macOS/Linux may work but are untested)
 
 ### Known Issues & Improvements Needed
-- **Core loop stability**: Under certain conditions, the PM-SE-AP chain may hang (especially on complex multi-step tasks). We are actively debugging and will release a hotfix.
+- **API timeout resilience**: Under high latency, the AI API may time out (especially NVIDIA API), causing the SE→PM review chain to pause. We are implementing retry with exponential backoff.
 - **Test coverage**: Insufficient unit tests; most validation is manual.
 - **Large project performance**: >1000 files may slow file tree rendering.
 - **AP approval degradation**: Models without tool-calling support fall back to a no-tools approval path.
 - **SSE single connection**: Only one HTTP client can subscribe to the event stream at a time.
-- **Message routing complexity**: The four-step chain can occasionally break on edge cases (mitigated by fallback layers).
+
+### ✅ Recent Fixes (v0.1.1)
+- **G57**: PM/USR empty message fix — PM now uses single `pm_message` event channel (like AP), eliminating dual-channel conflicts
+- **G59**: SE duplicate display fix — Merges `new-message` into existing exec card instead of creating duplicate messages
+- **G60**: Frontend-backend consistency audit — Bidirectional audit log system that auto-detects message loss/duplication
+- **Message ID tracking (G49)**: Unique message IDs ensure one-to-one correspondence between backend and frontend messages
+- **SE status reset on MC retry**: Fixes SE status not being reset when MC auto-retries failed tasks
 
 > We are working hard to resolve these. Your issue reports are highly appreciated!
 
@@ -432,8 +438,7 @@ go fmt ./...
 
 ## 🗺️ Roadmap
 
-### ✅ Version 0.1.0 (Current)
-
+### ✅ Version 0.1.0 (Completed)
 - [x] PM/SE/AP/C four-role collaboration architecture
 - [x] AP independent approval + veto power
 - [x] PM→SE→PM Review→AP Approval complete pipeline
@@ -447,6 +452,14 @@ go fmt ./...
 - [x] Internationalization support (Chinese/English)
 - [x] Message deduplication mechanism
 - [x] Global panic recovery protection
+
+### ✅ Version 0.1.1 (Current — May 2026)
+- [x] **Message ID tracking system** (G49) — Unique IDs for frontend-backend consistency
+- [x] **PM empty message fix** (G57) — Unified PM event channel, no more dual-channel conflicts
+- [x] **SE duplicate display fix** (G59) — Single SE message with merged exec card content
+- [x] **Frontend-backend audit system** (G60) — Bidirectional consistency verification
+- [x] **SE status reset on MC retry** — Fixes stuck SE state after auto-retry
+- [x] **JSON content cleanup** (G51) — SE JSON output converted to human-readable text for PM review
 
 ### 🔨 Version 0.2.0 (In Development)
 
