@@ -255,12 +255,19 @@ const receivedMessageIds = new Set<string>() // [G49] 已收到的消息ID（防
 let recordReceiveCounter = 0
 function recordReceive(role: string, messageId: string, content: string, source: string) {
   recordReceiveCounter++
-  if (recordReceiveCounter <= 500) { // 限制调用次数避免性能问题
+  if (recordReceiveCounter <= 500) {
     try {
       ;(window as any).go.main.App.RecordReceive(role, messageId, content, source)
-      LogPrint(`[G60-RECEIVE] 🚰 收水记录: role=${role} source=${source} len=${content.length}`)
     } catch(e) { /* 静默失败 */ }
   }
+}
+
+// [G63] MessageBus: 自动ACK确认收到消息
+function ackMessage(msgId: string) {
+  if (!msgId) return
+  try {
+    ;(window as any).go.main.App.AckMessage(msgId)
+  } catch(e) { /* 静默失败 */ }
 }
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
 const showSettings = ref(false)
@@ -292,12 +299,7 @@ const config = ref({
 })
 
 watch(messages, (newVal, oldVal) => {
-  if (newVal.length > (oldVal?.length || 0)) {
-    const lastMsg = newVal[newVal.length - 1]
-    LogPrint(`[FRONTEND-DISPLAY] 👁️ 实际显示: role="${lastMsg.role}" content="${(lastMsg.content||'').substring(0,80)}" 总消息数=${newVal.length}`)
-  } else if (newVal.length < (oldVal?.length || 0)) {
-    LogPrint(`[FRONTEND-DISPLAY] 🗑️ 消息删除: 从${oldVal?.length||0}条变为${newVal.length}条`)
-  }
+  // 消息变化监听（静默）
 }, { deep: true })
 
 // 加载配置和消息
@@ -322,50 +324,42 @@ onMounted(async () => {
 
   // 监听新消息事件（来自后端）
   EventsOff('new-message')
-  EventsOn('new-message', (msg: { id?: number; role: string; content: string; raw?: string; timestamp?: number | string }) => {
+  EventsOn('new-message', (msg: { id?: number; role: string; content: string; raw?: string; timestamp?: number | string; _msgId?: string }) => {
+
+    // [G63] 自动ACK
+    ackMessage((msg as any)._msgId || '')
 
     // 第1层去重：按消息ID（精确匹配）
     if (msg.id != null) {
       if (seenMsgIds.has(msg.id)) {
-        LogPrint(`[FRONTEND-SKIP] ❌ ID去重: id=${msg.id} role="${msg.role}"`)
-        console.log(`[NEW-MSG] SKIP duplicate id=${msg.id}`)
         return
       }
       seenMsgIds.add(msg.id)
     }
 
-    // 第2层去重：同角色最后一条消息内容比对（防止后端不同ID但同内容双发）
-    // ⚠️ G点34修复：SE/AP消息不进行内容去重！
-    // 原因：用户可能多次发送相同任务，每次都产生独立的SE执行记录
-    // 如果去重，会导致后续任务的执行面板丢失
+    // 第2层去重：同角色最后一条消息内容比对
     if (msg.role !== 'se' && msg.role !== 'ap') {
       const lastSameRole = [...messages.value].reverse().find(m => m.role === msg.role)
       if (lastSameRole && (lastSameRole.content || '').trim() === (msg.content || '').trim()) {
-        LogPrint(`[FRONTEND-SKIP] ❌ 内容去重: role="${msg.role}"`)
-        console.log(`[NEW-MSG] SKIP content-duplicate role=${msg.role}`)
         return
       }
     }
 
-    // ✅ 增强版流式消息替换逻辑：检查最近3条消息
-    // 注意：PM消息由专用pm_message通道处理，new-message不再处理PM防止覆盖
+    // PM消息由专用pm_message通道处理，new-message不再处理PM
     if (msg.role === 'pm') {
-      LogPrint(`[NEW-MSG] ⏭️ PM消息跳过(由pm_message通道处理): content="${(msg.content||'').substring(0,60)}"`)
       return
     }
     if (streamingRole.value === msg.role || msg.role === 'se' || msg.role === 'ap') {
-      // [G59] SE特殊处理：优先查找已有_execData的操作卡片，避免重复创建
+      // [G59] SE特殊处理：优先查找已有_execData的操作卡片
       if (msg.role === 'se') {
         const existingExecCard = [...messages.value].reverse().find(m =>
           m.role === 'se' && (m as any)._execData
         )
         if (existingExecCard) {
-          // 更新已有卡片的文本内容，保留_execData
           existingExecCard.content = msg.content
           existingExecCard.raw = msg.raw
           if (msg.timestamp) existingExecCard.timestamp = msg.timestamp
           delete (existingExecCard as any)._streaming
-          LogPrint(`[G59-SE] 更新已有SE卡片(保留execData), 不创建新消息`)
           return
         }
       }
@@ -389,7 +383,6 @@ onMounted(async () => {
     } else {
       const lastSame = messages.value.findLast(m => m.role === msg.role)
       if (lastSame && (lastSame.content || '').trim() === (msg.content || '').trim()) {
-        LogPrint(`[FRONTEND-SKIP] ❌ 内容去重: role="${msg.role}"`)
         return
       }
       messages.value.push({
@@ -420,12 +413,17 @@ onMounted(async () => {
   // - SE → ai-stream-chunk + exec_start/exec_completed (无专用通道)
   // - AP → ap_message (单一通道)
   EventsOff('ai-stream-chunk')
-  EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string }) => {
-    const msgId = data.messageId || data.role + '_unknown'
+  EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string; _msgId?: string }) => {
+    const msgId = data._msgId || data.messageId || data.role + '_unknown'
     
-    // [G57] PM/AP忽略ai-stream-chunk，由各自专用通道处理
-    if (data.role === 'pm' || data.role === 'ap') {
-      console.log(`[G57-SKIP] 忽略${data.role}的ai-stream-chunk(由专用通道处理)`)
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
+    
+    // [G57+G63] PM/AP/SE忽略ai-stream-chunk
+    // PM → pm_message专用通道
+    // AP → ap_message专用通道  
+    // SE → exec_start/exec_done/exec_completed卡片机制（流式JSON是噪音，不应显示）
+    if (data.role === 'pm' || data.role === 'ap' || data.role === 'se') {
       return
     }
     
@@ -450,11 +448,12 @@ onMounted(async () => {
 
   // [G57] 监听PM消息事件 - 统一为AP模式（单一通道，直接push）
   EventsOff('pm_message')
-  EventsOn('pm_message', (data: { delta: string }) => {
+  EventsOn('pm_message', (data: { delta: string; _msgId?: string }) => {
     if (!data.delta) return
-    
-    console.log(`[G57-PM-MSG] 收到PM消息: len=${data.delta.length} content="${data.delta.substring(0,60)}"`)
-    
+
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
+
     // [G57] 简单可靠：像AP一样直接push新消息
     const pmMsg = {
       role: 'pm',
@@ -463,21 +462,22 @@ onMounted(async () => {
     } as any
     messages.value.push(pmMsg)
     // [G60] 记录收水
-    recordReceive('pm', 'pm_' + Date.now(), data.delta, 'pm_message')
+    recordReceive('pm', data._msgId || 'pm_' + Date.now(), data.delta, 'pm_message')
   })
 
   // 监听AP消息事件（AP审批结果）
   EventsOff('ap_message')
-  EventsOn('ap_message', (data: { delta: string }) => {
+  EventsOn('ap_message', (data: { delta: string; _msgId?: string }) => {
     if (!data.delta) return
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
     messages.value.push({
       role: 'ap',
       content: data.delta,
       timestamp: Date.now()
     } as any)
-    LogPrint(`[AP-MSG] AP消息: ${(data.delta||'').substring(0,80)}`)
     // [G60] 记录收水
-    recordReceive('ap', 'ap_' + Date.now(), data.delta, 'ap_message')
+    recordReceive('ap', data._msgId || 'ap_' + Date.now(), data.delta, 'ap_message')
   })
 
   // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）
@@ -497,7 +497,9 @@ onMounted(async () => {
     error?: string
   }
 
-  EventsOn('exec_start', (data: { executor: string; index: number; total: number; type: string; label: string }) => {
+  EventsOn('exec_start', (data: { executor: string; index: number; total: number; type: string; label: string; _msgId?: string }) => {
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
     if (!currentExecMsg) {
       currentExecMsg = {
         role: data.executor === 'pm' ? 'pm' : 'se',
@@ -512,7 +514,6 @@ onMounted(async () => {
         },
       }
       messages.value.push(currentExecMsg)
-      probeLogPush(4, 'PUSH', `exec role=${currentExecMsg.role} len=${messages.value.length}`)
     }
     currentExecMsg._execData.actions.push({
       index: data.index,
@@ -522,7 +523,9 @@ onMounted(async () => {
     })
   })
 
-  EventsOn('exec_done', (data: { executor: string; index: number; type: string; label: string; status: string; error?: string }) => {
+  EventsOn('exec_done', (data: { executor: string; index: number; type: string; label: string; status: string; error?: string; _msgId?: string }) => {
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
     if (!currentExecMsg) return
     const step = currentExecMsg._execData.actions.find((a: ExecActionStep) => a.index === data.index)
     if (step) {
@@ -531,7 +534,9 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('exec_output', (data: { executor: string; command: string; output: string; exit_code: number; blocked?: boolean }) => {
+  EventsOn('exec_output', (data: { executor: string; command: string; output: string; exit_code: number; blocked?: boolean; _msgId?: string }) => {
+    // [G63] 自动ACK
+    ackMessage(data._msgId || '')
     if (currentExecMsg) {
       currentExecMsg._execData.outputs.push({
         command: data.command || '',
@@ -541,7 +546,9 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('exec_completed', () => {
+  EventsOn('exec_completed', (data: { _msgId?: string }) => {
+    // [G63] 自动ACK
+    ackMessage((data as any)._msgId || '')
     if (currentExecMsg) {
       currentExecMsg._streaming = false
       currentExecMsg = null
@@ -552,7 +559,6 @@ onMounted(async () => {
         ;(msg as any)._streaming = false
       }
     }
-    LogPrint('[EXEC-DONE] 所有SE消息_streaming已重置')
   })
 
   EventsOn('pm_review_completed', (data: { taskId: string; status: string; result: string }) => {
@@ -564,11 +570,15 @@ onMounted(async () => {
     }
     streamingRole.value = ''
     aiThinking.value = false
-    LogPrint(`[PM-REVIEW] PM审核完成: status=${data.status}`)
     // [G60] 任务阶段完成，输出一致性报告
     try {
       ;(window as any).go.main.App.GetConsistencyReport()
     } catch(e) { /* 静默 */ }
+  })
+
+  // [G63] MessageBus: 监听消息丢失事件（后端检测到超时未ACK）
+  EventsOn('message_lost', (data: { msgId: string; role: string; event: string; path: string; source: string; elapsedSec: number }) => {
+    console.error(`[🚨MSG] 消息丢失! id=${data.msgId} role=${data.role} path=${data.path} source=${data.source} 等待${data.elapsedSec?.toFixed(1)}s`)
   })
 
   EventsOn('pm_streaming_done', () => {
@@ -581,24 +591,21 @@ onMounted(async () => {
         const msgId = (msg as any)._messageId
         if (msgId && receivedMessageIds.has(msgId)) {
           receivedMessageIds.delete(msgId)
-          console.log(`[SSE-AUDIT] 🗑️ 清理完成消息: messageId=${msgId} (池子中剩余${receivedMessageIds.size}条)`)
         }
       }
     }
     streamingRole.value = ''
-    LogPrint(`[PM-STREAM] PM消息流式输出完成`)
   })
 
-  // ⚠️ G点36修复：监听 AP approved 事件，清空消息防止旧任务显示
+  // 监听 AP approved 事件，清空消息防止旧任务显示
   EventsOn('project_approved', (data: { timestamp: number; action: string }) => {
-    LogPrint(`[APPROVED] ✅ 项目已批准，清空消息历史 (action=${data.action})`)
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
 
     const { ClearMessages } = require('../wailsjs/go/main/App')
     ClearMessages().then(() => {
-      LogPrint('[APPROVED] ✅ messages.json 已清空')
+      // 消息已清空
     }).catch((e: any) => {
       console.error('[APPROVED] 清空messages失败:', e)
     })

@@ -205,6 +205,7 @@ type Manager struct {
 	todoMu      sync.RWMutex
 
 	richBuilder *RichMessageBuilder
+	msgBus      *MessageBus // [G63] MessageBus双向消息总线（前后一致性保障）
 }
 
 type TodoItem struct {
@@ -306,6 +307,10 @@ func NewManager(config types.Config, workDir string) (*Manager, error) {
 	// 初始化三层模型 Builder（用于 PM/SE 可视化）
 	manager.richBuilder = NewRichMessageBuilder(manager.emitWailsEvent)
 	pmProcessor.SetShellEmitter(manager.richBuilder)
+
+	// [G63] 初始化MessageBus双向消息总线（前后一致性保障）
+	// 注意：ctx在SetContext时设置，这里先创建，ctx后续注入
+	manager.msgBus = NewMessageBus(nil)
 
 	// 初始化配置管理器（决策 + 权限）
 	configManager, err := NewConfigManager(workDir)
@@ -758,6 +763,10 @@ func (m *Manager) SetTerminalWriter(writer func(string) error) {
 func (m *Manager) SetContext(ctx context.Context) {
 	m.ctx = ctx
 	m.taskManager.SetEmitFn(m.emitWailsEvent)
+	// [G63] 注入ctx到MessageBus
+	if m.msgBus != nil {
+		m.msgBus.ctx = ctx
+	}
 }
 
 func (m *Manager) GetAllTasks() []*types.GlobalTask {
@@ -1248,14 +1257,8 @@ func (m *Manager) checkLoopBlock(fromRole, content string) bool {
 
 // handleToPM 处理发给PM的消息
 func (m *Manager) handleToPM(content string) (err error) {
-	fmt.Printf("[TRACE-PM] → handleToPM入口 content=%q state=%v currentRole=%q lastMsgFrom=%q (时间:%s)\n",
-		content[:min(60, len(content))], m.cMonitor.GetProjectState(), m.currentRole, m.lastMessageFrom, time.Now().Format("15:04:05"))
-	if strings.Contains(content, "已完成") || strings.Contains(content, "审核") {
-		fmt.Println("[TRACE-PM] 🔍 检测到SE完成/审核关键词! 可能是SE交接消息")
-	}
 	m.syncBackendStatus("pm_processing", "PM开始处理: "+content[:min(40, len(content))])
-	if allowed, reason := m.router.CheckTurn("pm", "handleToPM"); !allowed {
-		fmt.Printf("[TRACE-PM] ❌ PM被轮换拦截: %s\n", reason)
+	if allowed, _ := m.router.CheckTurn("pm", "handleToPM"); !allowed {
 		return nil
 	}
 
@@ -1286,12 +1289,8 @@ func (m *Manager) handleToPM(content string) (err error) {
 		safeCtx = m.ctx
 	}
 	m.mu.RUnlock()
-	// ⏰ PM超时45秒
-	pmCtx, pmCancel := context.WithTimeout(safeCtx, 45*time.Second)
-	// 🔴 G点探针：handleToPM入口
-	os.WriteFile("C:\\tmp\\ap_trace.log", []byte(fmt.Sprintf("[%s] handleToPM ENTRY, state=%d\n",
-		time.Now().Format("2006-01-02 15:04:05.000"),
-		m.cMonitor.GetProjectState())), 0644)
+	// ⏰ PM超时120秒（ChatWithTools需要多轮工具调用，NVIDIA API响应较慢）
+	pmCtx, pmCancel := context.WithTimeout(safeCtx, 120*time.Second)
 	defer pmCancel()
 	if m.pmProcessor != nil {
 		m.pmProcessor.SetContext(pmCtx)
@@ -1310,7 +1309,20 @@ func (m *Manager) handleToPM(content string) (err error) {
 		strings.Contains(content, "SE已完成")
 
 	if isReviewScenario && m.richBuilder != nil {
-		return m.handlePMReviewWithRich(content, pmCtx)
+		fmt.Println("[handleToPM] 🔄 G62修复: 审核场景改用ProcessStream(快速路径)，避免ChatWithTools超时")
+		m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
+			{Text: "接收 SE 完成报告"},
+			{Text: "审核 SE 执行结果"},
+			{Text: "给出审核结论"},
+		})
+		pmTaskId := m.richBuilder.GetCurrentTaskID()
+		m.richBuilder.UpdateTask(pmTaskId, 0, "running")
+		defer func() {
+			if pmTaskId != "" && m.richBuilder != nil {
+				m.richBuilder.CompleteTaskList(pmTaskId, "completed", nil)
+				m.richBuilder.Reset()
+			}
+		}()
 	}
 
 	if m.richBuilder != nil && !isReviewScenario {
@@ -1336,7 +1348,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	// 🔴 Wails事件: PM开始处理（前端用 runtime.EventsOn 监听）
 	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "pm_started", map[string]string{})
+		m.msgBusSend("pm", "", "pm_started", PathPMStream, "ProcessMessage:pm_started", map[string]string{})
 	}
 
 	// 更新PM状态为busy + 项目状态为running
@@ -1377,7 +1389,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.syncBackendStatus("error", "PM AI调用失败: "+err.Error())
 
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "error", map[string]interface{}{
+			m.msgBusSend("system", err.Error(), "error", PathSystem, "ProcessMessage:pm_error", map[string]interface{}{
 				"error": err.Error(),
 				"stage": "pm",
 			})
@@ -1524,6 +1536,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 	parsedMsg := m.router.Parse("pm", resp.Content)
 
 	if parsedMsg.To == "se" {
+		fmt.Printf("[SE-DEBUG] ✅ 检测到@SE: content=%q\n", resp.Content[:min(100, len(resp.Content))])
 		if m.checkLoopBlock("pm", resp.Content) {
 			fmt.Println("[🛡️ 防循环] PM→SE 被拦截，不走 startSETask")
 			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
@@ -1552,15 +1565,15 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 		// 过滤纯状态确认消息（防止PM循环发送"收到"/"待命"给SE触发死循环）
 		if isStatusOnlyMessage(finalTask) {
-			fmt.Printf("[handleToPM] ⚠️ PM给SE的消息是纯状态确认，跳过: %q\n", finalTask)
+			fmt.Printf("[SE-DEBUG] ⚠️ 纯状态消息拦截: %q\n", finalTask)
 			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 			return nil
 		}
+		fmt.Printf("[SE-DEBUG] ✅ 通过状态消息检查\n")
 
 		currentState := m.cMonitor.GetProjectState()
 		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
-			fmt.Printf("[handleToPM] 🛡️ 审核模式拦截@SE(state=%d): %s\n",
-				currentState, finalTask[:min(60, len(finalTask))])
+			fmt.Printf("[SE-DEBUG] 🛡️ 审核模式拦截@SE(state=%d)\n", currentState)
 
 			m.reviewCount++
 
@@ -1616,7 +1629,9 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}()
 
 		// 启动SE执行任务
+		fmt.Printf("[SE-DEBUG] 🚀 即将调用 startSETaskWithFrom: task=%q\n", finalTask[:min(60, len(finalTask))])
 		err := m.startSETaskWithFrom(finalTask, "pm")
+		fmt.Printf("[SE-DEBUG] ✅ startSETaskWithFrom 返回: err=%v\n", err)
 
 		if pmTaskId != "" && m.richBuilder != nil {
 			if err != nil {
@@ -1648,6 +1663,8 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}()
 
 		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+
+		m.addPMToUserMsg(resp.Content)
 		return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
@@ -1844,9 +1861,13 @@ func (m *Manager) emitStreamChunk(role string, delta string) {
 		})
 		m.mu.Unlock()
 
-		runtime.EventsEmit(m.ctx, "ai-stream-chunk", map[string]interface{}{
-			"role":     role,
-			"delta":    delta,
+		path := PathPMStream
+		if role == "se" {
+			path = PathSEStream
+		}
+		m.msgBusSend(role, delta, "ai-stream-chunk", path, "emitStreamChunk", map[string]interface{}{
+			"role":      role,
+			"delta":     delta,
 			"messageId": msgId,
 		})
 	}
@@ -1885,7 +1906,7 @@ func (m *Manager) PrintStreamAuditReport() {
 	for role, count := range roleStats {
 		fmt.Printf("   %-5s: %d次\n", role, count)
 	}
-	fmt.Println("═════════════════════════════════════════════════════\n")
+	fmt.Println("═════════════════════════════════════════════════════")
 }
 
 // [G60] 前端调用：记录收到消息（用于前后端一致性校验）
@@ -1928,7 +1949,7 @@ func (m *Manager) PrintConsistencyReport() {
 	fmt.Printf("📥 前端收水: %d 条\n", receiveCount)
 
 	if sendCount == 0 && receiveCount == 0 {
-		fmt.Println("✅ 无数据（可能任务未开始或已清理）\n")
+		fmt.Println("✅ 无数据（可能任务未开始或已清理）")
 		return
 	}
 
@@ -2003,7 +2024,7 @@ func (m *Manager) PrintConsistencyReport() {
 		fmt.Println("└──────────┴─────────────────────────────────────────┘")
 	}
 
-	fmt.Println("╔══════════════════════════════════════════════════════╗\n")
+	fmt.Println("╔══════════════════════════════════════════════════════╗")
 }
 
 // [G60] 清理审计日志（新任务开始时调用）
@@ -2110,7 +2131,9 @@ func (m *Manager) cleanSEJSONContent(jsonStr string) string {
 
 // startSETaskWithFrom 启动SE任务，指定来源
 func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
-	fmt.Printf("[TRACE-SE] 🚀 startSETask入口 from=%s task=%q (时间:%s)\n", from, taskDesc[:min(60, len(taskDesc))], time.Now().Format("15:04:05"))
+	fmt.Printf("[SE-DEBUG] 🚀 startSETask入口 from=%s task=%q (时间:%s)\n", from, taskDesc[:min(60, len(taskDesc))], time.Now().Format("15:04:05"))
+	fmt.Printf("[SE-DEBUG] 当前状态: currentRole=%q, isProcessing=%v, lastSpokenBy=%q\n",
+		m.currentRole, m.router.isProcessing, m.router.lastSpokenBy)
 	m.writeRouteLog(fmt.Sprintf("[SE-TASK] from=%s task='%s'", from, taskDesc))
 
 	// 创建PM任务记录（PM分配的任务）
@@ -2220,7 +2243,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	}
 	m.mu.RUnlock()
 
-	const seTimeout = 45 * time.Second
+	const seTimeout = 120 * time.Second
 	const maxRetries = 2
 
 	var resp *ai.SEResponse
@@ -2275,7 +2298,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.boardManager.UpdateTask(i18n.T("msg.task_failed"), 0)
 
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "error", map[string]interface{}{
+			m.msgBusSend("system", err.Error(), "error", PathSystem, "startSETaskWithFrom:se_error", map[string]interface{}{
 				"error": err.Error(),
 				"stage": "se",
 			})
@@ -2409,7 +2432,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			fmt.Printf("[System] → 智能CC: from=%s, 额外通知来源角色\n", from)
 		}
 
-		runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+		m.msgBusSend("se", summary, "exec_completed", PathSEExec, "startSETaskWithFrom:completed", map[string]interface{}{
 			"executor":  "se",
 			"result":    "",
 			"changelog": "",
@@ -2417,24 +2440,21 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		})
 
 		fmt.Println("[System] → SE回复走 ProcessMessageFrom (@层Router) → PM")
-		fmt.Printf("[TRACE-AP-SE2PM] 即将调用ProcessMessageFrom(se, %q) time=%s\n",
-			summary[:min(80, len(summary))], time.Now().Format("15:04:05"))
-		m.writeRouteLog(fmt.Sprintf("[TRACE-AP-SE2PM] 调用ProcessMessageFrom(se) summary=%q", summary[:min(80, len(summary))]))
-		// ⚠️ 也写到一个固定路径日志，排除文件句柄问题
-		os.WriteFile("C:\\tmp\\ap_trace.log", []byte(fmt.Sprintf("[%s] TRACE-AP-SE2PM 调用ProcessMessageFrom(se) summary=%q\n",
-			time.Now().Format("15:04:05"), summary[:min(80, len(summary))])), 0644)
 		_, err := m.ProcessMessageFrom("se", summary)
-		fmt.Printf("[TRACE-AP-SE2PM] ProcessMessageFrom返回 time=%s err=%v\n",
-			time.Now().Format("15:04:05"), err)
-		m.writeRouteLog(fmt.Sprintf("[TRACE-AP-SE2PM] ProcessMessageFrom返回 err=%v", err))
-		os.WriteFile("C:\\tmp\\ap_trace.log", []byte(fmt.Sprintf("[%s] TRACE-AP-SE2PM ProcessMessageFrom返回 err=%v\n",
-			time.Now().Format("15:04:05"), err)), 0644)
+		if err != nil {
+			fmt.Printf("[System] ⚠️ SE→PM路由失败: %v\n", err)
+			errMsg := fmt.Sprintf("@USR ❌ PM审核失败: %s\n\n请检查API配置或网络连接后重试。", err)
+			m.msgBusSend("system", errMsg, "error", PathSystem, "startSETaskWithFrom:pm_error", map[string]interface{}{
+				"error": err.Error(),
+				"stage": "se_to_pm_routing",
+			})
+			m.addPMToUserMsg(errMsg)
+		}
 		return err
 	}
 
 	// 检查SE是否需要帮助（对于没有actions的情况）
 	if resp.NeedHelp {
-		fmt.Printf("[TRACE-SE] ⚠️ SE走【NeedHelp分支】→ handleSEAskPM | actions=%d (时间:%s)\n", len(resp.Actions), time.Now().Format("15:04:05"))
 		fmt.Println("[System] SE needs help, asking PM...")
 		m.syncBackendStatus("se_need_help", "SE请求PM帮助")
 		if from != "pm" {
@@ -2521,7 +2541,7 @@ func (m *Manager) continueSETask() (err error) {
 	}
 	m.mu.RUnlock()
 
-	const seContinueTimeout = 45 * time.Second
+	const seContinueTimeout = 120 * time.Second
 	seCtx, seCancel := context.WithTimeout(safeCtx, seContinueTimeout)
 	defer seCancel()
 	m.seProcessor.SetContext(seCtx)
@@ -2605,7 +2625,7 @@ func (m *Manager) continueSETask() (err error) {
 
 		// [G53] 在最终完成路径发送exec_completed（只发一次！）
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+			m.msgBusSend("se", "completed", "exec_completed", PathSEExec, "executeSEActions:TAG-C1", map[string]interface{}{
 				"executor":  "se",
 				"result":    "completed",
 				"status":    "completed",
@@ -2654,6 +2674,25 @@ func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
 		runtime.EventsEmit(m.ctx, eventName, data)
 	}
 	m.pushSSEEvent(eventName, data)
+}
+
+// [G63] msgBusSend 通过MessageBus发送消息（强制送水+校验）
+func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, sourceLoc string, data interface{}) string {
+	fmt.Printf("[G63-DEBUG] msgBusSend: role=%s event=%s path=%s source=%s msgBus=%v enabled=%v ctx=%v\n",
+		role, eventName, path, sourceLoc,
+		m.msgBus != nil,
+		m.msgBus != nil && m.msgBus.enabled,
+		m.ctx != nil)
+	if m.msgBus != nil && m.msgBus.enabled {
+		msgId := m.msgBus.Send(role, content, eventName, path, sourceLoc, data)
+		m.pushSSEEvent(eventName, data)
+		return msgId
+	}
+	if m.ctx != nil {
+		runtime.EventsEmit(m.ctx, eventName, data)
+	}
+	m.pushSSEEvent(eventName, data)
+	return ""
 }
 
 // executeSEActions 执行SE的actions
@@ -3216,10 +3255,8 @@ func (m *Manager) addPMToUserMsg(content string) {
 	m.writeConversationLog(pmMsg)
 	fmt.Printf("[PM→USR] %s\n", content)
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "pm_message", map[string]string{"delta": content})
-		runtime.EventsEmit(m.ctx, "pm_streaming_done", map[string]interface{}{"content": content})
-	}
+	m.msgBusSend("pm", content, "pm_message", PathPMToUser, "addPMToUserMsg", map[string]string{"delta": content})
+	m.msgBusSend("pm", content, "pm_streaming_done", PathPMToUser, "addPMToUserMsg", map[string]interface{}{"content": content})
 
 	isCompletion := strings.Contains(content, "✅") || strings.Contains(content, "完成") || strings.Contains(content, "已完成")
 	asksForInput := strings.Contains(content, "?") || strings.Contains(content, "？") ||
@@ -3317,13 +3354,11 @@ func (m *Manager) addPMToSEMsg(content string) {
 	m.addHistory(pmInternalMsg)
 	fmt.Printf("[PM→SE] %s\n", content)
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "pm_message", map[string]string{"delta": content})
-		runtime.EventsEmit(m.ctx, "se_task_assigned", map[string]interface{}{
-			"task":  strings.TrimPrefix(content, "@SE "),
-			"steps": 0,
-		})
-	}
+	m.msgBusSend("pm", content, "pm_message", PathPMStream, "addPMToSEMsg", map[string]string{"delta": content})
+	m.msgBusSend("pm", content, "se_task_assigned", PathPMStream, "addPMToSEMsg", map[string]interface{}{
+		"task":  strings.TrimPrefix(content, "@SE "),
+		"steps": 0,
+	})
 }
 
 // ensureSEToUSR 确保SE消息带@USR前缀
@@ -3801,10 +3836,10 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		})
 		m.richBuilder.Reset()
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "pm_review_completed", map[string]interface{}{
+			m.msgBusSend("pm", pmReviewResult, "pm_review_completed", PathPMToUser, "handlePMReviewWithRich:done", map[string]interface{}{
 				"taskId": pmTaskId,
 				"status": status,
-				"result":  pmReviewResult,
+				"result": pmReviewResult,
 			})
 		}
 	}()
@@ -3830,7 +3865,7 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		m.cMonitor.UpdateProjectState(types.ProjectStateError)
 
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "error", map[string]interface{}{
+			m.msgBusSend("system", err.Error(), "error", PathSystem, "handlePMReviewWithRich:error", map[string]interface{}{
 				"error": err.Error(),
 				"stage": "pm_review",
 			})
@@ -3996,7 +4031,7 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.pmProcessor.SetTaskContext(pmTaskId, 1)
 
 	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "pm_started", map[string]string{})
+		m.msgBusSend("pm", "", "pm_started", PathPMStream, "handleToPM:pm_started", map[string]string{})
 	}
 	m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
@@ -4015,7 +4050,7 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdateProjectState(types.ProjectStateError)
 		if m.ctx != nil {
-			runtime.EventsEmit(m.ctx, "error", map[string]interface{}{
+			m.msgBusSend("system", err.Error(), "error", PathSystem, "handleToPM:error", map[string]interface{}{
 				"error": err.Error(), "stage": "pm_review",
 			})
 		}
@@ -4026,9 +4061,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 
 	pmReviewResult = resp.Content
 	cleanContent := strings.TrimSpace(resp.Content)
-	fmt.Printf("[DEBUG-RICH-FLOW] ProcessReview返回: content=%q len=%d\n", cleanContent[:min(80, len(cleanContent))], len(cleanContent))
-	fmt.Printf("[DEBUG-G57] 🔍 PM完整响应:\n---\n%s\n---\n", resp.Content)
-	fmt.Printf("[DEBUG-G57] 📊 HasTasks=%v | Tasks=%+v\n", resp.HasTasks, resp.Tasks)
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
 		fmt.Printf("[RichPM] ⚠️ PM审核回复为空，强制转AP审批 (G37修复)\n")
 		m.currentRole = ""
@@ -4664,9 +4696,7 @@ func (m *Manager) addAPToUserMsg(content string) {
 
 	m.writeConversationLog(apMsg)
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "ap_message", map[string]string{"delta": content})
-	}
+	m.msgBusSend("ap", content, "ap_message", PathAPToUser, "addAPToUserMsg", map[string]string{"delta": content})
 
 	go func() {
 		defer func() {
@@ -4956,6 +4986,11 @@ func (m *Manager) AddMCMessage(content string) {
 // GetConfigManager 获取配置管理器实例
 func (m *Manager) GetConfigManager() *ConfigManager {
 	return m.configManager
+}
+
+// [G63] GetMessageBus 获取MessageBus实例
+func (m *Manager) GetMessageBus() *MessageBus {
+	return m.msgBus
 }
 
 func (m *Manager) GetExecutor() *executor.Executor {

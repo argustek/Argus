@@ -768,6 +768,50 @@ func (a *App) RecordReceive(role, messageID, content, source string) {
 	}
 }
 
+// [G63] MessageBus: 前端ACK确认收到消息
+func (a *App) AckMessage(msgId string) bool {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return false
+	}
+	return a.chatManager.GetMessageBus().Ack(msgId)
+}
+
+// [G63] MessageBus: 获取待确认消息列表
+func (a *App) GetMessageBusPending() []map[string]interface{} {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return []map[string]interface{}{}
+	}
+	return a.chatManager.GetMessageBus().CheckPending()
+}
+
+// [G63] MessageBus: 获取丢失消息历史
+func (a *App) GetMessageBusLost() []map[string]interface{} {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return []map[string]interface{}{}
+	}
+	return a.chatManager.GetMessageBus().GetLostMessages()
+}
+
+// [G63] MessageBus: 获取统计信息
+func (a *App) GetMessageBusStats() map[string]interface{} {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return map[string]interface{}{"error": "MessageBus未初始化"}
+	}
+	return a.chatManager.GetMessageBus().GetStats()
+}
+
+// [G63] MessageBus: 用户发送消息（双向同步 - 前端→后端）
+func (a *App) UserSendMessage(content string) string {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return ""
+	}
+	msgId := a.chatManager.GetMessageBus().Send("user", content, "user_send", chat.PathUserInput, "UserSendMessage", map[string]interface{}{
+		"role":    "user",
+		"content": content,
+	})
+	return msgId
+}
+
 // [G60] 获取一致性报告（前端可调用显示）
 func (a *App) GetConsistencyReport() string {
 	if a.chatManager == nil {
