@@ -205,6 +205,130 @@ func (e *Executor) ReadFile(path string) (string, error) {
 	return string(data), nil
 }
 
+// [P0] EditResult 编辑结果
+type EditResult struct {
+	Success      bool   `json:"success"`
+	Error        string `json:"error,omitempty"`
+	Diff         string `json:"diff"`                   // Unified diff 格式
+	LinesChanged int    `json:"lines_changed"`          // 修改的行数
+	FilePath     string `json:"file_path,omitempty"`    // 文件路径
+}
+
+// [P0] EditFile 精确编辑文件（Search/Replace）
+func (e *Executor) EditFile(path, oldStr, newStr string) (*EditResult, error) {
+	var fullPath string
+	if filepath.IsAbs(path) {
+		fullPath = path
+	} else {
+		fullPath = filepath.Join(e.workDir, path)
+	}
+
+	if !isPathInDir(fullPath, e.workDir) {
+		return &EditResult{
+			Success:  false,
+			Error:    fmt.Sprintf("path outside work directory: %s", path),
+			FilePath: path,
+		}, nil
+	}
+
+	fmt.Printf("[Executor] EditFile: %s (old_str length: %d, new_str length: %d)\n",
+		path, len(oldStr), len(newStr))
+
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return &EditResult{
+			Success:  false,
+			Error:    fmt.Sprintf("read file failed: %v", err),
+			FilePath: path,
+		}, nil
+	}
+
+	original := string(content)
+
+	if !strings.Contains(original, oldStr) {
+		return &EditResult{
+			Success:  false,
+			Error:    fmt.Sprintf("old_str not found in %s (searched for: %.50s...)", path, oldStr),
+			Diff:     "",
+			FilePath: path,
+		}, nil
+	}
+
+	newContent := strings.Replace(original, oldStr, newStr, 1)
+
+	diff := generateUnifiedDiff(original, newContent, path)
+
+	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+		return &EditResult{
+			Success:  false,
+			Error:    fmt.Sprintf("write file failed: %v", err),
+			FilePath: path,
+		}, nil
+	}
+
+	linesChanged := countLinesChanged(oldStr, newStr)
+
+	result := &EditResult{
+		Success:      true,
+		Diff:         diff,
+		LinesChanged: linesChanged,
+		FilePath:     path,
+	}
+
+	fmt.Printf("[Executor] ✅ EditFile success: %s (%d lines changed)\n", path, linesChanged)
+
+	if e.onFileWritten != nil {
+		e.onFileWritten(path)
+	}
+
+	return result, nil
+}
+
+// [P0] generateUnifiedDiff 生成简单的 unified diff
+func generateUnifiedDiff(oldContent, newContent, filename string) string {
+	oldLines := strings.Split(oldContent, "\n")
+	newLines := strings.Split(newContent, "\n")
+
+	var diff strings.Builder
+	diff.WriteString(fmt.Sprintf("--- a/%s\n+++ b/%s\n", filename, filename))
+
+	for i := range oldLines {
+		if i >= len(newLines) || oldLines[i] != newLines[i] {
+			diff.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
+				i+1, len(oldLines)-i, i+1, len(newLines)-i))
+
+			for j := i; j < len(oldLines); j++ {
+				if j < len(newLines) && oldLines[j] == newLines[j] {
+					break
+				}
+				diff.WriteString(fmt.Sprintf("-%s\n", oldLines[j]))
+			}
+
+			for j := i; j < len(newLines); j++ {
+				if j < len(oldLines) && oldLines[j] == newLines[j] {
+					break
+				}
+				diff.WriteString(fmt.Sprintf("+%s\n", newLines[j]))
+			}
+
+			break
+		}
+	}
+
+	return diff.String()
+}
+
+// [P0] countLinesChanged 计算修改的行数
+func countLinesChanged(oldStr, newStr string) int {
+	oldLines := len(strings.Split(oldStr, "\n"))
+	newLines := len(strings.Split(newStr, "\n"))
+
+	if oldLines > newLines {
+		return oldLines
+	}
+	return newLines
+}
+
 func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 	if isServerCommand(command) {
 		return e.execServerCommand(command)

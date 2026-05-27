@@ -2812,6 +2812,99 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.taskManager.UpdateStatus(currentTask.ID, "done")
 			}
 
+		case "edit_file":
+			if _, _, allowed := m.CheckPermission("edit", action.Path); !allowed {
+				errMsg := fmt.Sprintf("权限拒绝: 无权限编辑 %s", action.Path)
+				fmt.Printf("[Action] 🚫 %s\n", errMsg)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "edit_file",
+					"label":    actionLabel,
+					"status":   "blocked",
+					"error":    errMsg,
+				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
+				continue
+			}
+
+			editResult, err := m.seExecutor.EditFile(action.Path, action.OldStr, action.NewStr)
+			if err != nil {
+				errMsg := fmt.Sprintf("编辑文件 %s 失败: %v", action.Path, err)
+				fmt.Printf("[Action] ❌ %s\n", errMsg)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "edit_file",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    errMsg,
+				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
+				return fmt.Errorf("edit file failed: %v", err)
+			}
+
+			if editResult.Success {
+				diffPreview := editResult.Diff
+				if len(diffPreview) > 300 {
+					diffPreview = diffPreview[:300] + "\n... (diff 已截断)"
+				}
+
+				resultMsg := fmt.Sprintf("✅ 编辑成功: %s\n📝 修改行数: %d\n%s",
+					action.Path,
+					editResult.LinesChanged,
+					diffPreview)
+
+				fmt.Printf("[Action] ✅ EditFile: %s (%d lines changed)\n", 
+					action.Path, editResult.LinesChanged)
+				
+				m.seProcessor.AddResult(resultMsg)
+
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor":      "se",
+					"index":         i + 1,
+					"type":          "edit_file",
+					"label":         actionLabel,
+					"status":        "done",
+					"lines_changed": editResult.LinesChanged,
+					"diff":          diffPreview,
+				})
+
+				m.emitWailsEvent("exec_output", map[string]interface{}{
+					"executor":  "se",
+					"command":   fmt.Sprintf("edit_file(%s)", action.Path),
+					"output":    resultMsg,
+					"exit_code": 0,
+				})
+
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "done")
+				}
+			} else {
+				errMsg := fmt.Sprintf("编辑失败: %s", editResult.Error)
+				fmt.Printf("[Action] ❌ EditFile failed: %s\n", editResult.Error)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "edit_file",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    editResult.Error,
+				})
+
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
+			}
+
 		case "exec":
 			if m.configManager != nil {
 				level, desc := m.configManager.CheckCommand(action.Command)
@@ -2878,6 +2971,23 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 			if err != nil {
 				errMsg := fmt.Sprintf("执行失败: %v", err)
+
+				execResult := &executor.ExecutionResult{
+					Command:  action.Command,
+					Stdout:   "",
+					Stderr:   output + "\n" + errMsg,
+					Success:  false,
+					ExitCode: -1,
+				}
+
+				errorAnalysis := executor.AnalyzeError(execResult)
+				if errorAnalysis != nil {
+					formattedError := executor.FormatErrorForSE(errorAnalysis)
+					errMsg = formattedError
+					fmt.Printf("[P0-ErrorAnalysis] 🔍 检测到错误 [%s]: %s\n",
+						errorAnalysis.Type, errorAnalysis.Message)
+				}
+
 				m.emitWailsEvent("exec_done", map[string]interface{}{
 					"executor": "se",
 					"index":    i + 1,
@@ -2901,7 +3011,21 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			if m.envMemory != nil {
 				m.envMemory.LearnFromCommand(action.Command)
 			}
-			m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", output))
+
+			successResult := &executor.ExecutionResult{
+				Command:  action.Command,
+				Stdout:   output,
+				Success:  true,
+				ExitCode: 0,
+			}
+			successAnalysis := executor.AnalyzeError(successResult)
+			if successAnalysis == nil {
+				m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", output))
+			} else {
+				fmt.Printf("[P0-ErrorAnalysis] ⚠️ 成功但检测到警告: %s\n", successAnalysis.Type)
+				m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s\n⚠️ 警告: %s", 
+					output, successAnalysis.Message))
+			}
 
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se",
