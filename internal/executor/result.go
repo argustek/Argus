@@ -245,6 +245,7 @@ func isImportError(stderr string) bool {
 		"cannot find package",
 		"no such file or directory",
 		"module not found",
+		"import cycle",
 	}
 	for _, kw := range keywords {
 		if strings.Contains(stderr, kw) {

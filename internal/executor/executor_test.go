@@ -1353,3 +1353,208 @@ ok      pkg/test    2.500s`
 	}
 	t.Logf("✅ Duration extraction: %s", cases[0].Duration)
 }
+
+// [P1] 智能重试策略测试用例
+
+func TestClassifyError_Transient(t *testing.T) {
+	exec := NewExecutor(t.TempDir(), nil)
+
+	tests := []struct {
+		input    string
+		expected ErrorCategory
+	}{
+		{"connection refused", CategoryTransient},
+		{"timeout after 30s", CategoryTransient},
+		{"429 too many requests", CategoryTransient},
+		{"503 service unavailable", CategoryTransient},
+		{"i/o timeout", CategoryTransient},
+		{"context deadline exceeded", CategoryTransient},
+		{"reset by peer", CategoryTransient},
+		{"temporary failure in network", CategoryTransient},
+	}
+
+	for _, tc := range tests {
+		result := exec.ClassifyError(tc.input)
+		if result != tc.expected {
+			t.Errorf("ClassifyError(%q) = %s, want %s", tc.input, result, tc.expected)
+		}
+	}
+	t.Logf("✅ ClassifyError Transient: %d cases passed", len(tests))
+}
+
+func TestClassifyError_Fixable(t *testing.T) {
+	exec := NewExecutor(t.TempDir(), nil)
+
+	tests := []struct {
+		input    string
+		expected ErrorCategory
+	}{
+		{"syntax error: unexpected { at line 10", CategoryFixable},
+		{"undefined: fmt", CategoryFixable},
+		{"cannot find package \"github.com/test\"", CategoryFixable},
+		{"import cycle not allowed", CategoryFixable},
+		{"panic: runtime error: index out of range", CategoryFixable},
+		{"--- FAIL: TestLogin (0.01s)", CategoryFixable},
+		{"main.go:15:2: expected ';', found '{'", CategoryFixable},
+	}
+
+	for _, tc := range tests {
+		result := exec.ClassifyError(tc.input)
+		if result != tc.expected {
+			t.Errorf("ClassifyError(%q) = %s, want %s", tc.input, result, tc.expected)
+		}
+	}
+	t.Logf("✅ ClassifyError Fixable: %d cases passed", len(tests))
+}
+
+func TestClassifyError_Permanent(t *testing.T) {
+	exec := NewExecutor(t.TempDir(), nil)
+
+	tests := []struct {
+		input    string
+		expected ErrorCategory
+	}{
+		{"permission denied", CategoryPermanent},
+		{"operation not permitted", CategoryPermanent},
+		{"fatal error: cannot allocate memory", CategoryPermanent},
+		{"access denied to resource", CategoryPermanent},
+		{"some random unknown error message", CategoryPermanent},
+	}
+
+	for _, tc := range tests {
+		result := exec.ClassifyError(tc.input)
+		if result != tc.expected {
+			t.Errorf("ClassifyError(%q) = %s, want %s", tc.input, result, tc.expected)
+		}
+	}
+	t.Logf("✅ ClassifyError Permanent: %d cases passed", len(tests))
+}
+
+func TestExecuteWithRetry_SuccessFirstTry(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`module retrytest
+
+go 1.23
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "ok.go"), []byte(`package main
+
+import "fmt"
+func main() { fmt.Println("hello") }
+`), 0644)
+
+	exec := NewExecutor(tmpDir, nil)
+	config := &RetryConfig{
+		MaxRetries:   3,
+		InitialDelay: 10 * time.Millisecond,
+		Multiplier:   1.5,
+		Jitter:       false,
+	}
+
+	result, err := exec.ExecuteWithRetry("go", []string{"run", "ok.go"}, config)
+	if err != nil {
+		t.Fatalf("ExecuteWithRetry error: %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("Expected success on first try")
+	}
+	if result.TotalAttempts != 1 {
+		t.Errorf("Expected 1 attempt, got %d", result.TotalAttempts)
+	}
+	if len(result.Attempts) != 1 {
+		t.Fatalf("Expected 1 attempt record, got %d", len(result.Attempts))
+	}
+	if result.Attempts[0].Attempt != 1 {
+		t.Error("First attempt should be #1")
+	}
+
+	t.Logf("✅ ExecuteWithRetry Success: 1 attempt, output=%s", result.FinalOutput[:min(50, len(result.FinalOutput))])
+}
+
+func TestExecuteWithRetry_PermanentStopsImmediately(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	config := &RetryConfig{
+		MaxRetries:      5,
+		InitialDelay:    10 * time.Millisecond,
+		Multiplier:      1.0,
+		Jitter:          false,
+		RetryOnFixable:  false,
+	}
+
+	result, err := exec.ExecuteWithRetry("cmd", []string{"/c", "exit 1"}, config)
+	if err != nil {
+		t.Fatalf("ExecuteWithRetry error: %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected failure for permanent error")
+	}
+	if result.TotalAttempts > 1 {
+		t.Errorf("Permanent error should stop immediately, but got %d attempts", result.TotalAttempts)
+	}
+	if result.Category != CategoryPermanent {
+		t.Errorf("Expected category permanent, got %s", result.Category)
+	}
+
+	t.Logf("✅ ExecuteWithRetry Permanent: stopped after %d attempt(s)", result.TotalAttempts)
+}
+
+func TestExecuteWithRetry_FixableNoRetryByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`module fixtest
+
+go 1.23
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "bad.go"), []byte(`package main
+
+func main() {
+	println(undefinedVar)
+}
+`), 0644)
+
+	exec := NewExecutor(tmpDir, nil)
+	config := &RetryConfig{
+		MaxRetries:   3,
+		InitialDelay: 10 * time.Millisecond,
+		Jitter:       false,
+		RetryOnFixable: false,
+	}
+
+	result, err := exec.ExecuteWithRetry("go", []string{"build", "bad.go"}, config)
+	if err != nil {
+		t.Fatalf("ExecuteWithRetry error: %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected failure for syntax error")
+	}
+	if result.Category != CategoryFixable {
+		t.Errorf("Expected category fixable, got %s", result.Category)
+	}
+	if result.TotalAttempts > 1 {
+		t.Errorf("Fixable error should NOT retry by default, got %d attempts", result.TotalAttempts)
+	}
+
+	t.Logf("✅ ExecuteWithRetry Fixable (no retry): stopped after %d attempt, category=%s",
+		result.TotalAttempts, result.Category)
+}
+
+func TestExecuteWithRetry_DefaultConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	result, err := exec.ExecuteWithRetry("go", []string{"version"}, nil)
+	if err != nil {
+		t.Fatalf("ExecuteWithRetry with nil config error: %v", err)
+	}
+
+	if !result.Success {
+		t.Error("Go version should succeed")
+	}
+	if !strings.Contains(result.FinalOutput, "go") {
+		t.Errorf("Output should contain 'go', got: %s", result.FinalOutput)
+	}
+
+	t.Logf("✅ ExecuteWithRetry default config works: success=%v", result.Success)
+}

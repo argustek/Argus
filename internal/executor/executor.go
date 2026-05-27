@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1062,4 +1063,159 @@ func parseGoTestOutput(output string) []TestCase {
 	}
 
 	return cases
+}
+
+// [P1] 智能重试策略
+
+type ErrorCategory string
+
+const (
+	CategoryTransient ErrorCategory = "transient" // 网络超时/限流/临时故障 → 可重试
+	CategoryFixable   ErrorCategory = "fixable"    // 语法/编译/导入错误 → SE可修复
+	CategoryPermanent ErrorCategory = "permanent"  // 权限/致命错误 → 不可重试
+)
+
+type RetryConfig struct {
+	MaxRetries    int           `json:"max_retries"`     // 最大重试次数（默认3）
+	InitialDelay  time.Duration `json:"initial_delay"`   // 初始延迟（默认1s）
+	MaxDelay      time.Duration `json:"max_delay"`       // 最大延迟（默认30s）
+	Multiplier    float64       `json:"multiplier"`      // 延迟倍数（默认2.0）
+	Jitter        bool          `json:"jitter"`          // 是否添加随机抖动
+	RetryOnFixable bool         `json:"retry_on_fixable"` // 是否对 fixable 错误重试（默认false）
+}
+
+type RetryAttempt struct {
+	Attempt int           `json:"attempt"`            // 第几次尝试（从1开始）
+	Error   string        `json:"error,omitempty"`    // 错误信息
+	Category ErrorCategory `json:"category,omitempty"` // 错误分类
+	Delay   time.Duration `json:"delay,omitempty"`     // 本次延迟
+	Output  string        `json:"output,omitempty"`    // 输出内容
+}
+
+type RetryResult struct {
+	Success     bool            `json:"success"`       // 最终是否成功
+	TotalAttempts int           `json:"total_attempts"` // 总尝试次数
+	FinalOutput  string         `json:"final_output"`  // 最终输出
+	FinalError   string         `json:"final_error"`   // 最终错误
+	Category     ErrorCategory  `json:"category"`      // 最终错误分类
+	Attempts     []RetryAttempt `json:"attempts"`      // 所有尝试记录
+	TotalDelay   time.Duration  `json:"total_delay"`   // 总耗时
+}
+
+func (e *Executor) ClassifyError(stderr string) ErrorCategory {
+	lower := strings.ToLower(stderr)
+
+	if isPermissionError(stderr) || strings.Contains(lower, "fatal") ||
+		strings.Contains(lower, "operation not permitted") ||
+		strings.Contains(lower, "access denied") {
+		return CategoryPermanent
+	}
+
+	if isSyntaxOrCompileError(stderr) || isImportError(stderr) {
+		return CategoryFixable
+	}
+
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") ||
+		strings.Contains(lower, "connection refused") || strings.Contains(lower, "reset by peer") ||
+		strings.Contains(lower, "429 too many requests") || strings.Contains(lower, "503 service unavailable") ||
+		strings.Contains(lower, "temporary failure") || strings.Contains(lower, "resource temporarily unavailable") ||
+		strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "context deadline") {
+		return CategoryTransient
+	}
+
+	if isRuntimeError(stderr) || isTestFailure(stderr) {
+		return CategoryFixable
+	}
+
+	return CategoryPermanent
+}
+
+func (e *Executor) ExecuteWithRetry(name string, args []string, config *RetryConfig) (*RetryResult, error) {
+	if config == nil {
+		config = &RetryConfig{
+			MaxRetries:   3,
+			InitialDelay: 1 * time.Second,
+			MaxDelay:     30 * time.Second,
+			Multiplier:   2.0,
+			Jitter:       true,
+		}
+	}
+	if config.MaxRetries == 0 {
+		config.MaxRetries = 3
+	}
+	if config.InitialDelay == 0 {
+		config.InitialDelay = 1 * time.Second
+	}
+	if config.MaxDelay == 0 {
+		config.MaxDelay = 30 * time.Second
+	}
+	if config.Multiplier == 0 {
+		config.Multiplier = 2.0
+	}
+
+	result := &RetryResult{
+		Attempts: make([]RetryAttempt, 0),
+	}
+
+	delay := config.InitialDelay
+
+	for attempt := 1; attempt <= config.MaxRetries+1; attempt++ {
+		cmd := exec.Command(name, args...)
+		cmd.Dir = e.workDir
+		output, err := cmd.CombinedOutput()
+		outputStr := strings.TrimSpace(string(output))
+
+		attemptRecord := RetryAttempt{
+			Attempt: attempt,
+			Output:  outputStr,
+		}
+
+		if err != nil {
+			attemptRecord.Error = err.Error()
+			attemptRecord.Category = e.ClassifyError(outputStr)
+			result.FinalError = outputStr
+			result.Category = attemptRecord.Category
+		} else {
+			result.Success = true
+			result.FinalOutput = outputStr
+			result.Category = CategoryTransient
+			attemptRecord.Delay = 0
+			result.Attempts = append(result.Attempts, attemptRecord)
+			break
+		}
+
+		result.Attempts = append(result.Attempts, attemptRecord)
+
+		if attempt > config.MaxRetries {
+			break
+		}
+
+		switch attemptRecord.Category {
+		case CategoryPermanent:
+			result.TotalAttempts = attempt
+			result.TotalDelay = delay
+			return result, nil
+		case CategoryFixable:
+			if !config.RetryOnFixable {
+				result.TotalAttempts = attempt
+				result.TotalDelay = delay
+				return result, nil
+			}
+		}
+
+		if config.Jitter {
+			jitter := time.Duration(rand.Int63n(int64(delay) / 2))
+			delay += jitter
+		}
+		if delay > config.MaxDelay {
+			delay = config.MaxDelay
+		}
+
+		time.Sleep(delay)
+		result.TotalDelay += delay
+		delay = time.Duration(float64(delay) * config.Multiplier)
+	}
+
+	result.TotalAttempts = len(result.Attempts)
+	return result, nil
 }
