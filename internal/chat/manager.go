@@ -2108,6 +2108,16 @@ func (m *Manager) cleanSEJSONContent(jsonStr string) string {
 			if path, ok := action["path"].(string); ok {
 				actionDescs = append(actionDescs, fmt.Sprintf("读取文件: %s", path))
 			}
+		case "search_files":
+			if pattern, ok := action["pattern"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("搜索文件: %s", pattern))
+			}
+		case "git_operation":
+			if gitAction, ok := action["git_action"].(string); ok {
+				actionDescs = append(actionDescs, fmt.Sprintf("Git操作: %s", gitAction))
+			} else {
+				actionDescs = append(actionDescs, "Git操作")
+			}
 		default:
 			actionDescs = append(actionDescs, fmt.Sprintf("操作: %s", actionType))
 		}
@@ -2742,6 +2752,14 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					label = "执行 " + a.Command
 				case "read_file":
 					label = "读取 " + a.Path
+				case "search_files":
+					label = "搜索 " + a.Pattern
+				case "git_operation":
+					if a.GitAction != "" {
+						label = "Git " + a.GitAction
+					} else {
+						label = "Git 操作"
+					}
 				default:
 					label = a.Type
 				}
@@ -2761,6 +2779,13 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				return action.Command
 			case "read_file":
 				return action.Path
+			case "search_files":
+				return action.Pattern
+			case "git_operation":
+				if action.GitAction != "" {
+					return action.GitAction
+				}
+				return ""
 			default:
 				return ""
 			}
@@ -2768,10 +2793,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 
 		var currentTask *types.GlobalTask
 		desc := fmt.Sprintf("%s%s", map[string]string{
-			"write_file": "创建文件：",
-			"edit_file":   "修改文件：",
-			"exec":        "执行命令：",
-			"read_file":   "读取文件：",
+			"write_file":    "创建文件：",
+			"edit_file":     "修改文件：",
+			"exec":          "执行命令：",
+			"read_file":     "读取文件：",
+			"search_files":  "搜索文件：",
+			"git_operation": "Git 操作：",
 		}[action.Type], actionLabel)
 		currentTask = m.taskManager.CreateTask(desc, "SE")
 
@@ -2988,6 +3015,107 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"label":         actionLabel,
 				"status":        "done",
 				"total_matches": searchResult.TotalMatches,
+			})
+
+		case "git_operation":
+			gitAction := action.GitAction
+			if gitAction == "" {
+				gitAction = "status"
+			}
+			gitResult, err := m.seExecutor.GitOperation(gitAction, action.GitMessage, action.GitArgs)
+			if err != nil {
+				errMsg := fmt.Sprintf("Git 操作失败: %v", err)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "git_operation",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    errMsg,
+				})
+				continue
+			}
+
+			if !gitResult.Success || gitResult.Error != "" {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ git %s: %s\n", gitAction, gitResult.Error))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "git_operation",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    gitResult.Error,
+				})
+				continue
+			}
+
+			resultMsg := fmt.Sprintf("🔀 git %s 成功\n", gitAction)
+			switch gitAction {
+			case "status":
+				if gitResult.Status != nil {
+					resultMsg += fmt.Sprintf("  分支: %s\n", gitResult.Status.Branch)
+					if !gitResult.Status.IsClean {
+						if len(gitResult.Status.Staged) > 0 {
+							resultMsg += fmt.Sprintf("  已暂存: %d 个文件\n", len(gitResult.Status.Staged))
+						}
+						if len(gitResult.Status.Modified) > 0 {
+							resultMsg += fmt.Sprintf("  已修改: %d 个文件\n", len(gitResult.Status.Modified))
+						}
+						if len(gitResult.Status.Untracked) > 0 {
+							resultMsg += fmt.Sprintf("  未跟踪: %d 个文件\n", len(gitResult.Status.Untracked))
+						}
+					} else {
+						resultMsg += "  工作区干净 ✅\n"
+					}
+				}
+			case "diff":
+				if gitResult.Diff != "" {
+					lines := strings.Split(gitResult.Diff, "\n")
+					if len(lines) > 50 {
+						resultMsg += strings.Join(lines[:50], "\n")
+						resultMsg += fmt.Sprintf("\n  ... (共 %d 行，已截断)\n", len(lines))
+					} else {
+						resultMsg += gitResult.Diff + "\n"
+					}
+				} else {
+					resultMsg += "  (无差异)\n"
+				}
+			case "log":
+				if len(gitResult.Log) > 0 {
+					for _, entry := range gitResult.Log {
+						resultMsg += fmt.Sprintf("  %s  %s\n", entry.Hash, entry.Message)
+					}
+				}
+			case "commit":
+				resultMsg += fmt.Sprintf("  提交: %s\n", action.GitMessage)
+			default:
+				if gitResult.Output != "" {
+					outputLines := strings.Split(gitResult.Output, "\n")
+					if len(outputLines) > 10 {
+						resultMsg += strings.Join(outputLines[:10], "\n")
+						resultMsg += fmt.Sprintf("\n  ... (共 %d 行)\n", len(outputLines))
+					} else {
+						resultMsg += gitResult.Output + "\n"
+					}
+				}
+			}
+			m.seProcessor.AddResult(resultMsg)
+
+			m.emitWailsEvent("exec_output", map[string]interface{}{
+				"executor":  "se",
+				"command":   fmt.Sprintf("git %s", gitAction),
+				"output":    resultMsg,
+				"exit_code": 0,
+			})
+
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor":  "se",
+				"index":     i + 1,
+				"type":      "git_operation",
+				"label":     actionLabel,
+				"status":    "done",
+				"git_action": gitAction,
 			})
 
 		case "exec":

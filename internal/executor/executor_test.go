@@ -3,6 +3,7 @@ package executor
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -884,5 +885,259 @@ func BenchmarkSearchFiles(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		exec.SearchFiles("return ", WithFilePattern("*.go"))
+	}
+}
+
+// [P1] GitOperation 测试用例
+
+func TestGitOperation_Status(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	initGit(t, tmpDir)
+
+	result, err := exec.GitOperation("status", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation status error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("Status should succeed, got error: %s", result.Error)
+	}
+
+	if result.Status == nil {
+		t.Fatal("Status should not be nil")
+	}
+
+	if !strings.Contains(result.Status.Branch, "main") && !strings.Contains(result.Status.Branch, "master") {
+		t.Errorf("Expected branch containing main/master, got %s", result.Status.Branch)
+	}
+
+	if !result.Status.IsClean {
+		t.Errorf("Fresh repo should be clean, got staged=%d modified=%d untracked=%d",
+			len(result.Status.Staged), len(result.Status.Modified), len(result.Status.Untracked))
+	}
+
+	t.Logf("✅ Git Status: branch=%s, clean=%v", result.Status.Branch, result.Status.IsClean)
+}
+
+func TestGitOperation_Log(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	initGitWithCommit(t, tmpDir, "initial commit")
+
+	result, err := exec.GitOperation("log", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation log error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("Log should succeed, got error: %s", result.Error)
+	}
+
+	if result.Log == nil || len(result.Log) == 0 {
+		t.Fatal("Log should have entries after commit")
+	}
+
+	if result.Log[0].Message != "initial commit" {
+		t.Errorf("Expected 'initial commit', got '%s'", result.Log[0].Message)
+	}
+
+	t.Logf("✅ Git Log: %d entries, first=%s", len(result.Log), result.Log[0].Hash)
+}
+
+func TestGitOperation_Commit(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	initGit(t, tmpDir)
+	os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("hello"), 0644)
+	runCmd(t, tmpDir, "git", "add", "test.txt")
+
+	result, err := exec.GitOperation("commit", "add test file", nil)
+	if err != nil {
+		t.Fatalf("GitOperation commit error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("Commit should succeed, got error: %s", result.Error)
+	}
+
+	logResult, _ := exec.GitOperation("log", "", nil)
+	found := false
+	for _, entry := range logResult.Log {
+		if strings.Contains(entry.Message, "add test file") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Commit message not found in git log")
+	}
+
+	t.Logf("✅ Git Commit: message found in log")
+}
+
+func TestGitOperation_CommitNoMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	result, err := exec.GitOperation("commit", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation error: %v", err)
+	}
+
+	if result.Success {
+		t.Fatal("Commit without message should fail")
+	}
+
+	if !strings.Contains(result.Error, "commit 需要 message") {
+		t.Errorf("Expected 'commit 需要 message' error, got: %s", result.Error)
+	}
+
+	t.Logf("✅ Git Commit no message correctly rejected")
+}
+
+func TestGitOperation_UnsupportedAction(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	result, err := exec.GitOperation("rebase", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation error: %v", err)
+	}
+
+	if result.Success {
+		t.Fatal("Unsupported action should fail")
+	}
+
+	if !strings.Contains(result.Error, "不支持的") {
+		t.Errorf("Expected unsupported error, got: %s", result.Error)
+	}
+
+	t.Logf("✅ Git Unsupported action rejected: %s", result.Error)
+}
+
+func TestGitOperation_Diff(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	initGitWithCommit(t, tmpDir, "initial")
+	testPath := filepath.Join(tmpDir, "test.txt")
+	os.WriteFile(testPath, []byte("original content"), 0644)
+	runCmd(t, tmpDir, "git", "add", "test.txt")
+	runCmd(t, tmpDir, "git", "commit", "-m", "add test.txt")
+	os.WriteFile(testPath, []byte("modified content"), 0644)
+
+	result, err := exec.GitOperation("diff", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation diff error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("Diff should succeed, got error: %s", result.Error)
+	}
+
+	if result.Diff == "" {
+		t.Error("Diff should have output after modifying file")
+	}
+
+	t.Logf("✅ Git Diff: %d chars", len(result.Diff))
+}
+
+func TestGitOperation_Branch(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	initGit(t, tmpDir)
+
+	result, err := exec.GitOperation("branch", "", nil)
+	if err != nil {
+		t.Fatalf("GitOperation branch error: %v", err)
+	}
+
+	if !result.Success {
+		t.Fatalf("Branch should succeed, got error: %s", result.Error)
+	}
+
+	t.Logf("✅ Git Branch: %d chars output", len(result.Output))
+}
+
+func TestParseGitStatus(t *testing.T) {
+	output := `## main...origin/main [ahead 1]
+ M internal/executor/executor.go
+M  internal/chat/manager.go
+?? new_file.go
+A  added_file.go`
+
+	status := parseGitStatus(output)
+	if status.Branch != "main" {
+		t.Errorf("Expected main, got %s", status.Branch)
+	}
+	if status.Ahead != 1 {
+		t.Errorf("Expected ahead=1, got %d", status.Ahead)
+	}
+	if len(status.Modified) == 0 {
+		t.Error("Should have modified files")
+	}
+	if len(status.Untracked) == 0 {
+		t.Error("Should have untracked files")
+	}
+	if status.IsClean {
+		t.Error("Should NOT be clean")
+	}
+	t.Logf("✅ parseGitStatus: branch=%s, staged=%d, mod=%d, untracked=%d",
+		status.Branch, len(status.Staged), len(status.Modified), len(status.Untracked))
+}
+
+func TestParseGitStatus_Clean(t *testing.T) {
+	status := parseGitStatus("## main")
+	if !status.IsClean {
+		t.Error("Clean status should report IsClean=true")
+	}
+	t.Logf("✅ parseGitStatus clean: is_clean=%v", status.IsClean)
+}
+
+func TestParseGitLog(t *testing.T) {
+	output := `a1b2c3d First commit
+e4f5g6h Second commit
+i7j8k9l Third commit`
+
+	entries := parseGitLog(output)
+	if len(entries) != 3 {
+		t.Fatalf("Expected 3 entries, got %d", len(entries))
+	}
+	if entries[0].Hash != "a1b2c3d" {
+		t.Errorf("First hash should be a1b2c3d, got %s", entries[0].Hash)
+	}
+	if entries[2].Message != "Third commit" {
+		t.Errorf("Third message wrong, got %s", entries[2].Message)
+	}
+	t.Logf("✅ parseGitLog: %d entries", len(entries))
+}
+
+func initGit(t *testing.T, dir string) {
+	t.Helper()
+	runCmd(t, dir, "git", "init")
+	runCmd(t, dir, "git", "config", "user.email", "test@test.com")
+	runCmd(t, dir, "git", "config", "user.name", "Test User")
+}
+
+func initGitWithCommit(t *testing.T, dir string, msg string) {
+	t.Helper()
+	initGit(t, dir)
+	os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0644)
+	runCmd(t, dir, "git", "add", ".")
+	runCmd(t, dir, "git", "commit", "-m", msg)
+}
+
+func runCmd(t *testing.T, dir string, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
 	}
 }

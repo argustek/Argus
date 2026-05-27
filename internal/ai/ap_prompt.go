@@ -160,6 +160,32 @@ var APTools = []Tool{
 			},
 		},
 	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "git_operation",
+			Description: "Git 版本控制操作。用于查看代码变更历史、diff 对比、确认提交记录等。支持 status/diff/log/commit/show 等操作。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"git_action": map[string]interface{}{
+						"type":        "string",
+						"description": "Git 操作类型: status(状态), diff(差异), log(日志), show(查看提交), commit(提交)",
+					},
+					"git_message": map[string]interface{}{
+						"type":        "string",
+						"description": "提交信息（仅 commit 时需要）",
+					},
+					"git_args": map[string]interface{}{
+						"type":  "array",
+						"items": map[string]interface{}{"type": "string"},
+						"description": "额外参数，如 [\"origin\", \"main\"] 或 [\"--stat\"]",
+					},
+				},
+				"required": []string{"git_action"},
+			},
+		},
+	},
 }
 
 // APResponse AP响应
@@ -377,6 +403,36 @@ func (p *APProcessor) executeTool(name string, argsJSON string) string {
 			return fmt.Sprintf("执行失败: %v\n输出:\n%s", err, output)
 		}
 		return fmt.Sprintf("执行成功\n输出:\n%s", output)
+
+	case "git_operation":
+		var args struct {
+			GitAction string   `json:"git_action"`
+			GitMessage string  `json:"git_message"`
+			GitArgs   []string `json:"git_args"`
+		}
+		if err := jsonUnmarshal(argsJSON, &args); err != nil {
+			return fmt.Sprintf("参数解析失败: %v", err)
+		}
+		if args.GitAction == "" {
+			args.GitAction = "status"
+		}
+		result, err := p.executor.GitOperation(args.GitAction, args.GitMessage, args.GitArgs)
+		if err != nil {
+			return fmt.Sprintf("Git 操作失败: %v", err)
+		}
+		if !result.Success {
+			return fmt.Sprintf("git %s 失败: %s", result.Action, result.Error)
+		}
+		output := fmt.Sprintf("✅ git %s 成功\n", result.Action)
+		switch result.Action {
+		case "status", "diff", "log":
+			output += result.Output
+		default:
+			if result.Output != "" {
+				output += result.Output
+			}
+		}
+		return output
 
 	default:
 		return fmt.Sprintf("未知工具: %s", name)

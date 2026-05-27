@@ -720,6 +720,179 @@ func (e *Executor) AssignTask(taskID, title, description string, dependencies []
 	return e.boardManager.UpdateTask(title, 1)
 }
 
+// [P1] GitResult Git 操作结果
+type GitResult struct {
+	Success   bool   `json:"success"`
+	Action    string `json:"action"`              // status/diff/commit/push/log/branch
+	Output    string `json:"output"`              // 命令输出
+	Error     string `json:"error,omitempty"`     // 错误信息
+	ExitCode  int    `json:"exit_code"`           // 退出码
+
+	Diff      string `json:"diff,omitempty"`      // diff 内容（仅 diff 操作）
+	Status    *GitStatus `json:"status,omitempty"` // 结构化状态（仅 status 操作）
+	Log       []GitLogEntry `json:"log,omitempty"` // 日志条目（仅 log 操作）
+}
+
+// [P1] GitStatus 结构化 Git 状态
+type GitStatus struct {
+	Branch     string            `json:"branch"`               // 当前分支
+	Ahead      int               `json:"ahead"`                // 领先远程提交数
+	Behind     int               `json:"behind"`               // 落后远程提交数
+	Staged     []string          `json:"staged"`               // 已暂存文件
+	Modified   []string          `json:"modified"`             // 已修改未暂存
+	Untracked  []string          `json:"untracked"`            // 未跟踪文件
+	IsClean    bool              `json:"is_clean"`             // 工作区是否干净
+}
+
+// [P1] GitLogEntry Git 日志条目
+type GitLogEntry struct {
+	Hash    string `json:"hash"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+	Message string `json:"message"`
+}
+
+// [P1] GitOperation 执行 Git 命令
+func (e *Executor) GitOperation(action, message string, args []string) (*GitResult, error) {
+	result := &GitResult{
+		Action: action,
+	}
+
+	var cmd *exec.Cmd
+	workDir := e.workDir
+
+	switch action {
+	case "status":
+		cmd = exec.Command("git", "status", "--short", "--branch")
+	case "diff":
+		diffArgs := []string{"diff"}
+		diffArgs = append(diffArgs, args...)
+		cmd = exec.Command("git", diffArgs...)
+	case "commit":
+		if message == "" {
+			return &GitResult{Success: false, Action: action, Error: "commit 需要 message"}, nil
+		}
+		cmd = exec.Command("git", "commit", "-m", message)
+	case "push":
+		pushArgs := []string{"push"}
+		pushArgs = append(pushArgs, args...)
+		cmd = exec.Command("git", pushArgs...)
+	case "pull":
+		pullArgs := []string{"pull"}
+		pullArgs = append(pullArgs, args...)
+		cmd = exec.Command("git", pullArgs...)
+	case "log":
+		logArgs := []string{"log", "--oneline", "-20"}
+		logArgs = append(logArgs, args...)
+		cmd = exec.Command("git", logArgs...)
+	case "branch":
+		branchArgs := []string{"branch", "-a"}
+		branchArgs = append(branchArgs, args...)
+		cmd = exec.Command("git", branchArgs...)
+	case "show":
+		showArgs := []string{"show"}
+		showArgs = append(showArgs, args...)
+		cmd = exec.Command("git", showArgs...)
+	default:
+		return &GitResult{Success: false, Action: action, Error: fmt.Sprintf("不支持的 git 操作: %s", action)}, nil
+	}
+
+	cmd.Dir = workDir
+	output, err := cmd.CombinedOutput()
+	result.Output = strings.TrimSpace(string(output))
+
+	if err != nil {
+		result.ExitCode = 1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		}
+		result.Error = fmt.Sprintf("git %s 失败: %v", action, err)
+		if result.Output != "" {
+			result.Error += "\n" + result.Output
+		}
+		fmt.Printf("[Executor] GitOperation '%s' ❌ exit=%d\n", action, result.ExitCode)
+		return result, nil
+	}
+
+	result.Success = true
+	result.ExitCode = 0
+
+	switch action {
+	case "diff":
+		result.Diff = result.Output
+	case "status":
+		result.Status = parseGitStatus(result.Output)
+	case "log":
+		result.Log = parseGitLog(result.Output)
+	}
+
+	fmt.Printf("[Executor] GitOperation '%s' ✅ (output %d chars)\n", action, len(result.Output))
+	return result, nil
+}
+
+func parseGitStatus(output string) *GitStatus {
+	status := &GitStatus{
+		Staged:    make([]string, 0),
+		Modified:  make([]string, 0),
+		Untracked: make([]string, 0),
+	}
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") {
+			branchInfo := strings.TrimPrefix(line, "## ")
+			parts := strings.Split(branchInfo, "...")
+			status.Branch = strings.TrimSpace(parts[0])
+			if len(parts) > 1 {
+				aheadBehind := parts[1]
+				re := regexp.MustCompile(`ahead (\d+)`)
+				if matches := re.FindStringSubmatch(aheadBehind); len(matches) > 1 {
+					fmt.Sscanf(matches[1], "%d", &status.Ahead)
+				}
+				re = regexp.MustCompile(`behind (\d+)`)
+				if matches := re.FindStringSubmatch(aheadBehind); len(matches) > 1 {
+					fmt.Sscanf(matches[1], "%d", &status.Behind)
+				}
+			}
+			continue
+		}
+		if len(line) < 2 {
+			continue
+		}
+		switch line[0] {
+		case ' ', '?':
+			status.Untracked = append(status.Untracked, strings.TrimSpace(line[2:]))
+		case 'M', 'A', 'D', 'R', 'C':
+			status.Staged = append(status.Staged, strings.TrimSpace(line[2:]))
+		}
+		if len(line) > 1 && line[0] == ' ' && line[1] == 'M' {
+			status.Modified = append(status.Modified, strings.TrimSpace(line[2:]))
+		} else if len(line) > 1 && line[0] == 'M' && line[1] != ' ' {
+			status.Modified = append(status.Modified, strings.TrimSpace(line[1:]))
+		}
+	}
+	status.IsClean = len(status.Staged) == 0 && len(status.Modified) == 0 && len(status.Untracked) == 0
+	return status
+}
+
+func parseGitLog(output string) []GitLogEntry {
+	entries := make([]GitLogEntry, 0)
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		if len(parts) >= 2 {
+			entries = append(entries, GitLogEntry{
+				Hash:    parts[0],
+				Message: parts[1],
+			})
+		}
+	}
+	return entries
+}
+
 func isPathInDir(path, dir string) bool {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
