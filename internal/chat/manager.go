@@ -2678,21 +2678,49 @@ func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
 
 // [G63] msgBusSend 通过MessageBus发送消息（强制送水+校验）
 func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, sourceLoc string, data interface{}) string {
-	fmt.Printf("[G63-DEBUG] msgBusSend: role=%s event=%s path=%s source=%s msgBus=%v enabled=%v ctx=%v\n",
+	fmt.Printf("[G63-DEBUG] msgBusSend: role=%s event=%s path=%s source=%s msgBus=%v enabled=%v mb_ctx=%v mgr_ctx=%v\n",
 		role, eventName, path, sourceLoc,
 		m.msgBus != nil,
 		m.msgBus != nil && m.msgBus.enabled,
+		m.msgBus != nil && m.msgBus.ctx != nil,
 		m.ctx != nil)
+
+	var msgId string
 	if m.msgBus != nil && m.msgBus.enabled {
-		msgId := m.msgBus.Send(role, content, eventName, path, sourceLoc, data)
-		m.pushSSEEvent(eventName, data)
-		return msgId
+		msgId = m.msgBus.Send(role, content, eventName, path, sourceLoc, data)
+		if m.msgBus.ctx == nil {
+			fmt.Printf("[G63-WARN] msgBus.ctx is nil, using manager.ctx fallback for event=%s\n", eventName)
+		}
 	}
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, eventName, data)
+
+	emitCtx := m.ctx
+	if m.msgBus != nil && m.msgBus.ctx != nil {
+		emitCtx = m.msgBus.ctx
 	}
+
+	if emitCtx != nil {
+		enrichedData := map[string]interface{}{
+			"_msgId": msgId,
+			"_role":  role,
+			"_path":  string(path),
+		}
+		if d, ok := data.(map[string]interface{}); ok {
+			for k, v := range d {
+				enrichedData[k] = v
+			}
+		} else if d, ok := data.(map[string]string); ok {
+			for k, v := range d {
+				enrichedData[k] = v
+			}
+		} else if data != nil {
+			enrichedData["data"] = data
+		}
+		runtime.EventsEmit(emitCtx, eventName, enrichedData)
+		fmt.Printf("[💧MSG-EMIT] event=%s role=%s ctx_ok=%v keys=%v\n", eventName, role, emitCtx != nil, getMapKeys(enrichedData))
+	}
+
 	m.pushSSEEvent(eventName, data)
-	return ""
+	return msgId
 }
 
 // executeSEActions 执行SE的actions
@@ -3379,6 +3407,10 @@ func (m *Manager) addPMToUserMsg(content string) {
 	m.writeConversationLog(pmMsg)
 	fmt.Printf("[PM→USR] %s\n", content)
 
+	if m.onMessageAdded != nil {
+		m.onMessageAdded(pmMsg)
+	}
+
 	m.msgBusSend("pm", content, "pm_message", PathPMToUser, "addPMToUserMsg", map[string]string{"delta": content})
 	m.msgBusSend("pm", content, "pm_streaming_done", PathPMToUser, "addPMToUserMsg", map[string]interface{}{"content": content})
 
@@ -3515,6 +3547,10 @@ func (m *Manager) addSEToUserMsg(content string) {
 	m.mu.Unlock()
 	m.writeConversationLog(seMsg)
 	fmt.Printf("[SE→USR] %s\n", content)
+
+	if m.onMessageAdded != nil {
+		m.onMessageAdded(seMsg)
+	}
 }
 
 // writeRouteLog 路由调试日志（永久保留，排查消息路由问题用）
@@ -4820,6 +4856,10 @@ func (m *Manager) addAPToUserMsg(content string) {
 
 	m.writeConversationLog(apMsg)
 
+	if m.onMessageAdded != nil {
+		m.onMessageAdded(apMsg)
+	}
+
 	m.msgBusSend("ap", content, "ap_message", PathAPToUser, "addAPToUserMsg", map[string]string{"delta": content})
 
 	go func() {
@@ -5127,6 +5167,14 @@ func (m *Manager) GetSSEBridge() *SSEBridge {
 
 func (m *Manager) GetBackendStatus() *BackendStatus {
 	return m.backendStatus
+}
+
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func (m *Manager) pushSSEEvent(eventType string, data interface{}) {

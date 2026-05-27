@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -109,6 +110,15 @@ func main() {
 		OnDomReady: func(ctx context.Context) {
 			fmt.Println("🌐 [1] OnDomReady CALLBACK - WebView2 已就绪")
 			writeExitLog(fmt.Sprintf("[%s] [WEBVIEW] WebView2 加载完成\n", time.Now().Format("2006-01-02 15:04:05")))
+
+			if len(os.Args) > 1 && os.Args[1] == "--send" && len(os.Args) > 2 {
+				msg := strings.Join(os.Args[2:], " ")
+				fmt.Printf("[FirstInstance] OnDomReady 发送消息: %s\n", msg)
+				go func() {
+					time.Sleep(500 * time.Millisecond)
+					app.SendMessage(msg)
+				}()
+			}
 		},
 		OnShutdown: func(ctx context.Context) {
 			close(heartbeatStop)
@@ -124,7 +134,7 @@ func main() {
 				secondArgs := secondInstanceData.Args
 				for i, arg := range secondArgs {
 					if arg == "--send" && i+1 < len(secondArgs) {
-						msg := secondArgs[i+1]
+						msg := strings.Join(secondArgs[i+1:], " ")
 						fmt.Printf("[SecondInstance] 收到消息: %s\n", msg)
 						app.SendMessage(msg)
 						return
