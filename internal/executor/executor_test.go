@@ -1141,3 +1141,215 @@ func runCmd(t *testing.T, dir string, name string, args ...string) {
 		t.Fatalf("%s %v failed: %v\n%s", name, args, err, out)
 	}
 }
+
+// [P1] RunTests 测试用例
+
+func TestRunTests_Basic(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`module testpkg
+
+go 1.23
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "math.go"), []byte(`package math
+
+func Add(a, b int) int { return a + b }
+func Mul(a, b int) int { return a * b }
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "math_test.go"), []byte(`package math
+
+import "testing"
+
+func TestAdd(t *testing.T) {
+	if Add(1, 2) != 3 { t.Fatal("Add failed") }
+}
+func TestMul(t *testing.T) {
+	if Mul(3, 4) != 12 { t.Fatal("Mul failed") }
+}
+func TestSkipDemo(t *testing.T) {
+	t.Skip("demo skip")
+}
+`), 0644)
+
+	exec := NewExecutor(tmpDir, nil)
+
+	report, err := exec.RunTests(TestConfig{Verbose: true})
+	if err != nil {
+		t.Fatalf("RunTests error: %v", err)
+	}
+
+	if report.Total == 0 {
+		t.Fatal("Expected at least one test case")
+	}
+
+	if !report.Success {
+		t.Errorf("Expected success, got failed=%d", report.Failed)
+	}
+
+	if report.Passed < 2 {
+		t.Errorf("Expected at least 2 passed, got %d", report.Passed)
+	}
+
+	if report.Skipped < 1 {
+		t.Errorf("Expected at least 1 skipped, got %d", report.Skipped)
+	}
+
+	t.Logf("✅ RunTests: total=%d passed=%d failed=%d skipped=%d duration=%s",
+		report.Total, report.Passed, report.Failed, report.Skipped, report.Duration)
+
+	for _, tc := range report.Cases {
+		t.Logf("  %s %s (%s)", tc.Status, tc.Name, tc.Duration)
+	}
+}
+
+func TestRunTests_Verbose(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`module calcpkg
+
+go 1.23
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "calc.go"), []byte(`package calc
+
+func Sum(nums ...int) int {
+	s := 0
+	for _, n := range nums { s += n }
+	return s
+}
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "calc_test.go"), []byte(`package calc
+
+import "testing"
+
+func TestSumEmpty(t *testing.T) { if Sum() != 0 { t.Fail() } }
+func TestSumSingle(t *testing.T) { if Sum(5) != 5 { t.Fail() } }
+func TestSumMultiple(t *testing.T) { if Sum(1,2,3) != 6 { t.Fail() } }
+`), 0644)
+
+	exec := NewExecutor(tmpDir, nil)
+
+	report, err := exec.RunTests(TestConfig{
+		Verbose: true,
+	})
+	if err != nil {
+		t.Fatalf("RunTests verbose error: %v", err)
+	}
+
+	if len(report.Cases) == 0 {
+		t.Error("Verbose mode should return individual test cases")
+	}
+
+	foundPass := false
+	for _, tc := range report.Cases {
+		if tc.Status == "pass" {
+			foundPass = true
+			break
+		}
+	}
+	if !foundPass {
+		t.Error("Expected at least one pass status in verbose mode")
+	}
+
+	t.Logf("✅ RunTests Verbose: %d cases", len(report.Cases))
+}
+
+func TestRunTests_WithCoverage(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte(`module covpkg
+
+go 1.23
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "cov.go"), []byte(`package cov
+
+func Double(n int) int { return n * 2 }
+`), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "cov_test.go"), []byte(`package cov
+
+import "testing"
+
+func TestDouble(t *testing.T) {
+	if Double(5) != 10 { t.Fatal("Double failed") }
+}
+`), 0644)
+
+	exec := NewExecutor(tmpDir, nil)
+
+	report, err := exec.RunTests(TestConfig{
+		Coverage: true,
+	})
+	if err != nil {
+		t.Fatalf("RunTests coverage error: %v", err)
+	}
+
+	coverPath := filepath.Join(tmpDir, "coverage.out")
+	if _, err := os.Stat(coverPath); err == nil {
+		t.Errorf("coverage.out should be cleaned up after test, but found at %s", coverPath)
+	}
+
+	t.Logf("✅ RunTests Coverage: coverage=%s, file cleaned up", report.Coverage)
+}
+
+func TestParseGoTestOutput_PassFailSkip(t *testing.T) {
+	output := `=== RUN   TestA
+--- PASS: TestA (0.01s)
+=== RUN   TestB
+--- FAIL: TestB (0.02s)
+	main_test.go:15: expected 42 got 24
+	main_test.go:16: assertion error
+=== RUN   TestC
+--- SKIP: TestC (0.00s)
+=== RUN   TestD
+--- PASS: TestD (0.03s)
+ok      pkg/test    0.06s`
+
+	cases := parseGoTestOutput(output)
+	if len(cases) != 4 {
+		t.Fatalf("Expected 4 cases, got %d", len(cases))
+	}
+
+	if cases[0].Name != "TestA" || cases[0].Status != "pass" {
+		t.Errorf("Case 0: expected TestA/pass, got %s/%s", cases[0].Name, cases[0].Status)
+	}
+	if cases[1].Status != "fail" {
+		t.Errorf("Case 1: expected fail, got %s", cases[1].Status)
+	}
+	if cases[1].Error == "" {
+		t.Error("Case 1 (fail) should have error message")
+	}
+	if !strings.Contains(cases[1].Error, "expected 42") {
+		t.Errorf("Case 1 error should contain 'expected 42', got: %s", cases[1].Error)
+	}
+	if cases[2].Status != "skip" {
+		t.Errorf("Case 2: expected skip, got %s", cases[2].Status)
+	}
+	if cases[3].Status != "pass" {
+		t.Errorf("Case 3: expected pass, got %s", cases[3].Status)
+	}
+
+	t.Logf("✅ parseGoTestOutput: 4 cases parsed correctly")
+}
+
+func TestParseGoTestOutput_Empty(t *testing.T) {
+	cases := parseGoTestOutput("")
+	if len(cases) != 0 {
+		t.Errorf("Expected 0 cases for empty output, got %d", len(cases))
+	}
+	cases = parseGoTestOutput("no test results here\njust random text")
+	if len(cases) != 0 {
+		t.Errorf("Expected 0 cases for garbage output, got %d", len(cases))
+	}
+	t.Logf("✅ parseGoTestOutput empty/garbage handled correctly")
+}
+
+func TestParseGoTestOutput_DurationExtraction(t *testing.T) {
+	output := `=== RUN   TestSlow
+--- PASS: TestSlow (1.234s)
+ok      pkg/test    2.500s`
+
+	cases := parseGoTestOutput(output)
+	if len(cases) != 1 {
+		t.Fatalf("Expected 1 case, got %d", len(cases))
+	}
+	if cases[0].Duration != "1.234s" {
+		t.Errorf("Expected duration 1.234s, got %s", cases[0].Duration)
+	}
+	t.Logf("✅ Duration extraction: %s", cases[0].Duration)
+}

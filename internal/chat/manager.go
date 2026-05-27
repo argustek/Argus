@@ -2118,6 +2118,11 @@ func (m *Manager) cleanSEJSONContent(jsonStr string) string {
 			} else {
 				actionDescs = append(actionDescs, "Git操作")
 			}
+		case "run_tests":
+			actionDescs = append(actionDescs, fmt.Sprintf("运行测试: %s", func() string {
+				if p, ok := action["test_pattern"].(string); ok && p != "" { return p }
+				return "./..."
+			}()))
 		default:
 			actionDescs = append(actionDescs, fmt.Sprintf("操作: %s", actionType))
 		}
@@ -2760,6 +2765,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					} else {
 						label = "Git 操作"
 					}
+				case "run_tests":
+					label = "运行测试"
 				default:
 					label = a.Type
 				}
@@ -2786,6 +2793,11 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					return action.GitAction
 				}
 				return ""
+			case "run_tests":
+				if action.TestPattern != "" {
+					return action.TestPattern
+				}
+				return "./..."
 			default:
 				return ""
 			}
@@ -2799,6 +2811,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			"read_file":     "读取文件：",
 			"search_files":  "搜索文件：",
 			"git_operation": "Git 操作：",
+			"run_tests":     "运行测试：",
 		}[action.Type], actionLabel)
 		currentTask = m.taskManager.CreateTask(desc, "SE")
 
@@ -3116,6 +3129,84 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"label":     actionLabel,
 				"status":    "done",
 				"git_action": gitAction,
+			})
+
+		case "run_tests":
+			testConfig := executor.TestConfig{
+				Pattern:  action.TestPattern,
+				Coverage: action.TestCoverage,
+				Verbose:  action.TestVerbose,
+			}
+			testReport, err := m.seExecutor.RunTests(testConfig)
+			if err != nil {
+				errMsg := fmt.Sprintf("测试运行失败: %v", err)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "run_tests",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    errMsg,
+				})
+				continue
+			}
+
+			resultMsg := fmt.Sprintf("🧪 测试结果: %s\n", func() string {
+				if testReport.Success {
+					return fmt.Sprintf("✅ 全部通过 (%d/%d)", testReport.Passed, testReport.Total)
+				}
+				return fmt.Sprintf("❌ 失败 %d/%d (通过 %d, 跳过 %d)", testReport.Failed, testReport.Total, testReport.Passed, testReport.Skipped)
+			}())
+			if testReport.Duration != "" {
+				resultMsg += fmt.Sprintf("  耗时: %s\n", testReport.Duration)
+			}
+			if testReport.Coverage != "" {
+				resultMsg += fmt.Sprintf("  覆盖率: %s\n", testReport.Coverage)
+			}
+
+			if len(testReport.Cases) > 0 {
+				resultMsg += "\n"
+				for _, tc := range testReport.Cases {
+					icon := "✅"
+					if tc.Status == "fail" || tc.Status == "panic" {
+						icon = "❌"
+					} else if tc.Status == "skip" {
+						icon = "⏭️"
+					}
+					resultMsg += fmt.Sprintf("  %s %s (%s)\n", icon, tc.Name, tc.Duration)
+					if tc.Error != "" {
+						errLines := strings.Split(tc.Error, "\n")
+						if len(errLines) > 3 {
+							resultMsg += fmt.Sprintf("      %s\n      ... (共%d行)\n", errLines[0], len(errLines))
+						} else {
+							for _, el := range errLines {
+								resultMsg += fmt.Sprintf("      %s\n", el)
+							}
+						}
+					}
+				}
+			}
+			m.seProcessor.AddResult(resultMsg)
+
+			m.emitWailsEvent("exec_output", map[string]interface{}{
+				"executor":  "se",
+				"command":   fmt.Sprintf("go test %s", action.TestPattern),
+				"output":    resultMsg,
+				"exit_code": func() int { if testReport.Success { return 0 }; return 1 }(),
+				"test_total":   testReport.Total,
+				"test_passed":  testReport.Passed,
+				"test_failed":  testReport.Failed,
+				"test_coverage": testReport.Coverage,
+			})
+
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor":     "se",
+				"index":        i + 1,
+				"type":         "run_tests",
+				"label":        actionLabel,
+				"status":       func() string { if testReport.Success { return "done" }; return "failed" }(),
+				"test_success": testReport.Success,
 			})
 
 		case "exec":

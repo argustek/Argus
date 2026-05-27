@@ -914,3 +914,152 @@ func isPathInDir(path, dir string) bool {
 	}
 	return os.IsPathSeparator(absPath[len(absDir)])
 }
+
+// [P1] 测试运行器
+
+type TestConfig struct {
+	Pattern  string `json:"pattern"`   // 测试匹配模式 ("./...", "TestLogin")
+	Coverage bool   `json:"coverage"`  // 是否生成覆盖率报告
+	Verbose  bool   `json:"verbose"`   // 详细输出
+	Timeout  int    `json:"timeout"`   // 超时秒数（默认60）
+}
+
+type TestCase struct {
+	Name     string `json:"name"`     // 测试名（如 TestEditFile_BasicReplace）
+	Status   string `json:"status"`   // pass / fail / skip / panic
+	Duration string `json:"duration"` // 耗时（如 "0.05s"）
+	Error    string `json:"error,omitempty"` // 失败时的错误信息
+}
+
+type TestReport struct {
+	Success  bool        `json:"success"`       // 全部通过?
+	Total    int         `json:"total"`         // 总测试数
+	Passed   int         `json:"passed"`        // 通过数
+	Failed   int         `json:"failed"`        // 失败数
+	Skipped  int         `json:"skipped"`       // 跳过数
+	Coverage string      `json:"coverage,omitempty"` // 覆盖率百分比
+	Duration string      `json:"duration"`      // 总耗时
+	Cases    []TestCase  `json:"cases"`         // 各用例详情
+	Output   string      `json:"output"`        // 原始输出
+}
+
+func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
+	report := &TestReport{
+		Cases: make([]TestCase, 0),
+	}
+
+	args := []string{"test"}
+	if config.Timeout == 0 {
+		config.Timeout = 60
+	}
+	args = append(args, fmt.Sprintf("-timeout=%ds", config.Timeout))
+	if config.Verbose {
+		args = append(args, "-v")
+	}
+	if config.Coverage {
+		args = append(args, "-coverprofile=coverage.out")
+	}
+	if config.Pattern != "" {
+		args = append(args, config.Pattern)
+	} else {
+		args = append(args, "./...")
+	}
+
+	cmd := exec.Command("go", args...)
+	cmd.Dir = e.workDir
+	output, err := cmd.CombinedOutput()
+	report.Output = strings.TrimSpace(string(output))
+
+	if err != nil {
+		fmt.Printf("[Executor] RunTests ❌ exit=%d\n", 1)
+	} else {
+		fmt.Printf("[Executor] RunTests ✅ (output %d chars)\n", len(report.Output))
+	}
+
+	report.Cases = parseGoTestOutput(report.Output)
+	for _, tc := range report.Cases {
+		switch tc.Status {
+		case "pass":
+			report.Passed++
+		case "fail", "panic":
+			report.Failed++
+		case "skip":
+			report.Skipped++
+		}
+	}
+	report.Total = len(report.Cases)
+	report.Success = report.Failed == 0 && report.Total > 0
+
+	durationRe := regexp.MustCompile(`ok\s+\S+\s+([\d.]+s)`)
+	if matches := durationRe.FindStringSubmatch(report.Output); len(matches) > 1 {
+		report.Duration = matches[1]
+	}
+
+	coverageRe := regexp.MustCompile(`coverage:\s*([\d.]+%)`)
+	if matches := coverageRe.FindStringSubmatch(report.Output); len(matches) > 1 {
+		report.Coverage = matches[1]
+	}
+
+	if config.Coverage {
+		coverPath := filepath.Join(e.workDir, "coverage.out")
+		if _, err := os.Stat(coverPath); err == nil {
+			os.Remove(coverPath)
+		}
+	}
+
+	return report, nil
+}
+
+func parseGoTestOutput(output string) []TestCase {
+	cases := make([]TestCase, 0)
+	lines := strings.Split(output, "\n")
+
+	passRe := regexp.MustCompile(`^--- PASS:\s+(.+?)\s+\(([\d.]+s)\)`)
+	failRe := regexp.MustCompile(`^--- FAIL:\s+(.+?)\s+\(([\d.]+s)\)`)
+	skipRe := regexp.MustCompile(`^--- SKIP:\s+(.+?)\s+\(([\d.]+s)\)`)
+	panicRe := regexp.MustCompile(`^--- PANIC:\s+(.+?)\s+\(([\d.]+s)\)`)
+
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+
+		var name, duration, status string
+		switch {
+		case passRe.MatchString(line):
+			m := passRe.FindStringSubmatch(line)
+			name, duration, status = m[1], m[2], "pass"
+		case failRe.MatchString(line):
+			m := failRe.FindStringSubmatch(line)
+			name, duration, status = m[1], m[2], "fail"
+		case skipRe.MatchString(line):
+			m := skipRe.FindStringSubmatch(line)
+			name, duration, status = m[1], m[2], "skip"
+		case panicRe.MatchString(line):
+			m := panicRe.FindStringSubmatch(line)
+			name, duration, status = m[1], m[2], "panic"
+		default:
+			continue
+		}
+
+		tc := TestCase{
+			Name:     name,
+			Status:   status,
+			Duration: duration,
+		}
+
+		if status == "fail" || status == "panic" {
+			for j := i + 1; j < len(lines) && j < i+20; j++ {
+				nextLine := lines[j]
+				if strings.HasPrefix(nextLine, "\t") || strings.HasPrefix(nextLine, "		") {
+					tc.Error += strings.TrimSpace(nextLine) + "\n"
+				} else if strings.TrimSpace(nextLine) != "" && !strings.HasPrefix(strings.TrimSpace(nextLine), "---") {
+					break
+				}
+			}
+			tc.Error = strings.TrimSpace(tc.Error)
+		}
+
+		cases = append(cases, tc)
+	}
+
+	return cases
+}
