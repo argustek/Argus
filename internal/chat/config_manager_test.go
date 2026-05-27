@@ -181,12 +181,12 @@ func TestResetDecisionToDefault(t *testing.T) {
 	cm, cleanup := newTestConfigManager(t)
 	defer cleanup()
 
-	cm.UpdateDecisionRule(types.DecisionFileDelete, types.DecisionAuto)
-	
+	cm.UpdateDecisionRule(types.DecisionFileDelete, types.DecisionManual)
+
 	err := cm.ResetDecisionToDefault()
 	require.NoError(t, err)
 
 	auto, _, err := cm.CheckDecision(types.DecisionFileDelete)
 	require.NoError(t, err)
-	assert.False(t, auto, "file_delete should revert to manual after reset")
+	assert.True(t, auto, "file_delete should be auto (default) after reset")
 }

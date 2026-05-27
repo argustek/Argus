@@ -34,10 +34,11 @@ func TestProcessMessage_ConcurrentRejection(t *testing.T) {
 	defer cleanup()
 
 	m.isProcessing = true
+	m.processingStartTime = time.Now()
 
 	result, err := m.ProcessMessage("hello")
 	assert.NoError(t, err)
-	assert.Contains(t, result, "仍在处理中")
+	assert.Equal(t, "", result, "concurrent message should be queued (empty return)")
 }
 
 func TestProcessMessage_StopCommand(t *testing.T) {

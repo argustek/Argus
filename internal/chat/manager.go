@@ -949,8 +949,10 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 			m.currentRole = ""
 			m.isRecovering = false
 			m.mu.Unlock()
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+			if m.cMonitor != nil {
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+			}
 			m.isProcessing = false
 		} else {
 			m.processingMu.Unlock()
@@ -1011,8 +1013,10 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 						m.processingMu.Lock()
 						m.isProcessing = false
 						m.processingMu.Unlock()
-						m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-						m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+						if m.cMonitor != nil {
+							m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+							m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+						}
 					}
 				}()
 				m.ProcessMessage(nextInput)
@@ -1047,13 +1051,19 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 	m.mu.Unlock()
 
 	// 💾 保存最后用户消息（用于智能恢复）
-	m.cMonitor.SaveLastUserMessage(input)
+	if m.cMonitor != nil {
+		m.cMonitor.SaveLastUserMessage(input)
+	}
 
 	// 🔄 新任务开始，重置C的自动重试标记
-	m.cMonitor.ResetRetryFlag()
+	if m.cMonitor != nil {
+		m.cMonitor.ResetRetryFlag()
+	}
 
 	// ⏰ 保存最后交互时间（用于时间感知+社交）
-	m.cMonitor.SaveLastInteractionTime(time.Now().Unix())
+	if m.cMonitor != nil {
+		m.cMonitor.SaveLastInteractionTime(time.Now().Unix())
+	}
 
 	// 立即保存任务状态（更新TaskID，不等PM/SE处理完成）
 	m.saveTaskMemoryImmediate(input)
