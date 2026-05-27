@@ -3,6 +3,9 @@ package executor
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -1218,4 +1221,593 @@ func (e *Executor) ExecuteWithRetry(name string, args []string, config *RetryCon
 
 	result.TotalAttempts = len(result.Attempts)
 	return result, nil
+}
+
+// [P1] AST 级别代码修改
+
+type ASTEditTarget struct {
+	Type     string `json:"type"`               // "function" | "struct" | "var" | "const" | "import" | "method"
+	Name     string `json:"name,omitempty"`      // 目标名称（如函数名、结构体名）
+	File     string `json:"file,omitempty"`      // 文件路径（相对于工作目录）
+	Package  string `json:"package,omitempty"`   // 包名（可选，用于跨文件定位）
+	LineNum  int    `json:"line_num,omitempty"`  // 行号（备选定位方式）
+}
+
+type ASTEditOperation struct {
+	Action    string          `json:"action"`             // "replace" | "insert_before" | "insert_after" | "delete"
+	Target    *ASTEditTarget  `json:"target"`             // 编辑目标
+	NewCode   string          `json:"new_code,omitempty"` // 新代码（replace/insert 时需要）
+	OldName   string          `json:"old_name,omitempty"` // 旧名称（rename 时需要）
+	NewName   string          `json:"new_name,omitempty"` // 新名称（rename 时需要）
+}
+
+type ASTEditResult struct {
+	Success      bool   `json:"success"`
+	Error        string `json:"error,omitempty"`
+	File         string `json:"file,omitempty"`
+	Action       string `json:"action,omitempty"`
+	TargetType   string `json:"target_type,omitempty"`
+	TargetName   string `json:"target_name,omitempty"`
+	LinesChanged int    `json:"lines_changed"`
+	Diff         string `json:"diff,omitempty"`
+	OriginalCode string `json:"original_code,omitempty"`
+	ModifiedCode string `json:"modified_code,omitempty"`
+	AstValid     bool   `json:"ast_valid"`
+}
+
+type GoFileInfo struct {
+	Package    string          `json:"package"`
+	Imports    []string        `json:"imports"`
+	Functions  []FunctionInfo  `json:"functions"`
+	Structs    []StructInfo    `json:"structs"`
+	Interfaces []InterfaceInfo `json:"interfaces"`
+	Vars       []VarInfo       `json:"vars"`
+	Constants  []ConstInfo     `json:"constants"`
+	Types      []TypeInfo      `json:"types"`
+	TotalLines int             `json:"total_lines"`
+}
+
+type FunctionInfo struct {
+	Name       string `json:"name"`
+	Receiver   string `json:"receiver,omitempty"`
+	StartLine  int    `json:"start_line"`
+	EndLine    int    `json:"end_line"`
+	Signature  string `json:"signature"`
+	IsExported bool   `json:"is_exported"`
+	DocComment string `json:"doc_comment,omitempty"`
+}
+
+type StructInfo struct {
+	Name      string      `json:"name"`
+	StartLine int         `json:"start_line"`
+	EndLine   int         `json:"end_line"`
+	Fields    []FieldInfo `json:"fields"`
+}
+
+type FieldInfo struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Tags string `json:"tags,omitempty"`
+}
+
+type InterfaceInfo struct {
+	Name      string   `json:"name"`
+	StartLine int      `json:"start_line"`
+	EndLine   int      `json:"end_line"`
+	Methods   []string `json:"methods"`
+}
+
+type VarInfo struct {
+	Name       string `json:"name"`
+	Type       string `json:"type,omitempty"`
+	StartLine  int    `json:"start_line"`
+	IsExported bool   `json:"is_exported"`
+}
+
+type ConstInfo struct {
+	Name      string `json:"name"`
+	Type      string `json:"type,omitempty"`
+	Value     string `json:"value,omitempty"`
+	StartLine int    `json:"start_line"`
+}
+
+type TypeInfo struct {
+	Name      string `json:"name"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Kind      string `json:"kind"`
+}
+
+func (e *Executor) ParseGoFile(filePath string) (*GoFileInfo, error) {
+	var fullPath string
+	if filepath.IsAbs(filePath) {
+		fullPath = filePath
+	} else {
+		fullPath = filepath.Join(e.workDir, filePath)
+	}
+	if !isPathInDir(fullPath, e.workDir) {
+		return nil, fmt.Errorf("path outside work directory: %s", filePath)
+	}
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("read file failed: %v", err)
+	}
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "", content, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("parse failed: %v", err)
+	}
+	info := &GoFileInfo{
+		Package:    node.Name.Name,
+		Imports:    make([]string, 0),
+		Functions:  make([]FunctionInfo, 0),
+		Structs:    make([]StructInfo, 0),
+		Interfaces: make([]InterfaceInfo, 0),
+		Vars:       make([]VarInfo, 0),
+		Constants:  make([]ConstInfo, 0),
+		Types:      make([]TypeInfo, 0),
+	}
+	lines := strings.Split(string(content), "\n")
+	info.TotalLines = len(lines)
+	ast.Inspect(node, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ImportSpec:
+			importPath := ""
+			if x.Path != nil {
+				importPath = strings.Trim(x.Path.Value, `"`)
+			}
+			info.Imports = append(info.Imports, importPath)
+		case *ast.FuncDecl:
+			fi := FunctionInfo{
+				Name:      x.Name.Name,
+				StartLine: fset.Position(x.Pos()).Line,
+				EndLine:   fset.Position(x.End()).Line,
+				IsExported: ast.IsExported(x.Name.Name),
+			}
+			if x.Doc != nil {
+				fi.DocComment = x.Doc.Text()
+			}
+			if x.Recv != nil && len(x.Recv.List) > 0 {
+				if se, ok := x.Recv.List[0].Type.(*ast.Ident); ok {
+					fi.Receiver = se.Name
+				} else if se, ok := x.Recv.List[0].Type.(*ast.StarExpr); ok {
+					if ident, ok := se.X.(*ast.Ident); ok {
+						fi.Receiver = "*" + ident.Name
+					}
+				}
+			}
+			fi.Signature = extractFuncSignature(x)
+			info.Functions = append(info.Functions, fi)
+		case *ast.GenDecl:
+			if x.Tok == token.TYPE {
+				for _, spec := range x.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						ti := TypeInfo{Name: ts.Name.Name, StartLine: fset.Position(ts.Pos()).Line, EndLine: fset.Position(ts.End()).Line}
+						switch ts.Type.(type) {
+						case *ast.StructType:
+							ti.Kind = "struct"
+							si := StructInfo{Name: ts.Name.Name, StartLine: ti.StartLine, EndLine: ti.EndLine}
+							if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
+								for _, field := range st.Fields.List {
+									fld := FieldInfo{}
+									if len(field.Names) > 0 {
+										fld.Name = field.Names[0].Name
+									}
+									fld.Type = exprToString(field.Type)
+									if field.Tag != nil {
+										fld.Tags = strings.Trim(field.Tag.Value, "`")
+									}
+									si.Fields = append(si.Fields, fld)
+								}
+							}
+							info.Structs = append(info.Structs, si)
+						case *ast.InterfaceType:
+							ti.Kind = "interface"
+							ii := InterfaceInfo{Name: ts.Name.Name, StartLine: ti.StartLine, EndLine: ti.EndLine}
+							if it, ok := ts.Type.(*ast.InterfaceType); ok && it.Methods != nil {
+								for _, method := range it.Methods.List {
+									if len(method.Names) > 0 {
+										ii.Methods = append(ii.Methods, method.Names[0].Name)
+									}
+								}
+							}
+							info.Interfaces = append(info.Interfaces, ii)
+						default:
+							ti.Kind = "alias"
+						}
+						info.Types = append(info.Types, ti)
+					}
+				}
+			} else if x.Tok == token.VAR {
+				for _, spec := range x.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, name := range vs.Names {
+							vi := VarInfo{Name: name.Name, StartLine: fset.Position(name.Pos()).Line, IsExported: ast.IsExported(name.Name)}
+							if vs.Type != nil {
+								vi.Type = exprToString(vs.Type)
+							}
+							info.Vars = append(info.Vars, vi)
+						}
+					}
+				}
+			} else if x.Tok == token.CONST {
+				for _, spec := range x.Specs {
+					if cs, ok := spec.(*ast.ValueSpec); ok {
+						for i, name := range cs.Names {
+							ci := ConstInfo{Name: name.Name, StartLine: fset.Position(name.Pos()).Line}
+							if cs.Type != nil {
+								ci.Type = exprToString(cs.Type)
+							}
+							if i < len(cs.Values) && cs.Values[i] != nil {
+								if bl, ok := cs.Values[i].(*ast.BasicLit); ok {
+									ci.Value = bl.Value
+								}
+							}
+							info.Constants = append(info.Constants, ci)
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	fmt.Printf("[Executor] ParseGoAST ✅ %s: pkg=%s funcs=%d structs=%d\n", filePath, info.Package, len(info.Functions), len(info.Structs))
+	return info, nil
+}
+
+func (e *Executor) EditFileWithAST(op *ASTEditOperation) (*ASTEditResult, error) {
+	result := &ASTEditResult{Action: op.Action}
+	if op.Target == nil {
+		result.Error = "target is required"
+		return result, nil
+	}
+	result.TargetType = op.Target.Type
+	result.TargetName = op.Target.Name
+	result.File = op.Target.File
+	var fullPath string
+	if filepath.IsAbs(op.Target.File) {
+		fullPath = op.Target.File
+	} else {
+		fullPath = filepath.Join(e.workDir, op.Target.File)
+	}
+	if !isPathInDir(fullPath, e.workDir) {
+		result.Error = fmt.Sprintf("path outside work directory: %s", op.Target.File)
+		return result, nil
+	}
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		result.Error = fmt.Sprintf("read file failed: %v", err)
+		return result, nil
+	}
+	original := string(content)
+	lines := strings.Split(original, "\n")
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "", content, parser.ParseComments)
+	if err != nil {
+		result.Error = fmt.Sprintf("parse failed (fallback to text mode): %v", err)
+		return e.fallbackTextEdit(op, original, fullPath, result)
+	}
+	targetPos, targetEnd, found := findASTNode(fset, node, op.Target)
+	if !found {
+		result.Error = fmt.Sprintf("target not found: type=%s name=%s", op.Target.Type, op.Target.Name)
+		return result, nil
+	}
+	startLine := fset.Position(targetPos).Line - 1
+	endLine := fset.Position(targetEnd).Line
+	result.OriginalCode = strings.Join(lines[startLine:endLine], "\n")
+	newContent := original
+	switch op.Action {
+	case "replace":
+		before := lines[:startLine]
+		after := lines[endLine:]
+		newLines := append(before, strings.Split(op.NewCode, "\n")...)
+		newLines = append(newLines, after...)
+		newContent = strings.Join(newLines, "\n")
+		result.ModifiedCode = op.NewCode
+	case "delete":
+		before := lines[:startLine]
+		after := lines[endLine:]
+		newContent = strings.Join(append(before, after...), "\n")
+		result.ModifiedCode = ""
+	case "insert_before":
+		before := lines[:startLine]
+		after := lines[startLine:]
+		insertLines := strings.Split(op.NewCode, "\n")
+		newContent = strings.Join(append(append(before, insertLines...), after...), "\n")
+	case "insert_after":
+		before := lines[:endLine]
+		after := lines[endLine:]
+		insertLines := strings.Split(op.NewCode, "\n")
+		newContent = strings.Join(append(append(before, insertLines...), after...), "\n")
+	default:
+		result.Error = fmt.Sprintf("unsupported action: %s", op.Action)
+		return result, nil
+	}
+	diff := generateDiff(original, newContent, op.Target.File)
+	result.Diff = diff
+	result.LinesChanged = countASTLinesChanged(original, newContent)
+	if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+		result.Error = fmt.Sprintf("write file failed: %v", err)
+		return result, nil
+	}
+	fset2 := token.NewFileSet()
+	_, parseErr := parser.ParseFile(fset2, "", []byte(newContent), parser.ParseComments)
+	result.AstValid = (parseErr == nil)
+	if parseErr != nil {
+		fmt.Printf("[Executor] EditFileWithAST ⚠️ syntax check failed: %v\n", parseErr)
+	} else {
+		fmt.Printf("[Executor] EditFileWithAST ✅ action=%s target=%s/%s lines=%d\n", op.Action, op.Target.Type, op.Target.Name, result.LinesChanged)
+	}
+	result.Success = true
+	return result, nil
+}
+
+func (e *Executor) fallbackTextEdit(op *ASTEditOperation, original, fullPath string, result *ASTEditResult) (*ASTEditResult, error) {
+	if op.Action == "replace" && op.Target.Name != "" {
+		pattern := op.Target.Name
+		switch op.Target.Type {
+		case "function":
+			pattern = "func " + op.Target.Name
+		case "struct":
+			pattern = "type " + op.Target.Name + " struct"
+		case "interface":
+			pattern = "type " + op.Target.Name + " interface"
+		}
+		if strings.Contains(original, pattern) {
+			idx := strings.Index(original, pattern)
+			before := original[:idx]
+			after := original[idx:]
+			endIdx := findBlockEnd(after)
+			afterBlock := after[endIdx:]
+			newContent := before + op.NewCode + afterBlock
+			diff := generateDiff(original, newContent, op.Target.File)
+			result.Diff = diff
+			result.LinesChanged = countASTLinesChanged(original, newContent)
+			if err := os.WriteFile(fullPath, []byte(newContent), 0644); err != nil {
+				result.Error = fmt.Sprintf("write file failed: %v", err)
+				return result, nil
+			}
+			result.Success = true
+			result.AstValid = false
+			return result, nil
+		}
+	}
+	result.Error = "text fallback also failed: cannot find target"
+	return result, nil
+}
+
+func findASTNode(fset *token.FileSet, node ast.Node, target *ASTEditTarget) (token.Pos, token.Pos, bool) {
+	var foundPos, foundEnd token.Pos
+	found := false
+	ast.Inspect(node, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		match := false
+		switch target.Type {
+		case "function":
+			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == target.Name {
+				match = true
+			}
+		case "method":
+			if fn, ok := n.(*ast.FuncDecl); ok && fn.Recv != nil && len(fn.Recv.List) > 0 && fn.Name.Name == target.Name {
+				match = true
+			}
+		case "struct":
+			if ts, ok := n.(*ast.TypeSpec); ok && ts.Name.Name == target.Name {
+				if _, isStruct := ts.Type.(*ast.StructType); isStruct {
+					match = true
+				}
+			}
+		case "interface":
+			if ts, ok := n.(*ast.TypeSpec); ok && ts.Name.Name == target.Name {
+				if _, isIface := ts.Type.(*ast.InterfaceType); isIface {
+					match = true
+				}
+			}
+		case "var":
+			if gs, ok := n.(*ast.GenDecl); ok && gs.Tok == token.VAR {
+				for _, spec := range gs.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						for _, name := range vs.Names {
+							if name.Name == target.Name { match = true; break }
+						}
+					}
+				}
+			}
+		case "const":
+			if gs, ok := n.(*ast.GenDecl); ok && gs.Tok == token.CONST {
+				for _, spec := range gs.Specs {
+					if cs, ok := spec.(*ast.ValueSpec); ok {
+						for _, name := range cs.Names {
+							if name.Name == target.Name { match = true; break }
+						}
+					}
+				}
+			}
+		case "import":
+			if is, ok := n.(*ast.ImportSpec); ok {
+				path := ""
+				if is.Path != nil { path = strings.Trim(is.Path.Value, `"`) }
+				if path == target.Name || strings.HasSuffix(path, target.Name) {
+					match = true
+				}
+			}
+		case "type":
+			if ts, ok := n.(*ast.TypeSpec); ok && ts.Name.Name == target.Name {
+				match = true
+			}
+		}
+		if match {
+			foundPos = n.Pos()
+			foundEnd = n.End()
+			found = true
+			return false
+		}
+		return true
+	})
+	return foundPos, foundEnd, found
+}
+
+func findBlockEnd(s string) int {
+	braceCount := 0
+	inString := false
+	stringChar := rune(0)
+	for i, ch := range s {
+		if inString {
+			if ch == stringChar { inString = false }
+			continue
+		}
+		if ch == '"' || ch == '`' || ch == '\'' {
+			inString = true
+			stringChar = ch
+			continue
+		}
+		if ch == '{' { braceCount++ } else if ch == '}' {
+			braceCount--
+			if braceCount == 0 { return i + 1 }
+		}
+	}
+	return len(s)
+}
+
+func generateDiff(old, new, filename string) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new, "\n")
+	var buf strings.Builder
+	buf.WriteString(fmt.Sprintf("--- a/%s\n", filename))
+	buf.WriteString(fmt.Sprintf("+++ b/%s\n", filename))
+	maxLen := len(oldLines)
+	if len(newLines) > maxLen { maxLen = len(newLines) }
+	for i := 0; i < maxLen; i++ {
+		oldLine := ""
+		newLine := ""
+		if i < len(oldLines) { oldLine = oldLines[i] }
+		if i < len(newLines) { newLine = newLines[i] }
+		if oldLine == newLine {
+			buf.WriteString(fmt.Sprintf(" %s\n", oldLine))
+		} else {
+			if oldLine != "" && i < len(oldLines) { buf.WriteString(fmt.Sprintf("-%s\n", oldLine)) }
+			if newLine != "" && i < len(newLines) { buf.WriteString(fmt.Sprintf("+%s\n", newLine)) }
+		}
+	}
+	return buf.String()
+}
+
+func countASTLinesChanged(old, new string) int {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new, "\n")
+	changes := abs(len(newLines) - len(oldLines))
+	minLen := min(len(oldLines), len(newLines))
+	for i := 0; i < minLen; i++ {
+		if oldLines[i] != newLines[i] { changes++ }
+	}
+	return changes
+}
+
+func extractFuncSignature(fd *ast.FuncDecl) string {
+	var buf strings.Builder
+	if fd.Recv != nil {
+		buf.WriteByte('(')
+		for i, field := range fd.Recv.List {
+			if i > 0 { buf.WriteString(", ") }
+			if len(field.Names) > 0 { buf.WriteString(field.Names[0].Name); buf.WriteByte(' ') }
+			buf.WriteString(exprToString(field.Type))
+		}
+		buf.WriteString(") ")
+	}
+	buf.WriteString(fd.Name.Name)
+	buf.WriteByte('(')
+	if fd.Type.Params != nil {
+		for i, field := range fd.Type.Params.List {
+			if i > 0 { buf.WriteString(", ") }
+			if len(field.Names) > 0 {
+				for j, name := range field.Names {
+					if j > 0 { buf.WriteString(", ") }
+					buf.WriteString(name.Name)
+				}
+				buf.WriteByte(' ')
+			}
+			buf.WriteString(exprToString(field.Type))
+		}
+	}
+	buf.WriteByte(')')
+	if fd.Type.Results != nil && len(fd.Type.Results.List) > 0 {
+		buf.WriteByte(' ')
+		if len(fd.Type.Results.List) > 1 { buf.WriteByte('(') }
+		for i, field := range fd.Type.Results.List {
+			if i > 0 { buf.WriteString(", ") }
+			if len(field.Names) > 0 {
+				for j, name := range field.Names {
+					if j > 0 { buf.WriteString(", ") }
+					buf.WriteString(name.Name)
+					buf.WriteByte(' ')
+				}
+			}
+			buf.WriteString(exprToString(field.Type))
+		}
+		if len(fd.Type.Results.List) > 1 { buf.WriteByte(')') }
+	}
+	return buf.String()
+}
+
+func exprToString(expr ast.Expr) string {
+	if expr == nil { return "" }
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.StarExpr:
+		return "*" + exprToString(e.X)
+	case *ast.SelectorExpr:
+		return fmt.Sprintf("%s.%s", exprToString(e.X), e.Sel.Name)
+	case *ast.ArrayType:
+		return fmt.Sprintf("[]%s", exprToString(e.Elt))
+	case *ast.MapType:
+		return fmt.Sprintf("map[%s]%s", exprToString(e.Key), exprToString(e.Value))
+	case *ast.ChanType:
+		dir := "chan "
+		if e.Dir == ast.SEND { dir = "chan<- " } else if e.Dir == ast.RECV { dir = "<-chan " }
+		return dir + exprToString(e.Value)
+	case *ast.FuncType:
+		return extractFuncType(e)
+	case *ast.InterfaceType:
+		return "interface{}"
+	case *ast.Ellipsis:
+		return fmt.Sprintf("...%s", exprToString(e.Elt))
+	case *ast.ParenExpr:
+		return fmt.Sprintf("(%s)", exprToString(e.X))
+	default:
+		return fmt.Sprintf("%T", expr)[5:]
+	}
+}
+
+func extractFuncType(ft *ast.FuncType) string {
+	var buf strings.Builder
+	buf.WriteString("func(")
+	if ft.Params != nil {
+		for i, field := range ft.Params.List {
+			if i > 0 { buf.WriteString(", ") }
+			buf.WriteString(exprToString(field.Type))
+		}
+	}
+	buf.WriteByte(')')
+	if ft.Results != nil && len(ft.Results.List) > 0 {
+		if len(ft.Results.List) == 1 && ft.Results.List[0].Names == nil {
+			buf.WriteByte(' ')
+			buf.WriteString(exprToString(ft.Results.List[0].Type))
+		} else {
+			buf.WriteString(" (")
+			for i, field := range ft.Results.List {
+				if i > 0 { buf.WriteString(", ") }
+				buf.WriteString(exprToString(field.Type))
+			}
+			buf.WriteByte(')')
+		}
+	}
+	return buf.String()
+}
+
+func abs(x int) int {
+	if x < 0 { return -x }
+	return x
 }

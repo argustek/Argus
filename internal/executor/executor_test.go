@@ -1558,3 +1558,208 @@ func TestExecuteWithRetry_DefaultConfig(t *testing.T) {
 
 	t.Logf("✅ ExecuteWithRetry default config works: success=%v", result.Success)
 }
+
+// ============================================================
+// [P1] AST 级别代码修改 测试用例
+// ============================================================
+
+func TestParseGoFile_Basic(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	testFile := filepath.Join(tmpDir, "sample.go")
+	content := `package sample
+
+import (
+	"fmt"
+	"strings"
+)
+
+type User struct {
+	ID   int    "json:\"id\""
+	Name string "json:\"name\""
+}
+
+func (u *User) FullName() string {
+	return u.Name
+}
+
+func Add(a, b int) int {
+	return a + b
+}
+`
+	os.WriteFile(testFile, []byte(content), 0644)
+
+	info, err := exec.ParseGoFile("sample.go")
+	if err != nil {
+		t.Fatalf("ParseGoFile error: %v", err)
+	}
+	if info.Package != "sample" { t.Errorf("Package = %q, want 'sample'", info.Package) }
+	if len(info.Functions) < 2 { t.Errorf("Functions count = %d, want >=2", len(info.Functions)) }
+	if len(info.Structs) == 0 { t.Error("Structs empty") }
+	foundAdd := false
+	for _, fn := range info.Functions {
+		if fn.Name == "Add" && !fn.IsExported { t.Error("Add should be exported") }
+		if fn.Name == "Add" { foundAdd = true }
+	}
+	if !foundAdd { t.Error("Function Add not found") }
+	if len(info.Imports) < 2 { t.Errorf("Imports count = %d, want >=2", len(info.Imports)) }
+
+	t.Logf("✅ ParseGoFile: pkg=%s funcs=%d structs=%d imports=%d", info.Package, len(info.Functions), len(info.Structs), len(info.Imports))
+}
+
+func TestEditFileWithAST_ReplaceFunction(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	testFile := filepath.Join(tmpDir, "math.go")
+	content := "package math\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"
+	os.WriteFile(testFile, []byte(content), 0644)
+
+	op := &ASTEditOperation{
+		Action: "replace",
+		Target: &ASTEditTarget{
+			Type: "function",
+			Name: "Add",
+			File: "math.go",
+		},
+		NewCode: "func Add(a, b int) int {\n\tsum := a + b\n\treturn sum\n}",
+	}
+
+	result, err := exec.EditFileWithAST(op)
+	if err != nil {
+		t.Fatalf("EditFileWithAST error: %v", err)
+	}
+	if !result.Success { t.Errorf("Success = false, error: %s", result.Error) }
+	if result.LinesChanged <= 0 { t.Errorf("LinesChanged = %d, want >0", result.LinesChanged) }
+
+	modifiedContent, _ := os.ReadFile(testFile)
+	if !strings.Contains(string(modifiedContent), "sum := a + b") {
+		t.Errorf("Modified content missing new code:\n%s", string(modifiedContent))
+	}
+
+	t.Logf("✅ EditFileWithAST ReplaceFunction: lines=%d astValid=%v diffLen=%d", result.LinesChanged, result.AstValid, len(result.Diff))
+}
+
+func TestEditFileWithAST_DeleteStruct(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	testFile := filepath.Join(tmpDir, "types.go")
+	content := `package types
+
+type User struct {
+	ID   int
+	Name string
+}
+
+type Config struct {
+	Debug bool
+	Port  int
+}
+`
+	os.WriteFile(testFile, []byte(content), 0644)
+
+	op := &ASTEditOperation{
+		Action: "delete",
+		Target: &ASTEditTarget{
+			Type: "struct",
+			Name: "User",
+			File: "types.go",
+		},
+	}
+
+	result, err := exec.EditFileWithAST(op)
+	if err != nil {
+		t.Fatalf("EditFileWithAST error: %v", err)
+	}
+	if !result.Success { t.Errorf("Success = false, error: %s", result.Error) }
+
+	modifiedContent, _ := os.ReadFile(testFile)
+	if strings.Contains(string(modifiedContent), "type User struct") {
+		t.Error("User struct should be deleted")
+	}
+	if !strings.Contains(string(modifiedContent), "type Config struct") {
+		t.Error("Config struct should remain")
+	}
+
+	t.Logf("✅ EditFileWithAST DeleteStruct: lines=%d", result.LinesChanged)
+}
+
+func TestEditFileWithAST_InsertBefore(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	testFile := filepath.Join(tmpDir, "handler.go")
+	content := "package handler\n\nfunc Handle() {\n\tfmt.Println(\"handled\")\n}\n"
+	os.WriteFile(testFile, []byte(content), 0644)
+
+	op := &ASTEditOperation{
+		Action: "insert_before",
+		Target: &ASTEditTarget{
+			Type: "function",
+			Name: "Handle",
+			File: "handler.go",
+		},
+		NewCode: "// Handle processes the request\n",
+	}
+
+	result, err := exec.EditFileWithAST(op)
+	if err != nil {
+		t.Fatalf("EditFileWithAST error: %v", err)
+	}
+	if !result.Success { t.Errorf("Success = false, error: %s", result.Error) }
+
+	modifiedContent, _ := os.ReadFile(testFile)
+	if !strings.Contains(string(modifiedContent), "// Handle processes the request") {
+		t.Errorf("Comment not inserted:\n%s", string(modifiedContent))
+	}
+
+	t.Logf("✅ EditFileWithAST InsertBefore: success=%v lines=%d", result.Success, result.LinesChanged)
+}
+
+func TestEditFileWithAST_TargetNotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	testFile := filepath.Join(tmpDir, "test.go")
+	os.WriteFile(testFile, []byte(`package test`), 0644)
+
+	op := &ASTEditOperation{
+		Action: "replace",
+		Target: &ASTEditTarget{
+			Type: "function",
+			Name: "NonExistentFunc",
+			File: "test.go",
+		},
+		NewCode: "func NonExistentFunc() {}",
+	}
+
+	result, err := exec.EditFileWithAST(op)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success { t.Error("Should fail for non-existent target") }
+	if !strings.Contains(result.Error, "target not found") { t.Errorf("Error message unexpected: %s", result.Error) }
+
+	t.Logf("✅ EditFileWithAST TargetNotFound: error=%s", result.Error)
+}
+
+func TestEditFileWithAST_PathOutsideWorkdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	op := &ASTEditOperation{
+		Action: "replace",
+		Target: &ASTEditTarget{
+			Type: "function",
+			Name: "Test",
+			File: "../etc/passwd",
+		},
+		NewCode: "",
+	}
+
+	result, err := exec.EditFileWithAST(op)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success { t.Error("Should fail for path outside workdir") }
+	if !strings.Contains(result.Error, "outside work directory") { t.Errorf("Error message unexpected: %s", result.Error) }
+
+	t.Log("✅ EditFileWithAST PathOutsideWorkdir blocked correctly")
+}
