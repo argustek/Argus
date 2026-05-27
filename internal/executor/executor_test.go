@@ -1763,3 +1763,69 @@ func TestEditFileWithAST_PathOutsideWorkdir(t *testing.T) {
 
 	t.Log("✅ EditFileWithAST PathOutsideWorkdir blocked correctly")
 }
+
+// ============================================================
+// [P1] 多文件上下文理解 测试用例
+// ============================================================
+
+func TestAnalyzeDependencies_Basic(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module testpkg\ngo 1.23\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "core.go"), []byte("package testpkg\n\nfunc CoreFunc() int { return 42 }\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "handler.go"), []byte("package testpkg\n\nimport \"testpkg\"\n\nfunc Handler() { CoreFunc() }\n"), 0644)
+
+	deps, err := exec.AnalyzeDependencies(".")
+	if err != nil {
+		t.Fatalf("AnalyzeDependencies error: %v", err)
+	}
+	if len(deps) == 0 { t.Error("Should find dependencies") }
+
+	coreFound := false
+	for _, d := range deps {
+		if d.File == "core.go" {
+			coreFound = true
+			foundCoreFunc := false
+			for _, fn := range d.Functions {
+				if fn == "CoreFunc" { foundCoreFunc = true }
+			}
+			if !foundCoreFunc { t.Error("CoreFunc should be in exported functions") }
+		}
+	}
+	if !coreFound { t.Error("core.go not found") }
+
+	t.Logf("✅ AnalyzeDependencies: files=%d", len(deps))
+}
+
+func TestAnalyzeImpact_LocalChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module impact\ngo 1.23\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "util.go"), []byte("package impact\n\nfunc helper() {}\n"), 0644)
+
+	scope, err := exec.AnalyzeImpact("util.go", "function", "helper")
+	if err != nil {
+		t.Fatalf("AnalyzeImpact error: %v", err)
+	}
+	if scope.RiskLevel == "" { t.Error("RiskLevel should be set") }
+	if len(scope.Suggestions) == 0 { t.Error("Should have suggestions") }
+
+	t.Logf("✅ AnalyzeImpact: risk=%s direct=%d suggestions=%d", scope.RiskLevel, len(scope.DirectImpact), len(scope.Suggestions))
+}
+
+func TestBuildCodeContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+	os.WriteFile(filepath.Join(tmpDir, "go.mod"), []byte("module ctxpkg\ngo 1.23\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package ctxpkg\n\nfunc Main() {}\n"), 0644)
+
+	ctx, err := exec.BuildCodeContext(".")
+	if err != nil {
+		t.Fatalf("BuildCodeContext error: %v", err)
+	}
+	if ctx.TotalFiles == 0 { t.Error("Should find files") }
+	if ctx.TotalFuncs == 0 { t.Error("Should find functions") }
+	if len(ctx.Packages) == 0 { t.Error("Should find packages") }
+
+	t.Logf("✅ BuildCodeContext: files=%d funcs=%d pkgs=%d", ctx.TotalFiles, ctx.TotalFuncs, len(ctx.Packages))
+}

@@ -1811,3 +1811,201 @@ func abs(x int) int {
 	if x < 0 { return -x }
 	return x
 }
+
+// [P1] 多文件上下文理解 - 依赖分析与影响范围
+
+type DependencyInfo struct {
+	File        string   `json:"file"`                  // 文件路径（相对于工作目录）
+	Package     string   `json:"package"`               // 包名
+	Imports     []string `json:"imports"`               // 直接导入的包
+	DependedBy  []string `json:"depended_by,omitempty"` // 被哪些文件导入
+	Functions   []string `json:"functions,omitempty"`   // 导出的函数
+	Types       []string `json:"types,omitempty"`       // 导出的类型
+	IsTestFile  bool     `json:"is_test_file"`
+	Complexity  int      `json:"complexity"`             // 复杂度估算（行数/100）
+}
+
+type ImpactScope struct {
+	TargetFile    string          `json:"target_file"`              // 目标文件
+	TargetType    string          `json:"target_type"`              // 目标类型 (function/struct/var)
+	TargetName    string          `json:"target_name"`              // 目标名称
+	DirectImpact  []string        `json:"direct_impact"`            // 直接影响的文件
+	IndirectImpact []string       `json:"indirect_impact"`          // 间接影响的文件
+	TestFiles     []string        `json:"test_files"`              // 相关测试文件
+	RiskLevel     string          `json:"risk_level"`              // low/medium/high/critical
+	Reason        string          `json:"reason"`                  // 风险原因
+	Suggestions   []string        `json:"suggestions,omitempty"`   // 建议
+}
+
+type CodeContext struct {
+	Files         []*GoFileInfo    `json:"files"`           // 解析的所有文件
+	Dependencies  []*DependencyInfo `json:"dependencies"`    // 依赖关系图
+	TotalFiles    int               `json:"total_files"`     // 总文件数
+	TotalFuncs    int               `json:"total_funcs"`     // 总函数数
+	Packages      map[string]int    `json:"packages"`        // 包分布
+}
+
+func (e *Executor) AnalyzeDependencies(pattern string) ([]*DependencyInfo, error) {
+	var fullPath string
+	if filepath.IsAbs(pattern) {
+		fullPath = pattern
+	} else {
+		fullPath = filepath.Join(e.workDir, pattern)
+	}
+	matches, err := filepath.Glob(filepath.Join(fullPath, "*.go"))
+	if err != nil {
+		return nil, fmt.Errorf("glob pattern failed: %v", err)
+	}
+	deps := make([]*DependencyInfo, 0, len(matches))
+	for _, file := range matches {
+		relPath, _ := filepath.Rel(e.workDir, file)
+		info, parseErr := e.ParseGoFile(relPath)
+		if parseErr != nil {
+			continue
+		}
+		exportedFuncs := make([]string, 0)
+		for _, fn := range info.Functions {
+			if fn.IsExported { exportedFuncs = append(exportedFuncs, fn.Name) }
+		}
+		exportedTypes := make([]string, 0)
+		for _, ti := range info.Types {
+			if ast.IsExported(ti.Name) { exportedTypes = append(exportedTypes, ti.Name) }
+		}
+		dep := &DependencyInfo{
+			File:       relPath,
+			Package:    info.Package,
+			Imports:    info.Imports,
+			Functions:  exportedFuncs,
+			Types:      exportedTypes,
+			IsTestFile: strings.HasSuffix(relPath, "_test.go"),
+			Complexity:  info.TotalLines / 100,
+		}
+		deps = append(deps, dep)
+	}
+	for i, dep := range deps {
+		importers := make([]string, 0)
+		pkgPath := filepath.Dir(dep.File)
+		for _, other := range deps {
+			if other.File == dep.File { continue }
+			for _, imp := range other.Imports {
+				if strings.HasSuffix(imp, pkgPath) || strings.HasSuffix(imp, dep.Package) {
+					importers = append(importers, other.File)
+					break
+				}
+			}
+		}
+		deps[i].DependedBy = importers
+	}
+	fmt.Printf("[Executor] AnalyzeDependencies ✅ pattern=%s files=%d\n", pattern, len(deps))
+	return deps, nil
+}
+
+func (e *Executor) AnalyzeImpact(targetFile, targetType, targetName string) (*ImpactScope, error) {
+	var relPath string
+	if filepath.IsAbs(targetFile) {
+		relPath, _ = filepath.Rel(e.workDir, targetFile)
+	} else {
+		relPath = targetFile	}
+	dir := filepath.Dir(relPath)
+	deps, err := e.AnalyzeDependencies(dir)
+	if err != nil {
+		return nil, fmt.Errorf("analyze dependencies failed: %v", err)
+	}
+	scope := &ImpactScope{
+		TargetFile: relPath,
+		TargetType: targetType,
+		TargetName: targetName,
+		DirectImpact:  make([]string, 0),
+		IndirectImpact: make([]string, 0),
+		TestFiles:      make([]string, 0),
+		RiskLevel:     "low",
+	}
+	targetDep := findDependency(deps, relPath)
+	if targetDep != nil {
+		scope.DirectImpact = append(scope.DirectImpact, targetDep.DependedBy...)
+		for _, importer := range targetDep.DependedBy {
+			importerDep := findDependency(deps, importer)
+			if importerDep != nil {
+				for _, indirect := range importerDep.DependedBy {
+					if !containsStr(scope.DirectImpact, indirect) && !containsStr(scope.IndirectImpact, indirect) && indirect != relPath {
+						scope.IndirectImpact = append(scope.IndirectImpact, indirect)
+					}
+				}
+			}
+		}
+	}
+	for _, dep := range deps {
+		if dep.IsTestFile && (dep.File == relPath+"_test" || strings.HasPrefix(dep.File, dir)) {
+			scope.TestFiles = append(scope.TestFiles, dep.File)
+		}
+	}
+	totalAffected := len(scope.DirectImpact) + len(scope.IndirectImpact)
+	isExported := ast.IsExported(targetName)
+	switch {
+	case totalAffected > 10 || (isExported && totalAffected > 5):
+		scope.RiskLevel = "critical"
+		scope.Reason = "Highly connected exported symbol affecting many files"
+	case totalAffected > 5 || isExported:
+		scope.RiskLevel = "high"
+		scope.Reason = "Exported symbol or moderate impact scope"
+	case totalAffected > 2:
+		scope.RiskLevel = "medium"
+		scope.Reason = "Limited impact on few files"
+	default:
+		scope.RiskLevel = "low"
+		scope.Reason = "Localized change with minimal dependencies"
+	}
+	switch scope.RiskLevel {
+	case "critical", "high":
+		scope.Suggestions = append(scope.Suggestions, "Run full test suite before and after changes")
+		scope.Suggestions = append(scope.Suggestions, "Consider backward compatibility")
+		scope.Suggestions = append(scope.Suggestions, "Review all dependent files")
+	case "medium":
+		scope.Suggestions = append(scope.Suggestions, "Run affected test files")
+		scope.Suggestions = append(scope.Suggestions, "Check direct dependents for breakage")
+	default:
+		scope.Suggestions = append(scope.Suggestions, "Run local tests")
+	}
+	fmt.Printf("[Executor] AnalyzeImpact ✅ target=%s risk=%s direct=%d indirect=%d\n", targetName, scope.RiskLevel, len(scope.DirectImpact), len(scope.IndirectImpact))
+	return scope, nil
+}
+
+func (e *Executor) BuildCodeContext(pattern string) (*CodeContext, error) {
+	files, err := filepath.Glob(filepath.Join(e.workDir, pattern, "*.go"))
+	if err != nil {
+		return nil, fmt.Errorf("glob failed: %v", err)
+	}
+	ctx := &CodeContext{
+		Files:      make([]*GoFileInfo, 0),
+		Packages:   make(map[string]int),
+	}
+	for _, file := range files {
+		relPath, _ := filepath.Rel(e.workDir, file)
+		info, parseErr := e.ParseGoFile(relPath)
+		if parseErr != nil {
+			continue
+		}
+		ctx.Files = append(ctx.Files, info)
+		ctx.TotalFuncs += len(info.Functions)
+		ctx.Packages[info.Package]++
+	}
+	ctx.TotalFiles = len(ctx.Files)
+	deps, _ := e.AnalyzeDependencies(pattern)
+	ctx.Dependencies = deps
+	fmt.Printf("[Executor] BuildCodeContext ✅ files=%d funcs=%d pkgs=%d\n", ctx.TotalFiles, ctx.TotalFuncs, len(ctx.Packages))
+	return ctx, nil
+}
+
+func findDependency(deps []*DependencyInfo, file string) *DependencyInfo {
+	for _, d := range deps {
+		if d.File == file { return d }
+	}
+	return nil
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s { return true }
+	}
+	return false
+}
