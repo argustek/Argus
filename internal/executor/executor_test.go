@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -714,5 +715,174 @@ func BenchmarkErrorAnalysis(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		AnalyzeError(result)
+	}
+}
+
+// ============================================================
+// [P1] SearchFiles 测试用例
+// ============================================================
+
+func TestSearchFiles_BasicString(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(`package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello World")
+}
+`), 0644)
+
+	os.WriteFile(filepath.Join(tmpDir, "utils.go"), []byte(`package main
+
+func helper() string {
+	return "Hello World from utils"
+}
+`), 0644)
+
+	result, err := exec.SearchFiles("Hello World")
+	if err != nil {
+		t.Fatalf("SearchFiles error: %v", err)
+	}
+
+	if result.Error != "" {
+		t.Fatalf("SearchFiles returned error: %s", result.Error)
+	}
+
+	if result.TotalMatches != 2 {
+		t.Errorf("Expected 2 matches, got %d", result.TotalMatches)
+	}
+
+	if len(result.Matches) < 2 {
+		t.Fatalf("Expected at least 2 match entries, got %d", len(result.Matches))
+	}
+
+	if result.Matches[0].File != "main.go" {
+		t.Errorf("First match should be in main.go, got %s", result.Matches[0].File)
+	}
+	if result.Matches[0].Line != 6 {
+		t.Errorf("First match line should be 6, got %d", result.Matches[0].Line)
+	}
+	t.Logf("✅ Basic string search: %d matches in %d files", result.TotalMatches, result.FilesSearched)
+}
+
+func TestSearchFiles_Regex(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	os.WriteFile(filepath.Join(tmpDir, "app.go"), []byte(`package main
+
+func login(user string) bool { return true }
+func logout() {}
+func getUser(id int) *User { return nil }
+`), 0644)
+
+	result, _ := exec.SearchFiles(`func \w+\(.*\)`, WithRegex(), WithFilePattern("*.go"))
+	if result.Error != "" {
+		t.Fatalf("Regex search error: %s", result.Error)
+	}
+
+	if result.TotalMatches != 3 {
+		t.Errorf("Expected 3 regex matches (3 func declarations), got %d", result.TotalMatches)
+	}
+	t.Logf("✅ Regex search: %d matches", result.TotalMatches)
+}
+
+func TestSearchFiles_FilePatternFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	os.WriteFile(filepath.Join(tmpDir, "code.go"), []byte("const VERSION = \"1.0\"\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("Version: 1.0\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "test.js"), []byte("var version = '1.0';\n"), 0644)
+
+	result, _ := exec.SearchFiles("VERSION", WithFilePattern("*.go"))
+	if result.TotalMatches != 1 {
+		t.Errorf("Expected 1 match in .go files only, got %d", result.TotalMatches)
+	}
+	t.Logf("✅ File pattern filter: %d matches", result.TotalMatches)
+}
+
+func TestSearchFiles_SkipDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	nodeDir := filepath.Join(tmpDir, "node_modules", "pkg")
+	os.MkdirAll(nodeDir, 0755)
+	os.WriteFile(filepath.Join(nodeDir, "index.js"), []byte("secret data\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("real data\n"), 0644)
+
+	result, _ := exec.SearchFiles("data")
+	if result.TotalMatches != 1 {
+		t.Errorf("node_modules should be skipped, expected 1 match, got %d", result.TotalMatches)
+	}
+	t.Logf("✅ Skip dirs: node_modules ignored correctly")
+}
+
+func TestSearchFiles_ContextLines(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	content := `line 1
+line 2 - before target
+line 3 - TARGET HERE
+line 4 - after target
+line 5
+`
+	os.WriteFile(filepath.Join(tmpDir, "ctx.go"), []byte(content), 0644)
+
+	result, _ := exec.SearchFiles("TARGET HERE", WithContextLines(1))
+	if result.TotalMatches != 1 {
+		t.Fatalf("Expected 1 match, got %d", result.TotalMatches)
+	}
+
+	match := result.Matches[0]
+	if len(match.ContextBefore) == 0 {
+		t.Error("Expected context_before lines")
+	}
+	if len(match.ContextAfter) == 0 {
+		t.Error("Expected context_after lines")
+	}
+	t.Logf("✅ Context lines: before=%v, after=%v", match.ContextBefore, match.ContextAfter)
+}
+
+func TestSearchFiles_PathOutsideWorkdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	result, _ := exec.SearchFiles("test", WithPath("../../etc/passwd"))
+	if result.Error == "" || !strings.Contains(result.Error, "outside") {
+		t.Errorf("Should reject path outside workdir, got: %s", result.Error)
+	}
+	t.Logf("✅ Path outside workdir rejected")
+}
+
+func TestSearchFiles_CaseInsensitive(t *testing.T) {
+	tmpDir := t.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	os.WriteFile(filepath.Join(tmpDir, "case.go"), []byte("Hello WORLD hello world HELLO\n"), 0644)
+
+	result, _ := exec.SearchFiles("hello", WithCaseInsensitive())
+	if result.TotalMatches != 1 {
+		t.Errorf("Case insensitive should find 'hello' in 'Hello', got %d", result.TotalMatches)
+	}
+	t.Logf("✅ Case insensitive: found at line %d col %d", result.Matches[0].Line, result.Matches[0].Column)
+}
+
+func BenchmarkSearchFiles(b *testing.B) {
+	tmpDir := b.TempDir()
+	exec := NewExecutor(tmpDir, nil)
+
+	for i := 0; i < 50; i++ {
+		content := fmt.Sprintf(`package main\n\nfunc func%d() int { return %d }\n`, i, i)
+		os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("file%d.go", i)), []byte(content), 0644)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		exec.SearchFiles("return ", WithFilePattern("*.go"))
 	}
 }

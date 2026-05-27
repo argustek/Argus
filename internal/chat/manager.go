@@ -2933,6 +2933,63 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 			}
 
+		case "search_files":
+			var searchOpts []executor.SearchOption
+			if action.FilePattern != "" {
+				searchOpts = append(searchOpts, executor.WithFilePattern(action.FilePattern))
+			}
+			if action.IsRegex {
+				searchOpts = append(searchOpts, executor.WithRegex())
+			}
+			if action.CaseInsensitive {
+				searchOpts = append(searchOpts, executor.WithCaseInsensitive())
+			}
+			if action.Path != "" {
+				searchOpts = append(searchOpts, executor.WithPath(action.Path))
+			}
+
+			searchResult, err := m.seExecutor.SearchFiles(action.Pattern, searchOpts...)
+			if err != nil {
+				errMsg := fmt.Sprintf("搜索失败: %v", err)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se",
+					"index":    i + 1,
+					"type":     "search_files",
+					"label":    actionLabel,
+					"status":   "error",
+					"error":    errMsg,
+				})
+				continue
+			}
+
+			if searchResult.Error != "" {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 搜索错误: %s", searchResult.Error))
+			} else {
+				resultMsg := fmt.Sprintf("🔍 搜索 '%s': 找到 %d 个匹配 (搜索了 %d 个文件)\n",
+					action.Pattern, searchResult.TotalMatches, searchResult.FilesSearched)
+				for _, match := range searchResult.Matches {
+					resultMsg += fmt.Sprintf("  → %s:%d:%d  %s\n", match.File, match.Line, match.Column, match.Content)
+				}
+				m.seProcessor.AddResult(resultMsg)
+
+				m.emitWailsEvent("exec_output", map[string]interface{}{
+					"executor":  "se",
+					"command":   fmt.Sprintf("search_files('%s')", action.Pattern),
+					"output":    resultMsg,
+					"exit_code": 0,
+				})
+			}
+
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor":      "se",
+				"index":         i + 1,
+				"type":          "search_files",
+				"label":         actionLabel,
+				"status":        "done",
+				"total_matches": searchResult.TotalMatches,
+			})
+
 		case "exec":
 			if m.configManager != nil {
 				level, desc := m.configManager.CheckCommand(action.Command)

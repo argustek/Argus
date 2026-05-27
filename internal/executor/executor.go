@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -214,7 +215,219 @@ type EditResult struct {
 	FilePath     string `json:"file_path,omitempty"`    // 文件路径
 }
 
-// [P0] EditFile 精确编辑文件（Search/Replace）
+// [P0] SearchFilesMatch 单个文件匹配结果
+type SearchFilesMatch struct {
+	File      string   `json:"file"`                // 文件路径（相对）
+	Line      int      `json:"line"`                // 匹配行号
+	Column    int      `json:"column"`              // 匹配列号
+	Content   string   `json:"content"`             // 匹配行的内容
+	ContextBefore []string `json:"context_before,omitempty"` // 前2行上下文
+	ContextAfter  []string `json:"context_after,omitempty"`  // 后2行上下文
+}
+
+// [P0] SearchFilesResult 搜索结果
+type SearchFilesResult struct {
+	Pattern     string             `json:"pattern"`       // 搜索模式
+	IsRegex     bool               `json:"is_regex"`      // 是否正则
+	TotalMatches int               `json:"total_matches"` // 总匹配数
+	FilesSearched int              `json:"files_searched"` // 搜索的文件数
+	Matches     []SearchFilesMatch `json:"matches"`       // 匹配列表
+	Error       string             `json:"error,omitempty"`
+}
+
+// [P0] SearchFiles 全局搜索文件内容（支持正则和字符串匹配）
+func (e *Executor) SearchFiles(pattern string, opts ...SearchOption) (*SearchFilesResult, error) {
+	options := defaultSearchOptions()
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	result := &SearchFilesResult{
+		Pattern: pattern,
+		IsRegex: options.IsRegex,
+		Matches: make([]SearchFilesMatch, 0),
+	}
+
+	var regex *regexp.Regexp
+	var err error
+	if options.IsRegex {
+		regex, err = regexp.Compile(pattern)
+		if err != nil {
+			result.Error = fmt.Sprintf("invalid regex: %v", err)
+			return result, nil
+		}
+	}
+
+	searchDir := e.workDir
+	if options.Path != "" {
+		if filepath.IsAbs(options.Path) {
+			searchDir = options.Path
+		} else {
+			searchDir = filepath.Join(e.workDir, options.Path)
+		}
+	}
+
+	if !isPathInDir(searchDir, e.workDir) {
+		return &SearchFilesResult{Error: "path outside work directory"}, nil
+	}
+
+	err = filepath.Walk(searchDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return nil
+		}
+
+		relPath, _ := filepath.Rel(e.workDir, path)
+		relPath = filepath.ToSlash(relPath)
+
+		if e.shouldSkipFile(relPath, options) {
+			return nil
+		}
+
+		result.FilesSearched++
+
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+
+		lines := strings.Split(string(content), "\n")
+		e.searchInLines(lines, relPath, pattern, regex, result, options)
+
+		if options.MaxResults > 0 && len(result.Matches) >= options.MaxResults {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	if err != nil {
+		result.Error = fmt.Sprintf("search error: %v", err)
+	}
+
+	result.TotalMatches = len(result.Matches)
+	fmt.Printf("[Executor] SearchFiles: '%s' → %d matches in %d files\n",
+		pattern, result.TotalMatches, result.FilesSearched)
+
+	return result, nil
+}
+
+// [P0] SearchOption 搜索选项函数类型
+type SearchOption func(*SearchOptions)
+
+// [P0] SearchOptions 搜索配置
+type SearchOptions struct {
+	Path        string   // 搜索子目录（相对路径）
+	FilePattern string   // glob 文件过滤（如 "*.go"）
+	IsRegex     bool     // 是否使用正则表达式
+	CaseInsensitive bool // 是否忽略大小写
+	MaxResults  int      // 最大返回数量（0=不限）
+	ContextLines int     // 上下文行数（默认2）
+}
+
+func defaultSearchOptions() SearchOptions {
+	return SearchOptions{
+		IsRegex:          false,
+		CaseInsensitive:  false,
+		MaxResults:       100,
+		ContextLines:     2,
+	}
+}
+
+func WithPath(p string) SearchOption {
+	return func(o *SearchOptions) { o.Path = p }
+}
+func WithFilePattern(fp string) SearchOption {
+	return func(o *SearchOptions) { o.FilePattern = fp }
+}
+func WithRegex() SearchOption {
+	return func(o *SearchOptions) { o.IsRegex = true }
+}
+func WithCaseInsensitive() SearchOption {
+	return func(o *SearchOptions) { o.CaseInsensitive = true }
+}
+func WithMaxResults(n int) SearchOption {
+	return func(o *SearchOptions) { o.MaxResults = n }
+}
+func WithContextLines(n int) SearchOption {
+	return func(o *SearchOptions) { o.ContextLines = n }
+}
+
+func (e *Executor) shouldSkipFile(relPath string, opts SearchOptions) bool {
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true,
+		".idea": true, "__pycache__": true, ".next": true,
+		"dist": true, "build": true, ".cache": true,
+	}
+	dir := filepath.Dir(relPath)
+	for d := dir; d != "." && d != ""; {
+		if skipDirs[d] {
+			return true
+		}
+		d = filepath.Dir(d)
+	}
+	if opts.FilePattern != "" {
+		base := filepath.Base(relPath)
+		matched, _ := filepath.Match(opts.FilePattern, base)
+		if !matched {
+			return true
+		}
+	}
+	skipExts := map[string]bool{
+		".exe": true, ".dll": true, ".so": true, ".dylib": true,
+		".png": true, ".jpg": true, ".gif": true, ".ico": true,
+		".pdf": true, ".zip": true, ".tar.gz": true, ".bin": true,
+		".woff": true, ".ttf": true, ".lock": true,
+	}
+	ext := strings.ToLower(filepath.Ext(relPath))
+	if skipExts[ext] {
+		return true
+	}
+	return false
+}
+
+func (e *Executor) searchInLines(lines []string, relPath, pattern string, regex *regexp.Regexp, result *SearchFilesResult, opts SearchOptions) {
+	for i, line := range lines {
+		lineNum := i + 1
+		var matched bool
+		var col int
+		searchStr := line
+		if opts.CaseInsensitive {
+			searchStr = strings.ToLower(line)
+			patternLower := strings.ToLower(pattern)
+			col = strings.Index(searchStr, patternLower)
+			matched = col >= 0
+		} else if regex != nil {
+			loc := regex.FindStringIndex(line)
+			matched = loc != nil
+			if matched {
+				col = loc[0]
+			}
+		} else {
+			col = strings.Index(line, pattern)
+			matched = col >= 0
+		}
+		if matched {
+			match := SearchFilesMatch{
+				File:    relPath,
+				Line:    lineNum,
+				Column:  col + 1,
+				Content: strings.TrimSpace(line),
+			}
+			ctxLines := opts.ContextLines
+			if ctxLines > 0 {
+				for j := lineNum - 1 - ctxLines; j >= 0 && j < lineNum-1; j++ {
+					if j < len(lines) {
+						match.ContextBefore = append([]string{strings.TrimSpace(lines[j])}, match.ContextBefore...)
+					}
+				}
+				for j := lineNum; j < lineNum+ctxLines && j < len(lines); j++ {
+					match.ContextAfter = append(match.ContextAfter, strings.TrimSpace(lines[j]))
+				}
+			}
+			result.Matches = append(result.Matches, match)
+		}
+	}
+}
+
 func (e *Executor) EditFile(path, oldStr, newStr string) (*EditResult, error) {
 	var fullPath string
 	if filepath.IsAbs(path) {
