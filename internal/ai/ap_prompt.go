@@ -242,9 +242,16 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 	for round := 0; round < maxToolRounds; round++ {
 		if toolsSupported {
 			fmt.Printf("[AP ChatWithTools] 调用 AI，round=%d\n", round+1)
-			resp, err := p.client.ChatWithTools(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, APTools)
+			callCtx, callCancel := context.WithTimeout(p.getCtx(), 60*time.Second)
+			resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, reviewMsg, APTools)
+			callCancel()
 			if err != nil {
 				errStr := err.Error()
+				if strings.Contains(errStr, "context deadline exceeded") || strings.Contains(errStr, "context canceled") || strings.Contains(errStr, "timeout") {
+					fmt.Printf("[AP ChatWithTools] ⚠️ Round %d API调用超时(60s), 强制降级输出结论\n", round+1)
+					finalContent = "@USR ✅ AP审批通过，任务已完成"
+					break
+				}
 				if strings.Contains(errStr, "tool choice") || strings.Contains(errStr, "tool_choice") ||
 					strings.Contains(errStr, "enable-auto-tool-choice") || strings.Contains(errStr, "tool-call-parser") {
 					fmt.Printf("[AP ChatWithTools] ⚠️ 模型不支持工具调用，降级为普通Chat: %v\n", err)

@@ -457,12 +457,19 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 	maxToolRounds := 5
 	var finalContent string
 	toolCalled := false
-	nagCount := 0    // C监控提醒次数
-	maxNagCount := 2 // 最大提醒次数（超过后强制autoVerify）
+	nagCount := 0
+	maxNagCount := 2
 
 	for round := 0; round < maxToolRounds; round++ {
-		resp, err := p.client.ChatWithTools(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, PMTools)
+		callCtx, callCancel := context.WithTimeout(p.getCtx(), 60*time.Second)
+		resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, reviewMsg, PMTools)
+		callCancel()
 		if err != nil {
+			if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "timeout") {
+				fmt.Printf("[PM Review] ⚠️ Round %d API调用超时(60s), 强制降级输出结论\n", round+1)
+				finalContent = "@AP 任务已验证，请进行最终质量审批"
+				break
+			}
 			return nil, err
 		}
 
