@@ -402,11 +402,44 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 			seBusyDuration := now - seBusySince
 			fmt.Printf("[C] SE无chunk持续时间: %d秒\n", seBusyDuration)
 			if seBusyDuration > int64(c.noProgressTimeout.Seconds()) {
-				if c.CanAutoReset() && c.retryCallback != nil {
-					c.resetCount++
-					remaining := c.maxResetCount - c.resetCount
-					fmt.Printf("[C] SE无进展超过6分钟，延迟10s后自动reset (第%d/%d次)\n", c.resetCount, c.maxResetCount)
-					time.Sleep(10 * time.Second)
+			if c.CanAutoReset() && c.retryCallback != nil {
+				c.resetCount++
+				remaining := c.maxResetCount - c.resetCount
+				fmt.Printf("[C] SE无进展超过6分钟，延迟10s后自动reset (第%d/%d次)\n", c.resetCount, c.maxResetCount)
+
+				// 🔴 [FIX-20260528-C] 正确判断：通过项目状态判断SE是否已完成
+				// 不依赖handover状态（会被PM处理时清除）
+				shouldForceRouteToPM := false
+				forceStepName := ""
+
+				state, err := c.readState()
+				if err == nil {
+					// 如果项目已经是done状态，说明SE已完成任务但卡在交接
+					if state.ProjectState == types.ProjectStateDone {
+						shouldForceRouteToPM = true
+						forceStepName = "se_to_pm"  // 默认强制触发PM审核
+						fmt.Printf("[C] 🛡️ 项目已处于done状态但SE仍在busy，判断为交接卡住\n")
+						fmt.Printf("[C]    PM=%s SE=%s LastChange=%d秒前\n",
+							state.PmStatus, state.SeStatus, now-state.LastChange)
+					}
+				}
+
+				time.Sleep(10 * time.Second)
+
+				if shouldForceRouteToPM && c.handoverForceAction != nil {
+					// ✅ SE已完成（项目done）→ 强制推进交接流程（不reset！）
+					fmt.Printf("[C] 🔧 强制推进交接: %s (基于项目状态判断)\n", forceStepName)
+					if err := c.handoverForceAction(forceStepName, true); err != nil {
+						fmt.Printf("[C] ❌ 强制推进失败: %v，回退到reset\n", err)
+						if err := c.retryCallback(); err != nil {
+							fmt.Printf("[C] 自动重试失败: %v\n", err)
+						}
+					} else {
+						fmt.Println("[C] ✅ 已强制推进交接流程（基于项目状态）")
+						c.messageSender(fmt.Sprintf("[C自动重试] SE已完成但交接卡住，已强制推进到%s审核", forceStepName))
+					}
+				} else {
+					// 原有逻辑：正常reset（SE未完成的情况）
 					if err := c.retryCallback(); err != nil {
 						fmt.Printf("[C] 自动重试失败: %v\n", err)
 					} else {
@@ -418,7 +451,8 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 					c.lastSeChunkTime = 0
 					c.mu.Unlock()
 					c.messageSender(fmt.Sprintf("[C自动重试] SE卡住已自动reset (剩余%d次)，请PM重新分配任务", remaining))
-				} else {
+				}
+			} else {
 					fmt.Println("[C] SE无进展超过6分钟，已达最大复位次数或无回调，提醒PM")
 					c.messageSender("SE无进展超过6分钟，已达最大自动复位次数，请手动处理")
 					c.mu.Lock()
