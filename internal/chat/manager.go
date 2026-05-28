@@ -2687,8 +2687,12 @@ func (m *Manager) continueSETask() (err error) {
 
 		// SE任务完成，切换到PM进行审核（走@层Router）
 		fmt.Println("[System] SE actions completed, routing to PM via @layer (Router)... [TAG-C1]")
+		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
+		m.syncBackendStatus("done", "SE任务完成(continue)，路由到PM [TAG-C1]")  // [FIX-20260528-E]
 
 		// [G53] 在最终完成路径发送exec_completed（只发一次！）
 		if m.ctx != nil {
@@ -2706,10 +2710,13 @@ func (m *Manager) continueSETask() (err error) {
 
 	// 如果完成了 - 通过@层路由发送
 	if resp.Completed != nil {
+		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
 		fmt.Println("[System] SE task completed(continue), routing to PM via @layer (Router)... [TAG-C2]")
 
 		summary := "✅ 任务完成\n\n"
@@ -2723,15 +2730,21 @@ func (m *Manager) continueSETask() (err error) {
 
 	if resp.Content != "" {
 		fmt.Printf("[System] 🔑 continueSETask: SE无actions/Completed但有内容 → 走@层→PM | content_len=%d [TAG-C3]\n", len(resp.Content))
+		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
 		_, err := m.ProcessMessageFrom("se", strings.TrimSpace(resp.Content))
 		return err
 	}
 
 	fmt.Printf("[System] ⚠️ continueSETask: SE回复为空且无actions，结束 [TAG-C4]\n")
+	m.seReportedComplete = true  // [FIX-20260528-E] 即使空回复也算完成
 	m.currentRole = ""
 	m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+	m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
+	m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
 	return nil
 }
 

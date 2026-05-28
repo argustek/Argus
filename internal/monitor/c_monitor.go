@@ -420,11 +420,12 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 					shouldForceRouteToPM = true
 					forceStepName = "se_to_pm"
 					fmt.Printf("[C] 🛡️ SE已报告完成(seReportedComplete=true)但仍在busy\n")
-				} else if c.workDirChecker != nil {
+					} else if c.workDirChecker != nil {
 					// 方法2: 文件存在性检测（备选方案）
 					workDir := c.workDirChecker()
 					if workDir != "" {
-						// 检查工作目录是否有最近修改的文件（5分钟内）
+						// 检查工作目录是否有最近修改的文件（15分钟内）
+						// 注意：SE完成任务到C监控触发可能需要6-10分钟
 						files, err := os.ReadDir(workDir)
 						if err == nil {
 							recentFileCount := 0
@@ -432,7 +433,7 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 							for _, f := range files {
 								if info, err := f.Info(); err == nil {
 									modTime := info.ModTime().Unix()
-									if now-modTime < 300 && !f.IsDir() { // 5分钟内修改的非目录文件
+									if now-modTime < 900 && !f.IsDir() { // 15分钟内修改的非目录文件 [FIX-时间窗口]
 										recentFileCount++
 									}
 								}
@@ -440,7 +441,7 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 							if recentFileCount > 0 {
 								shouldForceRouteToPM = true
 								forceStepName = "se_to_pm"
-								fmt.Printf("[C] 🛡️ [文件检测] 工作目录有%d个最近文件，SE可能已完成\n", recentFileCount)
+								fmt.Printf("[C] 🛡️ [文件检测] 工作目录有%d个最近文件(15min窗口)，SE可能已完成\n", recentFileCount)
 							}
 						}
 					}
