@@ -121,7 +121,7 @@ type Config struct {
 	WorkDir         string         `json:"workDir"`
 	RecentProjects  []string       `json:"recentProjects"`
 	DingTalk        DingTalkConfig `json:"dingtalk,omitempty"`
-	HTTP            HTTPConfig     `json:"http,omitempty"`
+	HTTP            HTTPConfig     `json:"http"` // [FIX-20260528-F] 移除omitempty确保HTTP配置始终保存
 	APEnabled       bool           `json:"apEnabled"`
 	APConfig        *APIConfig     `json:"apConfig,omitempty"`
 }
@@ -832,6 +832,12 @@ func (a *App) SaveConfig(config Config) error {
 	oldDingEnabled := a.isDingTalkEnabled()
 	oldHttpEnabled := a.config.HTTP.Enabled
 
+	// [FIX-20260528-F] 添加HTTP配置保存日志
+	fmt.Printf("[SaveConfig] HTTP配置保存: enabled=%v, port=%d, apiToken=%s, allowRemote=%v\n",
+		config.HTTP.Enabled, config.HTTP.Port,
+		func() string { if config.HTTP.APIToken != "" { return "***" }; return "" }(),
+		config.HTTP.AllowRemote)
+
 	a.config = config
 
 	// 先用明文 API Key 更新 ChatManager（必须在 saveConfigToFile 加密之前！）
@@ -1239,13 +1245,20 @@ func (a *App) loadConfig() {
 		}
 	}
 
-	if !a.config.HTTP.Enabled && a.config.HTTP.Port == 0 {
-		a.config.HTTP = HTTPConfig{
-			Enabled:     true,
-			Port:        8080,
-			APIToken:    "",
-			AllowRemote: false,
+	// [FIX-20260528-F] 改进HTTP默认值逻辑：只在端口未设置时才使用默认值
+	if a.config.HTTP.Port == 0 {
+		fmt.Printf("[loadConfig] HTTP端口未设置，使用默认值8080 (原配置: enabled=%v, port=%d)\n",
+			a.config.HTTP.Enabled, a.config.HTTP.Port)
+		// 保留用户的enabled设置，只设置默认端口
+		if a.config.HTTP.APIToken == "" {
+			a.config.HTTP.APIToken = ""
 		}
+		if a.config.HTTP.Port == 0 {
+			a.config.HTTP.Port = 8080
+		}
+	} else {
+		fmt.Printf("[loadConfig] HTTP配置已加载: enabled=%v, port=%d, allowRemote=%v\n",
+			a.config.HTTP.Enabled, a.config.HTTP.Port, a.config.HTTP.AllowRemote)
 	}
 
 	if len(a.config.APIConfigs) == 0 {
