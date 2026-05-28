@@ -582,11 +582,11 @@ func (a *App) initChatManager() {
 		}
 		if !a.emittedMsgIDs[msgID] {
 			a.emittedMsgIDs[msgID] = true
-			if msg.Source != "pm_to_user" && msg.Source != "pm_to_se" && msg.Source != "se_to_user" && msg.Source != "se_to_pm" {
-				runtime.EventsEmit(a.ctx, "new-message", chatMsg)
-				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s content=%s", msgID, msg.Role, truncate(msg.Content, 40)))
+			if msg.Source == "pm_to_user" || msg.Source == "pm_to_se" {
+				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SILENT #%d role=%s source=%s (PM流式已显示)", msgID, msg.Role, msg.Source))
 			} else {
-				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SILENT #%d role=%s source=%s (流式已显示)", msgID, msg.Role, msg.Source))
+				runtime.EventsEmit(a.ctx, "new-message", chatMsg)
+				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s source=%s", msgID, msg.Role, msg.Source))
 			}
 		} else {
 			a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SKIP_DUP #%d role=%s", msgID, msg.Role))

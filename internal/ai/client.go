@@ -357,13 +357,30 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 	}
 
 	var fullContent string
+	var displayContent string
 	reader := io.Reader(resp.Body)
 	buf := make([]byte, 4096)
 	leftover := ""
 
+	lastChunkTime := time.Now()
+	streamTimeout := 90 * time.Second
+
 	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("[ChatStream] ⚠️ Context cancelled/timeout, returning partial content (len=%d)\n", len(fullContent))
+			return displayContent, ctx.Err()
+		default:
+		}
+
+		if time.Since(lastChunkTime) > streamTimeout {
+			fmt.Printf("[ChatStream] ⚠️ Stream timeout (%v), returning partial content (len=%d)\n", streamTimeout, len(displayContent))
+			return displayContent, fmt.Errorf("stream timeout: no data for %v", streamTimeout)
+		}
+
 		n, readErr := reader.Read(buf)
 		if n > 0 {
+			lastChunkTime = time.Now()
 			chunk := leftover + string(buf[:n])
 			lines := splitLines(chunk)
 
@@ -385,14 +402,16 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 
 				if len(streamChunk.Choices) > 0 {
 					delta := streamChunk.Choices[0].Delta.Content
-					if delta == "" {
-						delta = streamChunk.Choices[0].Delta.ReasoningContent
-					}
+					reasoningDelta := streamChunk.Choices[0].Delta.ReasoningContent
+
 					if delta != "" {
 						fullContent += delta
+						displayContent += delta
 						if onChunk != nil {
 							onChunk(delta)
 						}
+					} else if reasoningDelta != "" {
+						fullContent += reasoningDelta
 					}
 				}
 			}
@@ -407,12 +426,15 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 		}
 	}
 
-	if fullContent == "" {
+	if displayContent == "" && fullContent == "" {
 		c.recordFailure()
 		return "", fmt.Errorf("empty response from AI")
 	}
 
 	c.recordSuccess()
+	if displayContent != "" {
+		return displayContent, nil
+	}
 	return fullContent, nil
 }
 

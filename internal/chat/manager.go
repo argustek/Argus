@@ -1434,6 +1434,15 @@ func (m *Manager) handleToPM(content string) (err error) {
 	m.resetPMHealth()
 	fmt.Printf("[DEBUG-FLOW] ProcessStream返回: content=%q len=%d\n", resp.Content[:min(80, len(resp.Content))], len(resp.Content))
 
+	// 🔬 探针：记录 AI 原始输出（用于排查双@问题）
+	if strings.Contains(resp.Content, "@") {
+		fmt.Printf("\n🔬 [PROBE-PM-AI] ========== AI原始输出 ==========\n")
+		fmt.Printf("🔬 [PROBE-PM-AI] 完整内容:\n%s\n", resp.Content)
+		fmt.Printf("🔬 [PROBE-PM-AI] 前200字符: %q\n", resp.Content[:min(200, len(resp.Content))])
+		fmt.Printf("🔬 [PROBE-PM-AI] 包含@数量: %d\n", strings.Count(resp.Content, "@"))
+		fmt.Printf("🔬 [PROBE-PM-AI] =========================================\n\n")
+	}
+
 	// ✅ 接收者清除handover（下个人清除上个人的交接状态）
 	// 只清除 SE→PM 交接，PM→AP 交接保留由 AP 清除
 	m.mu.Lock()
@@ -1676,6 +1685,24 @@ func (m *Manager) handleToPM(content string) (err error) {
 			m.forceProjectApproved()
 			return nil
 		}
+	}
+
+	// 🆕 智能修正：PM输出@USR但包含任务JSON → 强制路由到SE
+	if resp.HasTasks && (strings.Contains(strings.ToLower(resp.Content), "@usr") || !strings.Contains(strings.ToLower(resp.Content), "@se")) {
+		fmt.Println("[TRACE-PM-ROUTE] 🔧 智能修正: PM输出含任务JSON但无@SE, 强制路由到SE!")
+		m.writeRouteLog("[SMART-FIX] HasTasks但走闲聊分支, 强制转SE")
+
+		m.addPMToSEMsg(resp.Content)
+		_ = m.boardManager.UpdateTask(resp.Tasks.CurrentTask, resp.Tasks.TotalSteps)
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+
+		go func() {
+			filteredTask := filterDuplicateMentions(resp.Tasks.CurrentTask)
+			m.sendToDingTalk(fmt.Sprintf("[PM→SE 任务] %s", filteredTask))
+		}()
+
+		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+		return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
 	// [方案1-已移除] 旧的 @SE 和 HasTasks 检测已移至文件前面（最高优先级）
@@ -3703,12 +3730,31 @@ func (m *Manager) addSEToPMMsg(content string) {
 	fmt.Printf("[SE→PM] %s\n", content)
 }
 
-// ensurePMToUSR 确保PM消息带@USR前缀
+// ensurePMToUSR 确保PM消息带@USR前缀，并清理多余@
 func (m *Manager) ensurePMToUSR(content string) string {
+	// 🔬 探针：记录处理前的原始内容
+	if strings.Contains(content, "@") && (strings.Contains(content, "@USR") || strings.Contains(content, "@SE")) {
+		fmt.Printf("🔬 [PROBE-ensurePMToUSR] 输入: %q\n", content[:min(150, len(content))])
+	}
+
+	content = strings.TrimSpace(content)
+	re := regexp.MustCompile(`^@[A-Za-z]+\s+@`)
+	content = re.ReplaceAllString(content, "@")
+
+	// 🔬 探针：记录正则清理后的内容
+	if strings.Contains(content, "@") && (strings.Contains(content, "@USR") || strings.Contains(content, "@SE")) {
+		fmt.Printf("🔬 [PROBE-ensurePMToUSR] 正则后: %q\n", content[:min(150, len(content))])
+	}
+
 	if strings.HasPrefix(content, "@USR") {
 		return content
 	}
-	return "@USR " + content
+	result := "@USR " + content
+
+	// 🔬 探针：记录最终输出
+	fmt.Printf("🔬 [PROBE-ensurePMToUSR] 输出: %q\n", result[:min(150, len(result))])
+
+	return result
 }
 
 // addPMToUserMsg 发送PM→USR消息（自动加@USR）
@@ -3720,9 +3766,7 @@ func (m *Manager) addPMToUserMsg(content string) {
 		return
 	}
 
-	if !strings.HasPrefix(content, "@USR") && !strings.HasPrefix(content, "@SE") && !strings.HasPrefix(content, "@PM") && !strings.HasPrefix(content, "@AP") {
-		content = "@USR " + content
-	}
+	content = m.ensurePMToUSR(content)
 
 	content = m.aggregateAIMessage(content, "pm")
 
@@ -3823,12 +3867,18 @@ func extractLastSETask(content string) (taskContent, userReply string) {
 	return taskContent, userReply
 }
 
-// ensurePMToSE 确保PM消息带@SE前缀
+// ensurePMToSE 确保PM消息带@SE前缀，并清理多余@
 func (m *Manager) ensurePMToSE(content string) string {
-	if strings.HasPrefix(content, "@SE") {
-		return content
+	content = strings.TrimSpace(content)
+	re := regexp.MustCompile(`^@[A-Za-z]+\s+@`)
+	content = re.ReplaceAllString(content, "@")
+	if !strings.HasPrefix(content, "@SE ") && !strings.HasPrefix(content, "@SE\n") {
+		if strings.HasPrefix(content, "@SE") {
+			return content
+		}
+		return "@SE " + content
 	}
-	return "@SE " + content
+	return content
 }
 
 // addPMToSEMsg 发送PM→SE消息（自动加@SE，内部调度）

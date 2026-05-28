@@ -323,7 +323,7 @@ export namespace main {
 	    workDir: string;
 	    recentProjects: string[];
 	    dingtalk?: DingTalkConfig;
-	    http?: HTTPConfig;
+	    http: HTTPConfig;
 	    apEnabled: boolean;
 	    apConfig?: APIConfig;
 	
