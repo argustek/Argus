@@ -173,6 +173,7 @@ type Manager struct {
 	seContinueCount       int           // SE连续继续次数（防无限循环）
 	seAskPMCount          int           // SE连续问PM次数（防needHelp死循环）
 	seReportedComplete    bool          // SE是否已报告完成（防重复报告）
+	seEmptyActionCount    int           // SE连续空actions次数（防空响应死循环）[FIX-20260528]
 	apMode                RoleMode      // AP当前模式（AP管，C可超时强制改）
 	handover              HandoverState // 交接状态（C监控用）
 	pmReviewCycles        int           // PM→SE 验证循环次数，超过上限强制审批
@@ -1449,10 +1450,140 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		return nil
 	}
-	// 🆕 @AP 检测：必须在 addPMToUserMsg 之前！
-	// 防止PM消息带 @AP 标签污染历史（P1修复）
+
+	// 🔥🔥🔥 [方案1-核心修复] @SE 检测：最高优先级！必须在 @AP 和审批关键词之前！
+	// 根因：之前 @SE 检测在第1587行（@AP和审批关键词之后），导致 PM 的任务描述被误判为审批结论
+	// 证据：route.log 显示 [TRACE-AP-CHECK] 之后直接到 AP审批，缺失 [SE-TASK] 记录
+	parsedMsg := m.router.Parse("pm", resp.Content)
+	m.writeRouteLog(fmt.Sprintf("[DEBUG-PARSE-1ST] to=%q content_head=%q", parsedMsg.To, resp.Content[:min(80, len(resp.Content))]))
+
+	if parsedMsg.To == "se" {
+		fmt.Printf("[SE-DEBUG] ✅ [方案1] @SE最高优先级命中: content=%q\n", resp.Content[:min(100, len(resp.Content))])
+		if m.checkLoopBlock("pm", resp.Content) {
+			fmt.Println("[🛡️ 防循环] [方案1] PM→SE 被拦截，不走 startSETask")
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			return nil
+		}
+
+		finalTask := parsedMsg.Content
+		for {
+			idx := strings.LastIndex(finalTask, "\n{")
+			if idx < 0 {
+				break
+			}
+			remainder := finalTask[idx+1:]
+			if strings.Contains(remainder, "current_task") ||
+				strings.Contains(remainder, "total_steps") ||
+				strings.Contains(remainder, "action") ||
+				strings.Contains(remainder, "state") {
+				finalTask = strings.TrimSpace(finalTask[:idx])
+			} else {
+				break
+			}
+		}
+
+		if isStatusOnlyMessage(finalTask) {
+			fmt.Printf("[SE-DEBUG] ⚠️ [方案1] 纯状态消息拦截: %q\n", finalTask)
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			return nil
+		}
+		fmt.Printf("[SE-DEBUG] ✅ [方案1] 通过状态消息检查\n")
+
+		currentState := m.cMonitor.GetProjectState()
+		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
+			fmt.Printf("[SE-DEBUG] 🛡️ [方案1] 审核模式拦截@SE(state=%d)\n", currentState)
+
+			m.reviewCount++
+			if m.reviewCount >= 3 {
+				fmt.Printf("[handleToPM] 🔴 [方案1] 审核违规@SE达%d次，强制流转AP\n", m.reviewCount)
+				m.currentRole = ""
+				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+				m.SetHandoverPending(HandoverPMToAP)
+				if m.apProcessor != nil {
+					return m.handleAPReview("⚠️ PM多次违规@SE，系统强制移交AP审批")
+				}
+				m.forceProjectApproved()
+				return nil
+			}
+
+			fmt.Printf("[handleToPM] ⚠️ [方案1] 审核违规@SE(%d次)，流转AP\n", m.reviewCount)
+			m.currentRole = ""
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverPMToAP)
+			if m.apProcessor != nil {
+				return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
+			}
+			m.forceProjectApproved()
+			return nil
+		} else {
+			m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+		}
+
+		m.addPMToSEMsg(finalTask)
+
+		pmTaskId := ""
+		if m.richBuilder != nil {
+			pmTaskId = m.richBuilder.GetCurrentTaskID()
+			if pmTaskId != "" {
+				m.richBuilder.UpdateTask(pmTaskId, 0, "done")
+				m.richBuilder.UpdateTask(pmTaskId, 1, "running")
+			}
+		}
+
+		taskPreview := finalTask
+		if len(taskPreview) > 80 {
+			taskPreview = taskPreview[:80] + "..."
+		}
+		_ = m.boardManager.UpdateTask(taskPreview, 0)
+
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+
+		go func() {
+			filteredContent := filterDuplicateMentions(resp.Content)
+			m.sendToDingTalk(fmt.Sprintf("[PM→SE] %s", filteredContent))
+		}()
+
+		fmt.Printf("[SE-DEBUG] 🚀 [方案1] 即将调用 startSETaskWithFrom: task=%q\n", finalTask[:min(60, len(finalTask))])
+		err := m.startSETaskWithFrom(finalTask, "pm")
+		fmt.Printf("[SE-DEBUG] ✅ [方案1] startSETaskWithFrom 返回: err=%v\n", err)
+
+		if pmTaskId != "" && m.richBuilder != nil {
+			if err != nil {
+				m.richBuilder.UpdateTask(pmTaskId, 1, "error")
+				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
+			} else {
+				m.richBuilder.UpdateTask(pmTaskId, 2, "running")
+			}
+		}
+
+		return err
+	}
+
+	// [方案1] HasTasks 检测：第二优先级（如果没有 @SE 但有任务JSON）
+	if resp.HasTasks {
+		fmt.Println("[System] [方案1] HasTasks命中 (无@SE但有任务JSON), starting SE...")
+		m.writeRouteLog("[SE-TASK-HASTASKS] from=pm")
+
+		m.addPMToSEMsg(resp.Content)
+
+		_ = m.boardManager.UpdateTask(resp.Tasks.CurrentTask, resp.Tasks.TotalSteps)
+
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+
+		go func() {
+			filteredTask := filterDuplicateMentions(resp.Tasks.CurrentTask)
+			m.sendToDingTalk(fmt.Sprintf("[PM→SE 任务] %s", filteredTask))
+		}()
+
+		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+
+		m.addPMToUserMsg(resp.Content)
+		return m.startSETask(resp.Tasks.CurrentTask)
+	}
+
+	// 🆕 @AP 检测：第三优先级（在 @SE 和 HasTasks 之后）
 	hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
-	fmt.Printf("[TRACE-AP-ROUTE] @AP检测: hasAP=%v content_preview=%q\n",
+	fmt.Printf("[TRACE-AP-ROUTE] [方案1] @AP检测(第三优先级): hasAP=%v content_preview=%q\n",
 		hasAP, resp.Content[:min(120, len(resp.Content))])
 	m.writeRouteLog(fmt.Sprintf("[TRACE-AP-CHECK] hasAP=%v", hasAP))
 	if hasAP {
@@ -1542,142 +1673,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}
 	}
 
-	// 正常路由解析（@AP 已在上面提前处理过了，此处只处理 @SE/@USR）
-	parsedMsg := m.router.Parse("pm", resp.Content)
-
-	if parsedMsg.To == "se" {
-		fmt.Printf("[SE-DEBUG] ✅ 检测到@SE: content=%q\n", resp.Content[:min(100, len(resp.Content))])
-		if m.checkLoopBlock("pm", resp.Content) {
-			fmt.Println("[🛡️ 防循环] PM→SE 被拦截，不走 startSETask")
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			return nil
-		}
-		fmt.Printf("[TRACE-PM-ROUTE] ✅ PM走【@SE分支】→ startSETask | task_head=%q\n",
-			parsedMsg.Content[:min(80, len(parsedMsg.Content))])
-
-		// 移除 @SE 内容末尾的所有 task JSON（AI 常把 {"current_task":...} / {"action":...} 当 metadata 附加）
-		finalTask := parsedMsg.Content
-		for {
-			idx := strings.LastIndex(finalTask, "\n{")
-			if idx < 0 {
-				break
-			}
-			remainder := finalTask[idx+1:]
-			if strings.Contains(remainder, "current_task") ||
-				strings.Contains(remainder, "total_steps") ||
-				strings.Contains(remainder, "action") ||
-				strings.Contains(remainder, "state") {
-				finalTask = strings.TrimSpace(finalTask[:idx])
-			} else {
-				break
-			}
-		}
-
-		// 过滤纯状态确认消息（防止PM循环发送"收到"/"待命"给SE触发死循环）
-		if isStatusOnlyMessage(finalTask) {
-			fmt.Printf("[SE-DEBUG] ⚠️ 纯状态消息拦截: %q\n", finalTask)
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			return nil
-		}
-		fmt.Printf("[SE-DEBUG] ✅ 通过状态消息检查\n")
-
-		currentState := m.cMonitor.GetProjectState()
-		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
-			fmt.Printf("[SE-DEBUG] 🛡️ 审核模式拦截@SE(state=%d)\n", currentState)
-
-			m.reviewCount++
-
-			if m.reviewCount >= 3 {
-				fmt.Printf("[handleToPM] 🔴 审核违规@SE达%d次，强制流转AP\n", m.reviewCount)
-				m.currentRole = ""
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				m.SetHandoverPending(HandoverPMToAP)
-				if m.apProcessor != nil {
-					return m.handleAPReview("⚠️ PM多次违规@SE，系统强制移交AP审批")
-				}
-				m.forceProjectApproved()
-				return nil
-			}
-
-			fmt.Printf("[handleToPM] ⚠️ 审核违规@SE(%d次)，流转AP\n", m.reviewCount)
-			m.currentRole = ""
-			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-			m.SetHandoverPending(HandoverPMToAP)
-			if m.apProcessor != nil {
-				return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
-			}
-			m.forceProjectApproved()
-			return nil
-		} else {
-			m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
-		}
-
-		m.addPMToSEMsg(finalTask)
-
-		pmTaskId := ""
-		if m.richBuilder != nil {
-			pmTaskId = m.richBuilder.GetCurrentTaskID()
-			if pmTaskId != "" {
-				m.richBuilder.UpdateTask(pmTaskId, 0, "done")
-				m.richBuilder.UpdateTask(pmTaskId, 1, "running")
-			}
-		}
-
-		// 📋 记录 PM→SE 任务分配
-		taskPreview := finalTask
-		if len(taskPreview) > 80 {
-			taskPreview = taskPreview[:80] + "..."
-		}
-		_ = m.boardManager.UpdateTask(taskPreview, 0)
-
-		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-
-		// 发送PM@SE到钉钉（过滤重复@）
-		go func() {
-			filteredContent := filterDuplicateMentions(resp.Content)
-			m.sendToDingTalk(fmt.Sprintf("[PM→SE] %s", filteredContent))
-		}()
-
-		// 启动SE执行任务
-		fmt.Printf("[SE-DEBUG] 🚀 即将调用 startSETaskWithFrom: task=%q\n", finalTask[:min(60, len(finalTask))])
-		err := m.startSETaskWithFrom(finalTask, "pm")
-		fmt.Printf("[SE-DEBUG] ✅ startSETaskWithFrom 返回: err=%v\n", err)
-
-		if pmTaskId != "" && m.richBuilder != nil {
-			if err != nil {
-				m.richBuilder.UpdateTask(pmTaskId, 1, "error")
-				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
-			} else {
-				m.richBuilder.UpdateTask(pmTaskId, 2, "running")
-			}
-		}
-
-		return err
-	}
-
-	// 如果有任务JSON，启动SE执行
-	if resp.HasTasks {
-		fmt.Println("[System] PM created tasks, starting SE...")
-
-		m.addPMToSEMsg(resp.Content)
-
-		// 📋 记录 PM→SE 任务分配
-		_ = m.boardManager.UpdateTask(resp.Tasks.CurrentTask, resp.Tasks.TotalSteps)
-
-		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-
-		// 发送PM创建任务到钉钉（过滤重复@）
-		go func() {
-			filteredTask := filterDuplicateMentions(resp.Tasks.CurrentTask)
-			m.sendToDingTalk(fmt.Sprintf("[PM→SE 任务] %s", filteredTask))
-		}()
-
-		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
-
-		m.addPMToUserMsg(resp.Content)
-		return m.startSETask(resp.Tasks.CurrentTask)
-	}
-
+	// [方案1-已移除] 旧的 @SE 和 HasTasks 检测已移至文件前面（最高优先级）
 	// 没有@SE/没有任务 = 普通对话，PM回复用户
 	fmt.Printf("[TRACE-PM-ROUTE] ⚠️ PM走【闲聊分支】! to=%q hasTasks=%v content_head=%q | AP不会启动!\n",
 		parsedMsg.To, resp.HasTasks, resp.Content[:min(100, len(resp.Content))])
@@ -2216,6 +2212,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	m.seContinueCount = 0
 	m.seAskPMCount = 0
 	m.seReportedComplete = false
+	m.seEmptyActionCount = 0
 
 	m.cMonitor.ResetRetryFlag()
 
@@ -2345,6 +2342,8 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	fmt.Printf("[SE Debug] Actions count: %d\n", len(resp.Actions))
 	fmt.Printf("[SE Debug] Completed: %v\n", resp.Completed != nil)
 	fmt.Printf("[SE Debug] NeedHelp: %v\n", resp.NeedHelp)
+	m.writeRouteLog(fmt.Sprintf("[SE-RESP] actions=%d completed=%v needHelp=%v content_len=%d",
+		len(resp.Actions), resp.Completed != nil, resp.NeedHelp, len(resp.Content)))
 	if len(resp.Content) > 0 {
 		fmt.Printf("[SE Debug] Response preview: %s\n", resp.Content[:min(500, len(resp.Content))])
 	}
@@ -2352,6 +2351,44 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		for i, a := range resp.Actions {
 			fmt.Printf("[SE Debug] Action[%d]: type=%s path=%s\n", i, a.Type, a.Path)
 		}
+	}
+
+	// 🔴 [FIX-20260528] 防死循环：检测空actions死循环
+	if len(resp.Actions) == 0 && resp.Completed == nil && !resp.NeedHelp {
+		m.seEmptyActionCount++
+		fmt.Printf("[SE-DEBUG] ⚠️ 空actions响应 #%d | content_len=%d (时间:%s)\n",
+			m.seEmptyActionCount, len(resp.Content), time.Now().Format("15:04:05"))
+		m.writeRouteLog(fmt.Sprintf("[SE-EMPTY-ACTION] count=%d content_len=%d continueCount=%d",
+			m.seEmptyActionCount, len(resp.Content), m.seContinueCount))
+
+		if m.seEmptyActionCount >= 3 {
+			fmt.Println("[🛡️ 防死循环] SE连续3次返回空actions，强制路由到PM [TAG-E1]")
+			m.writeRouteLog("[SE-FORCE-ROUTE] 连续3次空actions，强制路由到PM")
+			resp.Content = strings.TrimSpace(resp.Content)
+			if resp.Content == "" {
+				resp.Content = "✅ SE已完成（无操作动作）"
+			}
+			m.seReportedComplete = true
+			m.currentRole = ""
+			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverSEToPM)
+			m.cMonitor.UpdateProjectState(types.ProjectStateDone)
+			m.syncBackendStatus("done", "SE空actions兜底，强制完成 [TAG-E1]")
+			summary := "✅ SE已完成任务执行（无文件操作），请审核结果"
+			if from != "pm" {
+				m.addSEToUserMsg(summary)
+			}
+			m.msgBusSend("se", summary, "exec_completed", PathSEExec, "startSETaskWithFrom:empty-action-force", map[string]interface{}{
+				"executor":  "se",
+				"result":    "completed",
+				"status":    "completed",
+				"timestamp": time.Now().Unix(),
+			})
+			_, err := m.ProcessMessageFrom("se", summary+"\\n"+resp.Content)
+			return err
+		}
+	} else {
+		m.seEmptyActionCount = 0
 	}
 
 	// 执行actions（先执行动作，确保有效操作不被NeedHelp跳过）

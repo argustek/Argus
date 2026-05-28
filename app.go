@@ -618,16 +618,23 @@ func (a *App) initChatManager() {
 	// ⚠️ G点36修复：启动时如果任务已完成，清空旧消息防止显示历史任务
 	if a.chatManager != nil {
 		state := a.chatManager.GetProjectState()
+		a.addLog(fmt.Sprintf("[G36-FIX] 检查: state=%s, messages=%d", state, len(a.messages)))
 		if state == "done" || state == "approved" || state == "idle" {
 			if len(a.messages) > 0 {
-				fmt.Printf("[G36-FIX] ✅ 状态=%s，清空 %d 条旧消息\n", state, len(a.messages))
+				a.addLog(fmt.Sprintf("[G36-FIX] ✅ 状态=%s，清空 %d 条旧消息", state, len(a.messages)))
 				a.messages = make([]ChatMessage, 0)
 				a.saveMessages()
 				if a.ctx != nil {
 					runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 				}
+			} else {
+				a.addLog(fmt.Sprintf("[G36-FIX] ℹ️ 状态=%s，但无旧消息需要清空", state))
 			}
+		} else {
+			a.addLog(fmt.Sprintf("[G36-FIX] ⚠️ 状态=%s，不清空（非终态）", state))
 		}
+	} else {
+		a.addLog("[G36-FIX] ⚠️ chatManager 为 nil，跳过检查")
 	}
 
 	// 启动C守护进程（此时chatManager已初始化，startCGuardian会跳过旧cMonitorLoop）

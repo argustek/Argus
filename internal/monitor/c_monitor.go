@@ -251,14 +251,70 @@ func (c *CMonitor) handleProjectDone() {
 	doneDuration := now - state.LastChange
 	fmt.Printf("[C] done状态持续: %d秒\n", doneDuration)
 
-	if doneDuration > 30 && !c.handoverForced {
-		fmt.Printf("[C] 🔴 done状态超过30秒，C硬编码强制推送到approved\n")
-		c.handoverForced = true
-		c.alertFunc("⚠️ 审批超时，C监控已自动完成审批")
+	if doneDuration > 60 && !c.handoverForced {
+		// 🔴 [FIX-20260528] 智能超时处理：根据交接状态决定推进策略
+		var currentStep string = "unknown"
 
-		if c.handoverForceAction != nil {
-			if err := c.handoverForceAction("ap_to_done", true); err != nil {
-				fmt.Printf("[C] ❌ 强制推进到approved失败: %v\n", err)
+		if c.handoverStateGetter != nil {
+			stateRaw := c.handoverStateGetter()
+			if stateMap, ok := stateRaw.(map[string]interface{}); ok {
+				if pending, ok := stateMap["pending"].(bool); ok && pending {
+					if step, ok := stateMap["step"].(string); ok {
+						currentStep = step
+					}
+				}
+			}
+		}
+
+		fmt.Printf("[C] 🔴 done状态超过60秒，当前交接步骤: %s\n", currentStep)
+
+		switch currentStep {
+		case "se_to_pm":
+			// SE已完成但PM未接手 → 强制触发PM审核
+			fmt.Printf("[C] → 强制触发PM审核（SE→PM卡住）\n")
+			c.handoverForced = true
+			c.alertFunc("⚠️ SE完成但PM未响应，C强制触发PM审核")
+
+			if c.handoverForceAction != nil {
+				if err := c.handoverForceAction("se_to_pm", true); err != nil {
+					fmt.Printf("[C] ❌ 强制触发PM审核失败: %v\n", err)
+				}
+			}
+
+		case "pm_to_ap":
+			// PM已approve但未移交AP → 强制交给AP审批
+			fmt.Printf("[C] → 强制转交AP审批（PM→AP卡住）\n")
+			c.handoverForced = true
+			c.alertFunc("⚠️ PM已完成但未移交AP，C强制转交AP审批")
+
+			if c.handoverForceAction != nil {
+				if err := c.handoverForceAction("pm_to_ap", true); err != nil {
+					fmt.Printf("[C] ❌ 强制转交AP失败: %v\n", err)
+				}
+			}
+
+		case "ap_to_done", "unknown":
+			// AP审批超时或无交接状态 → 强制通过（最后手段）
+			fmt.Printf("[C] → AP审批超时或状态异常，强制通过（最后手段）\n")
+			c.handoverForced = true
+			c.alertFunc("🔴⚠️ AP审批超时，C强制通过（非正常流程！）")
+
+			if c.handoverForceAction != nil {
+				if err := c.handoverForceAction("ap_to_done", true); err != nil {
+					fmt.Printf("[C] ❌ 强制推进到approved失败: %v\n", err)
+				}
+			}
+
+		default:
+			// 其他未知状态 → 安全起见，强制通过
+			fmt.Printf("[C] → 未知交接状态(%s)，强制通过\n", currentStep)
+			c.handoverForced = true
+			c.alertFunc(fmt.Sprintf("🔴⚠️ 项目完成但状态异常(%s)，C强制通过", currentStep))
+
+			if c.handoverForceAction != nil {
+				if err := c.handoverForceAction("ap_to_done", true); err != nil {
+					fmt.Printf("[C] ❌ 强制推进失败: %v\n", err)
+				}
 			}
 		}
 	}

@@ -469,6 +469,12 @@ onMounted(async () => {
   EventsOff('ap_message')
   EventsOn('ap_message', (data: { delta: string; _msgId?: string }) => {
     if (!data.delta) return
+    // [G64] AP消息去重：检查是否已存在相同内容的AP消息
+    const lastApMsg = [...messages.value].reverse().find(m => m.role === 'ap')
+    if (lastApMsg && (lastApMsg.content || '').trim() === (data.delta || '').trim()) {
+      console.log('[G64] AP消息去重: 跳过重复内容')
+      return
+    }
     // [G63] 自动ACK
     ackMessage(data._msgId || '')
     messages.value.push({
@@ -737,7 +743,8 @@ onMounted(async () => {
       showThinking: loadedConfig.showThinking ?? true,
       pmDecisionAlert: loadedConfig.pmDecisionAlert ?? false,
       apEnabled: loadedConfig.apEnabled ?? false,
-      apConfig: loadedConfig.apConfig || null
+      apConfig: loadedConfig.apConfig || null,
+      http: loadedConfig.http || { enabled: false, port: 8080, apiToken: '', allowRemote: false }
     }
     
     // 加载工作目录
