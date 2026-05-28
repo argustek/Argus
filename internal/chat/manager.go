@@ -748,6 +748,11 @@ func (m *Manager) initCMonitor() {
 	)
 	fmt.Println("[Manager] ✅ C 监控状态查询能力已启用")
 
+	// [FIX-20260528-D] 设置SE完成状态检测器
+	m.cMonitor.SetSECompletedChecker(m.IsSETaskCompleted)
+	m.cMonitor.SetWorkDirChecker(func() string { return m.workDir })
+	fmt.Println("[Manager] ✅ C监控SE完成状态+工作目录检测已启用")
+
 	// 启动C监控
 	m.cMonitor.Start()
 }
@@ -5249,12 +5254,20 @@ func (m *Manager) GetChatManagerStatus() map[string]interface{} {
 	defer m.mu.RUnlock()
 
 	return map[string]interface{}{
-		"initialized":      true,
-		"messageCount":     len(m.history),
-		"currentRole":      m.currentRole,
-		"workDir":          m.workDir,
-		"hasMemoryManager": m.memoryManager != nil,
+		"initialized":        true,
+		"messageCount":       len(m.history),
+		"currentRole":        m.currentRole,
+		"workDir":            m.workDir,
+		"hasMemoryManager":   m.memoryManager != nil,
+		"seReportedComplete": m.seReportedComplete,  // [FIX-20260528-D] 暴露SE完成状态
 	}
+}
+
+// IsSETaskCompleted [FIX-20260528-D] 供C监控判断SE是否已报告任务完成
+func (m *Manager) IsSETaskCompleted() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.seReportedComplete
 }
 
 func (m *Manager) GetHandoverState() HandoverState {

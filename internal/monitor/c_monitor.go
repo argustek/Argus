@@ -60,6 +60,10 @@ type CMonitor struct {
 	resetCount    int          // 本轮自动复位次数
 	maxResetCount int          // 最大自动复位次数（默认3次）
 
+	// [FIX-20260528-D] SE完成状态检测
+	seCompletedChecker func() bool // 检查SE是否已报告完成任务
+	workDirChecker     func() string // 获取工作目录（用于文件检测）
+
 	// 交接安全网
 	handoverStateGetter func() interface{}                   // 获取交接状态
 	handoverClearer     func()                               // 清空交接状态
@@ -407,21 +411,43 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 				remaining := c.maxResetCount - c.resetCount
 				fmt.Printf("[C] SE无进展超过6分钟，延迟10s后自动reset (第%d/%d次)\n", c.resetCount, c.maxResetCount)
 
-				// 🔴 [FIX-20260528-C] 正确判断：通过项目状态判断SE是否已完成
-				// 不依赖handover状态（会被PM处理时清除）
+			// 🔴 [FIX-20260528-D] 正确判断：通过SE完成状态+文件检测
 				shouldForceRouteToPM := false
 				forceStepName := ""
 
-				state, err := c.readState()
-				if err == nil {
-					// 如果项目已经是done状态，说明SE已完成任务但卡在交接
-					if state.ProjectState == types.ProjectStateDone {
-						shouldForceRouteToPM = true
-						forceStepName = "se_to_pm"  // 默认强制触发PM审核
-						fmt.Printf("[C] 🛡️ 项目已处于done状态但SE仍在busy，判断为交接卡住\n")
-						fmt.Printf("[C]    PM=%s SE=%s LastChange=%d秒前\n",
-							state.PmStatus, state.SeStatus, now-state.LastChange)
+				// 方法1: SE完成状态检测器（最准确）
+				if c.seCompletedChecker != nil && c.seCompletedChecker() {
+					shouldForceRouteToPM = true
+					forceStepName = "se_to_pm"
+					fmt.Printf("[C] 🛡️ SE已报告完成(seReportedComplete=true)但仍在busy\n")
+				} else if c.workDirChecker != nil {
+					// 方法2: 文件存在性检测（备选方案）
+					workDir := c.workDirChecker()
+					if workDir != "" {
+						// 检查工作目录是否有最近修改的文件（5分钟内）
+						files, err := os.ReadDir(workDir)
+						if err == nil {
+							recentFileCount := 0
+							now := time.Now().Unix()
+							for _, f := range files {
+								if info, err := f.Info(); err == nil {
+									modTime := info.ModTime().Unix()
+									if now-modTime < 300 && !f.IsDir() { // 5分钟内修改的非目录文件
+										recentFileCount++
+									}
+								}
+							}
+							if recentFileCount > 0 {
+								shouldForceRouteToPM = true
+								forceStepName = "se_to_pm"
+								fmt.Printf("[C] 🛡️ [文件检测] 工作目录有%d个最近文件，SE可能已完成\n", recentFileCount)
+							}
+						}
 					}
+				}
+
+				if !shouldForceRouteToPM {
+					fmt.Printf("[C] 📋 SE未完成或检测器不可用，准备执行正常reset\n")
 				}
 
 				time.Sleep(10 * time.Second)
@@ -1078,6 +1104,18 @@ func (c *CMonitor) SetStatusProviders(chatManagerStatus, memoryStatus func() map
 	c.chatManagerStatus = chatManagerStatus
 	c.memoryStatus = memoryStatus
 	fmt.Println("[C] ✅ 状态查询依赖已设置")
+}
+
+// SetSECompletedChecker [FIX-20260528-D] 设置SE完成状态检查器
+func (c *CMonitor) SetSECompletedChecker(checker func() bool) {
+	c.seCompletedChecker = checker
+	fmt.Println("[C] ✅ SE完成状态检测器已设置")
+}
+
+// SetWorkDirChecker [FIX-20260528-D] 设置工作目录检查器
+func (c *CMonitor) SetWorkDirChecker(checker func() string) {
+	c.workDirChecker = checker
+	fmt.Println("[C] ✅ 工作目录检测器已设置")
 }
 
 // GetSystemStatus 获取系统完整状态（C的核心能力：实时监控所有模块）
