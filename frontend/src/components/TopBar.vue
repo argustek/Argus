@@ -201,9 +201,15 @@ function loadStickyData() {
     const raw = localStorage.getItem(STICKY_STORAGE_KEY)
     if (raw) {
       const data = JSON.parse(raw)
+      const pos = data.pos || { x: window.innerWidth - 320, y: 60 }
+      // [FIX] 确保即时贴在可视区域内（防止跨显示器/分辨率时丢出屏幕外）
+      if (pos.x > window.innerWidth - 100) pos.x = window.innerWidth - 320
+      if (pos.x < 0) pos.x = 20
+      if (pos.y > window.innerHeight - 100) pos.y = 60
+      if (pos.y < 0) pos.y = 20
       return {
         content: data.content || '',
-        pos: data.pos || { x: window.innerWidth - 320, y: 60 },
+        pos,
         size: data.size || { width: 280, height: 200 },
         visible: data.visible || false,
       }
@@ -281,6 +287,11 @@ const onStickyDrag = (e: MouseEvent) => {
 
 const stopStickyDrag = () => {
   isStickyDragging = false
+  // [FIX] 确保拖拽结束后即时贴不超出屏幕
+  if (stickyNotePos.value.x > window.innerWidth - 100) stickyNotePos.value.x = window.innerWidth - 320
+  if (stickyNotePos.value.x < 0) stickyNotePos.value.x = 20
+  if (stickyNotePos.value.y > window.innerHeight - 100) stickyNotePos.value.y = 60
+  if (stickyNotePos.value.y < 0) stickyNotePos.value.y = 20
   document.removeEventListener('mousemove', onStickyDrag)
   document.removeEventListener('mouseup', stopStickyDrag)
   saveStickyData()
