@@ -201,16 +201,18 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 	if !mb.enabled {
 		return []map[string]interface{}{}
 	}
-	
-	mb.mu.RLock()
-	defer mb.mu.RUnlock()
-	
+
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
 	now := time.Now()
 	var pendingList []map[string]interface{}
-	
+
 	for msgId, pending := range mb.pendingQueue {
 		elapsed := now.Sub(pending.SentAt)
-		
+		isTimeout := elapsed > mb.timeout
+		isNewLoss := isTimeout && pending.RetryCount == 0
+
 		item := map[string]interface{}{
 			"msgId":      msgId,
 			"role":       pending.Role,
@@ -220,19 +222,19 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 			"sendedAt":   pending.SentAt.Format("15:04:05.000"),
 			"elapsedSec": elapsed.Seconds(),
 			"contentLen": len(pending.Content),
-			"isTimeout":  elapsed > mb.timeout,
+			"isTimeout":  isTimeout,
+			"isNewLoss":  isNewLoss,
 		}
 		pendingList = append(pendingList, item)
-		
-		if elapsed > mb.timeout && pending.RetryCount == 0 {
+
+		if isNewLoss {
 			pending.RetryCount++
 			fmt.Printf("[🚨MSG] 超时未确认! id=%s role=%s path=%s source=%s 已等待%.1fs\n",
 				msgId, pending.Role, pending.Tag.Path, pending.Tag.SourceLoc, elapsed.Seconds())
-			
 			mb.lostMessages = append(mb.lostMessages, pending)
 		}
 	}
-	
+
 	return pendingList
 }
 
@@ -274,12 +276,12 @@ func (mb *MessageBus) GetStats() map[string]interface{} {
 func (mb *MessageBus) backgroundChecker() {
 	ticker := time.NewTicker(mb.checkInterval)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		pending := mb.CheckPending()
 		if len(pending) > 0 && mb.ctx != nil {
 			for _, p := range pending {
-				if isTimeout, ok := p["isTimeout"].(bool); ok && isTimeout {
+				if isNewLoss, ok := p["isNewLoss"].(bool); ok && isNewLoss {
 					runtime.EventsEmit(mb.ctx, "message_lost", p)
 				}
 			}

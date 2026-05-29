@@ -108,10 +108,10 @@ func loadTestConfig(t *testing.T) pdcaConfig {
 	return cfg
 }
 
-// waitForCompletion 等待任务完成，通过 state.json + conversation.log 双重检测
+// waitForCompletion 等待任务完成，通过 state.json 检测
 func waitForCompletion(m *Manager, workDir string, timeout time.Duration) (bool, int, string) {
 	statePath := filepath.Join(workDir, ".argus", "state.json")
-	logPath := filepath.Join(workDir, ".argus", "conversation.log")
+	logPath := filepath.Join(workDir, "logs", "conversation.log")
 
 	// 预期输出文件列表（SE 通常创建其中之一）
 	completionFiles := []string{"hello.go", "main.go"}
@@ -257,7 +257,7 @@ func TestPDCA_HelloWorld(t *testing.T) {
 				WorkDir:   tmpDir,
 			}
 
-			manager, err := NewManager(mgrCfg, tmpDir)
+			manager, err := NewManager(mgrCfg, tmpDir, tmpDir)
 			require.NoError(t, err, "NewManager failed")
 			manager.InitCMonitor() // 初始化C监控（必须调用，否则cMonitor为nil）
 			defer manager.StopGoroutines()

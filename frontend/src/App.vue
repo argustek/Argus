@@ -304,6 +304,15 @@ watch(messages, (newVal, oldVal) => {
 
 // 加载配置和消息
 onMounted(async () => {
+  // [DEBUG-20260529] 测试消息：验证前端渲染是否工作
+  messages.value.push({
+    id: Date.now(),
+    role: 'system',
+    content: '🧪 **前端渲染测试** - 如果您看到此消息，说明Vue渲染系统正常工作！\n\n时间: ' + new Date().toLocaleString(),
+    timestamp: new Date().toISOString()
+  })
+  console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
+
   // 监听项目状态变更事件
   EventsOn('project-state-changed', (state: string) => {
     projectState.value = state
@@ -582,9 +591,53 @@ onMounted(async () => {
     } catch(e) { /* 静默 */ }
   })
 
+  const seenLostMsgIds = new Set<string>()
+
   // [G63] MessageBus: 监听消息丢失事件（后端检测到超时未ACK）
-  EventsOn('message_lost', (data: { msgId: string; role: string; event: string; path: string; source: string; elapsedSec: number }) => {
+  EventsOn('message_lost', (data: { msgId: string; role: string; event: string; path: string; source: string; elapsedSec: number; isNewLoss?: boolean }) => {
     console.error(`[🚨MSG] 消息丢失! id=${data.msgId} role=${data.role} path=${data.path} source=${data.source} 等待${data.elapsedSec?.toFixed(1)}s`)
+
+    if (seenLostMsgIds.has(data.msgId)) return
+    seenLostMsgIds.add(data.msgId)
+
+    const errorMsg = `🚨 **消息丢失** (${data.role?.toUpperCase()}/${data.event})\n路径: ${data.path} | 来源: ${data.source} | 等待: ${data.elapsedSec?.toFixed(1)}s`
+
+    messages.value.push({
+      id: Date.now(),
+      role: 'system',
+      content: errorMsg,
+      timestamp: new Date().toISOString(),
+      _isError: true
+    })
+
+    if (config.value.pmDecisionAlert) {
+      showSystemTrayNotification('🚨 消息丢失', `${data.role}消息可能未送达 (${data.elapsedSec?.toFixed(1)}s超时)`)
+      playNotificationSound()
+    }
+  })
+
+  // [FIX-20260529] SE互斥警告：当SE正在执行时拒绝新调用
+  EventsOn('warning', (data: { from?: string; blockedTask?: string; _msgId?: string; [key: string]: any }) => {
+    console.warn('[⚠️WARNING]', data)
+    
+    // [G63] 自动ACK（重要！否则MessageBus会标记为丢失）
+    ackMessage(data._msgId || '')
+    
+    const warningMsg = data.blockedTask || data.message || 'SE正在执行任务中'
+    const from = data.from || 'system'
+    
+    messages.value.push({
+      id: Date.now(),
+      role: 'system',
+      content: `⚠️ **SE正在执行任务中，请等待完成后再发送新指令。**\n\n当前任务: ${warningMsg}\n来源: ${from}`,
+      timestamp: new Date().toISOString(),
+      _isWarning: true
+    })
+    
+    if (config.value.pmDecisionAlert) {
+      showSystemTrayNotification('⚠️ SE忙', 'SE正在执行任务中，请等待完成')
+      playNotificationSound()
+    }
   })
 
   EventsOn('pm_streaming_done', () => {

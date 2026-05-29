@@ -24,7 +24,7 @@ func newTestManager(t *testing.T) (*Manager, func()) {
 			Model:    "test-model",
 		},
 	}
-	m, err := NewManager(config, tmpDir)
+	m, err := NewManager(config, tmpDir, tmpDir)
 	require.NoError(t, err)
 	return m, func() {}
 }
@@ -196,7 +196,7 @@ func TestNewManager_ValidConfig(t *testing.T) {
 			Model:    "test-model",
 		},
 	}
-	m, err := NewManager(config, tmpDir)
+	m, err := NewManager(config, tmpDir, tmpDir)
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	assert.Equal(t, tmpDir, m.workDir)
@@ -214,7 +214,7 @@ func TestNewManager_BoardFileCreated(t *testing.T) {
 			Model:    "test-model",
 		},
 	}
-	_, err := NewManager(config, tmpDir)
+	_, err := NewManager(config, tmpDir, tmpDir)
 	require.NoError(t, err)
 
 	boardPath := filepath.Join(tmpDir, ".argus", "board.json")

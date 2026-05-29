@@ -45,7 +45,7 @@ func main() {
 
 	// 4. 初始化对话管理器
 	workDir := "."
-	chatManager, err := chat.NewManager(*config, workDir)
+	chatManager, err := chat.NewManager(*config, workDir, ".")
 	if err != nil {
 		fmt.Printf("[Argus] Failed to init chat manager: %v\n", err)
 		os.Exit(1)

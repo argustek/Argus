@@ -22,6 +22,12 @@ type StreamConfig struct {
 	ClientSecret string `json:"client_secret"`
 }
 
+var logDir = ".argus"
+
+func SetLogDir(dir string) {
+	logDir = dir
+}
+
 var (
 	streamClient       *client.StreamClient
 	streamCancel       context.CancelFunc
@@ -173,7 +179,7 @@ func logToFile(message string) {
 	fmt.Print(logLine)
 	
 	// 写入日志文件
-	logFile := ".argus/dingtalk.log"
+	logFile := logDir + "/dingtalk.log"
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return

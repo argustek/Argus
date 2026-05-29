@@ -193,6 +193,7 @@ type Manager struct {
 	pmLastFailureTime     time.Time     // PM最后一次失败时间
 	pmUnhealthySince      time.Time     // PM进入不健康状态的时间点
 	workDir               string
+	configDir             string // IDE系统目录（调试日志存放位置）
 	config                types.Config
 	ctx                   context.Context // Wails context
 
@@ -224,6 +225,7 @@ type BackendStatus struct {
 	SEStatus     string `json:"se_status"`
 	ProjectState int    `json:"project_state"`
 	CurrentRole  string `json:"current_role"`
+	CurrentSETask string `json:"current_se_task"` // [FIX-20260529] SE当前任务描述
 	LastEvent    string `json:"last_event"`
 	MessageCount int    `json:"message_count"`
 	UpdatedAt    int64  `json:"updated_at"`
@@ -253,7 +255,7 @@ type HandoverState struct {
 }
 
 // NewManager 创建对话管理器
-func NewManager(config types.Config, workDir string) (*Manager, error) {
+func NewManager(config types.Config, workDir string, configDir string) (*Manager, error) {
 	// 创建AI客户端
 	aiClient := ai.NewClient(config.APIConfig)
 
@@ -288,6 +290,7 @@ func NewManager(config types.Config, workDir string) (*Manager, error) {
 		lastMsgIDs:    make(map[string]string),
 		currentRole:   "user",
 		workDir:       workDir,
+		configDir:     configDir,
 		config:        config,
 		taskManager:   task.NewTaskManager(nil),
 		ReplyLanguage: "zh",
@@ -439,7 +442,8 @@ func (m *Manager) startConversationMonitor() {
 	fmt.Println("[Monitor] 启动对话日志监控循环")
 
 	lastReadPos := int64(0)
-	logPath := filepath.Join(m.workDir, ".argus", "conversation.log")
+	logDir := filepath.Join(m.configDir, "..", "logs")
+	logPath := filepath.Join(logDir, "conversation.log")
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -4084,12 +4088,13 @@ func (m *Manager) addSEToUserMsg(content string) {
 }
 
 // writeRouteLog 路由调试日志（永久保留，排查消息路由问题用）
-// 日志位置: {workDir}/.argus/route.log
+// 日志位置: {configDir}/../logs/route.log
 // 用途: 追踪 @SE/@PM 消息解析结果、SE任务来源(from)、轮转拦截情况
-// 查看: Get-Content {workDir}/.argus/route.log -Tail 30
+// 查看: Get-Content {configDir}/../logs/route.log -Tail 30
 func (m *Manager) writeRouteLog(msg string) {
-	logPath := filepath.Join(m.workDir, ".argus", "route.log")
-	os.MkdirAll(filepath.Dir(logPath), 0755)
+	logDir := filepath.Join(m.configDir, "..", "logs")
+	os.MkdirAll(logDir, 0755)
+	logPath := filepath.Join(logDir, "route.log")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
@@ -4099,12 +4104,11 @@ func (m *Manager) writeRouteLog(msg string) {
 	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, msg))
 }
 
-// writeConversationLog 写入对话日志文件
+// writeConversationLog 写入对话日志文件（调试用途，存放在IDE系统目录的logs/下）
 func (m *Manager) writeConversationLog(msg Message) {
-	logPath := filepath.Join(m.workDir, ".argus", "conversation.log")
-
-	// 确保目录存在
-	os.MkdirAll(filepath.Dir(logPath), 0755)
+	logDir := filepath.Join(m.configDir, "..", "logs")
+	os.MkdirAll(logDir, 0755)
+	logPath := filepath.Join(logDir, "conversation.log")
 
 	// ✅ 自动清理：日志超过500KB时只保留最后2000行（开发调试用）
 	if info, err := os.Stat(logPath); err == nil && info.Size() > 512*1024 {
@@ -5736,6 +5740,7 @@ func (m *Manager) syncBackendStatus(stage string, event string) {
 	m.backendStatus.SEStatus = state.SeStatus
 	m.backendStatus.ProjectState = state.ProjectState
 	m.backendStatus.CurrentRole = m.currentRole
+	m.backendStatus.CurrentSETask = m.currentSETask // [FIX-20260529] 同步SE任务描述
 	m.pushSSEEvent("status_update", m.backendStatus)
 }
 

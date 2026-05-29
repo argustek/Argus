@@ -519,7 +519,7 @@ func (a *App) initChatManager() {
 		}
 	}
 
-	chatManager, err := chat.NewManager(config, projectDir)
+	chatManager, err := chat.NewManager(config, projectDir, a.getConfigDir())
 	if err != nil {
 		a.addLog(fmt.Sprintf("【ChatManager】初始化失败: %v", err))
 		return
@@ -527,6 +527,7 @@ func (a *App) initChatManager() {
 
 	a.chatManager = chatManager
 	a.chatManager.SetDingTalkEnabled(a.isDingTalkEnabled())
+	dingtalk.SetLogDir(filepath.Join(a.getConfigDir(), "..", "logs"))
 	// 设置Wails context（供C监控弹框使用）
 	if a.ctx != nil {
 		a.chatManager.SetContext(a.ctx)
@@ -675,7 +676,7 @@ func (a *App) initChatManagerCLI() {
 		}
 	}
 
-	chatManager, err := chat.NewManager(config, projectDir)
+	chatManager, err := chat.NewManager(config, projectDir, a.getConfigDir())
 	if err != nil {
 		fmt.Printf("[CLI] ChatManager初始化失败: %v\n", err)
 		return

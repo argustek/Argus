@@ -31,6 +31,9 @@ build/bin/
 # Logs
 *.log
 
+# IDE debug logs
+logs/
+
 # Runtime state
 .argus/
 
