@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -188,6 +189,7 @@ func (c *CMonitor) check() {
 }
 
 // autoCommit 自动提交Git改动（每5分钟，有改动才提交）
+// [FIX-20260528-GIT] 增强安全性：智能初始化本地Git，防止污染远程仓库
 func (c *CMonitor) autoCommit(now int64) {
 	if now-c.lastAutoCommit < int64(c.commitInterval.Seconds()) {
 		return
@@ -199,6 +201,14 @@ func (c *CMonitor) autoCommit(now int64) {
 	}
 
 	fmt.Printf("[C] 自动commit: 检测到 %d 个文件改动\n", changedFiles)
+
+	// [NEW] 安全检查1: 确保工作目录有安全的Git仓库
+	if !c.ensureSafeGitRepo() {
+		fmt.Printf("[C] ⚠️ 工作目录Git环境不安全，跳过auto-commit\n")
+		return
+	}
+
+	// [NEW] 安全检查2: 确认remote不会导致问题（可选，已在ensureSafeGitRepo中处理）
 
 	addCmd := exec.Command("git", "add", ".")
 	addCmd.Dir = c.workDir
@@ -222,6 +232,61 @@ func (c *CMonitor) autoCommit(now int64) {
 
 	c.lastAutoCommit = now
 	fmt.Println("[C] 自动commit成功:", commitMsg)
+}
+
+// ensureSafeGitRepo 确保工作目录有一个安全的Git仓库
+// [FIX-20260528-GIT] 防止"女婿上丈母娘的床"：确保不会commit到错误的远程仓库
+func (c *CMonitor) ensureSafeGitRepo() bool {
+	gitDir := filepath.Join(c.workDir, ".git")
+
+	// 情况1: .git不存在 → 自动初始化本地仓库（不设remote）
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		fmt.Printf("[C] 📁 工作目录无Git，初始化本地仓库: %s\n", c.workDir)
+		
+		initCmd := exec.Command("git", "init")
+		initCmd.Dir = c.workDir
+		initCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			fmt.Printf("[C] ❌ git init 失败: %v, output: %s\n", err, string(out))
+			return false
+		}
+		
+		fmt.Printf("[C] ✅ 本地Git仓库已初始化（无远程）\n")
+		return true
+	}
+
+	// 情况2: .git存在 → 检查remote是否安全
+	configPath := filepath.Join(gitDir, "config")
+	if data, err := os.ReadFile(configPath); err == nil {
+		configContent := string(data)
+		
+		// 危险的remote模式（指向主项目仓库）
+		dangerousPatterns := []string{
+			"github.com/argustek/Argus",
+			"argustek/Argus",
+		}
+		
+		for _, pattern := range dangerousPatterns {
+			if strings.Contains(configContent, pattern) {
+				fmt.Printf("[C] 🚨 危险！工作目录的Git remote指向主项目仓库(%s)\n", pattern)
+				fmt.Printf("[C] 这会导致auto-commit污染主仓库！建议删除 .git 或修改remote\n")
+				return false // 阻止auto-commit
+			}
+		}
+		
+		// 检查是否有remote（有的话提醒但允许）
+		if strings.Contains(configContent, "[remote ") || strings.Contains(configContent, "[remote\"") {
+			fmt.Printf("[C] ℹ️  工作目录有remote配置，确保它指向你自己的仓库\n")
+		} else {
+			fmt.Printf("[C] ✅ 工作目录是纯本地Git仓库（无remote），安全\n")
+		}
+		
+		return true
+	}
+
+	// 无法读取config文件，保守处理：允许但警告
+	fmt.Printf("[C] ⚠️ 无法读取Git config，谨慎允许auto-commit\n")
+	return true
 }
 
 // handleProjectDone 项目完成处理

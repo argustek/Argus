@@ -2281,6 +2281,43 @@ func (a *App) GetCommitLog(limit int) ([]git.CommitLogEntry, error) {
 func (a *App) GetBranches() ([]git.BranchInfo, error) { return git.GetBranches(a.getProjectDir()) }
 func (a *App) GetRemotes() ([]git.RemoteInfo, error)  { return git.GetRemotes(a.getProjectDir()) }
 func (a *App) GitClone(url, dir, branch string) map[string]interface{} {
+	// [FIX-20260528-GIT] 安全检查：防止clone到工作目录导致"女婿上丈母娘的床"
+	absDir, _ := filepath.Abs(dir)
+	absWorkDir, _ := filepath.Abs(a.config.WorkDir)
+
+	fmt.Printf("[GitClone] Clone请求: url=%s, dir=%s, branch=%s\n", url, absDir, branch)
+	fmt.Printf("[GitClone] 工作目录: %s\n", absWorkDir)
+
+	// 检查1: 是否是工作目录本身或其子目录
+	if strings.EqualFold(absDir, absWorkDir) || strings.HasPrefix(strings.ToLower(absDir), strings.ToLower(absWorkDir)+string(filepath.Separator)) {
+		errMsg := fmt.Sprintf("⚠️ 危险操作：不能Clone到工作目录(%s)！这会导致C监控auto-commit污染主仓库。请选择其他目录。", absWorkDir)
+		fmt.Printf("[GitClone] ❌ %s\n", errMsg)
+		return map[string]interface{}{
+			"success": false,
+			"error":   errMsg,
+			"output":  "BLOCKED: Cannot clone to work directory",
+		}
+	}
+
+	// 检查2: 目标目录是否已存在且非空（防止覆盖重要文件）
+	if _, err := os.Stat(absDir); err == nil {
+		files, _ := os.ReadDir(absDir)
+		if len(files) > 0 {
+			// 检查是否已有.git目录
+			if _, gitErr := os.Stat(filepath.Join(absDir, ".git")); gitErr == nil {
+				errMsg := fmt.Sprintf("⚠️ 目标目录%s已是Git仓库，Clone会覆盖现有内容！", absDir)
+				fmt.Printf("[GitClone] ❌ %s\n", errMsg)
+				return map[string]interface{}{
+					"success": false,
+					"error":   errMsg,
+					"output":  "BLOCKED: Target is already a git repository",
+				}
+			}
+			fmt.Printf("[GitClone] ⚠️ 目标目录非空(%d个文件)，但允许继续\n", len(files))
+		}
+	}
+
+	fmt.Printf("[GitClone] ✅ 安全检查通过，开始Clone...\n")
 	r := git.Clone(url, dir, branch)
 	return map[string]interface{}{"success": r.Success, "output": r.Output, "error": r.Error}
 }
