@@ -170,6 +170,7 @@ type Manager struct {
 	resetGeneration int64              // 复位世代号，每次复位+1，用于拦截复位后返回的幽灵调用
 
 	currentRole           string        // 当前正在处理的角色
+	currentSETask         string        // [FIX-20260529] SE当前正在执行的任务描述（互斥检查用）
 	seContinueCount       int           // SE连续继续次数（防无限循环）
 	seAskPMCount          int           // SE连续问PM次数（防needHelp死循环）
 	seReportedComplete    bool          // SE是否已报告完成（防重复报告）
@@ -2223,6 +2224,21 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.currentRole, m.router.isProcessing, m.router.lastSpokenBy)
 	m.writeRouteLog(fmt.Sprintf("[SE-TASK] from=%s task='%s'", from, taskDesc))
 
+	// [FIX-20260529-CONCURRENCY] SE互斥检查：如果SE正在执行，拒绝新调用
+	if m.currentRole == "se" {
+		currentTaskDesc := m.currentSETask
+		if len(currentTaskDesc) > 40 {
+			currentTaskDesc = currentTaskDesc[:40] + "..."
+		}
+		fmt.Printf("[SE-DEBUG] ⚠️ SE正在执行中(currentRole=se)，拒绝新调用 from=%s task=%q\n", from, taskDesc[:min(40, len(taskDesc))])
+		m.writeRouteLog(fmt.Sprintf("[SE-TASK] ❌ BLOCKED: SE正在执行中，拒绝新调用 from=%s", from))
+		m.msgBusSend("system", fmt.Sprintf("SE正在执行任务中，请等待完成后再发送新指令。(当前任务: %s)", currentTaskDesc), "warning", PathSystem, "startSETask:se_busy", map[string]interface{}{
+			"from":        from,
+			"blockedTask": taskDesc[:min(60, len(taskDesc))],
+		})
+		return fmt.Errorf("SE正在执行中，拒绝新调用")
+	}
+
 	// 创建PM任务记录（PM分配的任务）
 	if from == "pm" && m.taskManager != nil {
 		cleanDesc := strings.TrimSpace(taskDesc)
@@ -2272,9 +2288,11 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		}
 		m.router.MarkProcessingEnd("se")
+		m.currentSETask = "" // [FIX-20260529] SE任务完成，清除任务描述
 	}()
 
 	m.currentRole = "se"
+	m.currentSETask = taskDesc // [FIX-20260529] 保存当前任务描述
 	m.seContinueCount = 0
 	m.seAskPMCount = 0
 	m.seReportedComplete = false
