@@ -1743,7 +1743,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}
 	}
 
-	if isClearProgrammingTask && !resp.HasTasks && !strings.Contains(strings.ToLower(resp.Content), "@se") {
+	if isClearProgrammingTask && !resp.HasTasks && !strings.Contains(strings.ToLower(resp.Content), "@se") && !m.seReportedComplete && m.currentRole != "se" {
 		fmt.Println("[TRACE-PM-ROUTE] 🔧 精准兜底: 检测到明确编程信号但PM未@SE, 强制转SE!")
 		m.writeRouteLog("[FALLBACK-FIX] 明确编程请求走闲聊分支, 强制转SE")
 
