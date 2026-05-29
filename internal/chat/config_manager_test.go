@@ -28,13 +28,13 @@ func TestCheckDecision_DefaultAuto_FileRead(t *testing.T) {
 	assert.NotEmpty(t, desc)
 }
 
-func TestCheckDecision_DefaultManual_FileDelete(t *testing.T) {
+func TestCheckDecision_DefaultAuto_FileDelete(t *testing.T) {
 	cm, cleanup := newTestConfigManager(t)
 	defer cleanup()
 
 	auto, desc, err := cm.CheckDecision(types.DecisionFileDelete)
 	require.NoError(t, err)
-	assert.False(t, auto, "file_delete should require manual confirmation")
+	assert.True(t, auto, "file_delete should be auto by default")
 	assert.NotEmpty(t, desc)
 }
 

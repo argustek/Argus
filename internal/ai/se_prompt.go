@@ -275,6 +275,15 @@ func (s *SEProcessor) ProcessTaskStream(taskDesc string, onChunk func(delta stri
 	completed := s.extractCompletion(response)
 	needHelp := s.checkNeedHelp(response)
 
+	// 🆕 [DIAG-20260529] 诊断日志：追踪completed识别情况
+	if completed != nil {
+		fmt.Printf("[SE Debug] ✅ extractCompletion SUCCESS! status=%q notes=%q\n",
+			completed.Status, completed.TechnicalNotes)
+	} else if strings.Contains(response, "completed") || strings.Contains(response, "task_status") {
+		fmt.Printf("[SE Debug] ⚠️ extractCompletion FAILED but response contains 'completed' keyword!\n")
+		fmt.Printf("[SE Debug] Response preview (first_300): %s\n", truncate(response, 300))
+	}
+
 	return &SEResponse{
 		Content:   response,
 		Actions:   actions,
@@ -350,6 +359,14 @@ func (s *SEProcessor) extractActions(response string) []SEAction {
 		return actions
 	}
 
+	// ⚠️ 全部解析失败 — 记录原始响应以便调试
+	fmt.Printf("[SE Debug] ⚠️ extractActions FAILED! all strategies returned nil | raw_len=%d first_300=%q\n",
+		len(response), truncate(response, 300))
+	if f, err := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.WriteString(fmt.Sprintf("[%s] EXTRACT-ACTIONS-FAILED raw_len=%d first_500=%q\n", time.Now().Format("15:04:05"), len(response), truncate(response, 500)))
+		f.Close()
+	}
+
 	return nil
 }
 
@@ -401,6 +418,10 @@ func (s *SEProcessor) extractActionsFromJSON(response string) []SEAction {
 
 	// JSON解析失败，尝试修复：将content中的真实换行转为\n转义
 	fixed := s.fixJSONNewlines(jsonStr)
+
+	// 🆕 尝试修复AI常见JSON错误（缺少冒号等）
+	fixed = s.fixMalformedJSON(fixed)
+
 	if err := json.Unmarshal([]byte(fixed), &result); err == nil {
 		fmt.Printf("[SE Debug] extractActions: 修复换行后解析成功\n")
 		result.Actions = s.fixActionTypes(result.Actions)
@@ -441,6 +462,207 @@ func (s *SEProcessor) fixActionTypes(actions []SEAction) []SEAction {
 		}
 	}
 	return actions
+}
+
+// fixMalformedJSON 修复AI生成的JSON中常见格式错误：缺少冒号, 键值粘连, 缺失引号
+func (s *SEProcessor) fixMalformedJSON(jsonStr string) string {
+	totalFixes := 0
+
+	// 1. 修复 "actionstype:" → "actions":[{"type":
+	re := regexp.MustCompile(`^\{\s*"actionstype"\s*:`)
+	if re.MatchString(jsonStr) {
+		jsonStr = re.ReplaceAllString(jsonStr, `{"actions":[{"type":`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 actionstype -> actions:[{type")
+	}
+
+	// 2. 修复 "pathhello.go" → "path":"hello.go" (键值粘连)
+	pathRe := regexp.MustCompile(`"path"([^:\s])`)
+	if pathRe.MatchString(jsonStr) {
+		jsonStr = pathRe.ReplaceAllString(jsonStr, `"path":"$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 path粘连")
+	}
+
+	// 3. 修复 "typeexec" / "typewrite_file" → "type":"..."
+	typeRe := regexp.MustCompile(`"type"([a-z_])`)
+	if typeRe.MatchString(jsonStr) {
+		jsonStr = typeRe.ReplaceAllString(jsonStr, `"type":"$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 type粘连")
+	}
+
+	// 3.1 🆕 [FIX-20260529] 修复空type字段 {"" :"exec"} → {"type":"exec"}
+	emptyTypeRe := regexp.MustCompile(`{""\s*:\s*"([a-z_]+)"`)
+	if emptyTypeRe.MatchString(jsonStr) {
+		jsonStr = emptyTypeRe.ReplaceAllString(jsonStr, `{"type":"$1"`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复空type字段")
+	}
+
+	// 3.2 🆕 [FIX-20260529] 修复完全缺失type字段的action对象
+	missingTypeRe := regexp.MustCompile(`\{\s*"(path|command|content)"`)
+	if missingTypeRe.MatchString(jsonStr) {
+		jsonStr = missingTypeRe.ReplaceAllString(jsonStr, `{"type":"$1","$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 补全缺失的type字段")
+	}
+
+	// 4. 修复 "commandgo" → "command":"go"
+	cmdRe := regexp.MustCompile(`"command"([^:\s"])`)
+	if cmdRe.MatchString(jsonStr) {
+		jsonStr = cmdRe.ReplaceAllString(jsonStr, `"command":"$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 command粘连")
+	}
+
+	// 5. 修复 "content"粘连
+	contentRe := regexp.MustCompile(`"content"([^:\s])`)
+	if contentRe.MatchString(jsonStr) {
+		jsonStr = contentRe.ReplaceAllString(jsonStr, `"content":"$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 content粘连")
+	}
+
+	// 6. 🆕 补全缺失的尾部 ]} (常见: AI只输出了一半)
+	trimmed := strings.TrimSpace(jsonStr)
+	if !strings.HasSuffix(trimmed, "]}") && strings.HasSuffix(trimmed, "}") {
+		// 单action缺少外层 ]
+		// 在最后的 } 之后还有内容就不是单action，不处理
+	}
+	if strings.HasSuffix(trimmed, `"}`) {
+		// 结尾像 `{"actions":[...}` 缺 ]
+		jsonStr = trimmed + "]}"
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 补全尾部 ]}")
+	} else if !strings.HasSuffix(trimmed, "]}") && strings.Count(trimmed, "{") > strings.Count(trimmed, "}") {
+		// 花括号不配对，补上
+		missing := strings.Count(trimmed, "{") - strings.Count(trimmed, "}")
+		jsonStr = trimmed + strings.Repeat("}", missing)
+		// 也补上外层 ]
+		if !strings.Contains(jsonStr[len(jsonStr)-missing*2:], "]") {
+			jsonStr = strings.TrimSuffix(jsonStr, strings.Repeat("}", missing)) + "]" + strings.Repeat("}", missing)
+		}
+		totalFixes++
+		fmt.Printf("[SE Debug] fixMalformedJSON: 补全缺失的花括号 (missing=%d)\n", missing)
+	}
+
+	// 6.5 🆕 [FIX-20260529] 移除Markdown代码块标记 (AI输出 ```json ... ```)
+	markdownRe := regexp.MustCompile("```(?:json)?\\s*\n?")
+	if markdownRe.MatchString(jsonStr) {
+		jsonStr = markdownRe.ReplaceAllString(jsonStr, "")
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 移除Markdown代码块标记")
+	}
+	// 移除结尾的 ```
+	jsonStr = strings.TrimSuffix(jsonStr, "```")
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	// 6.6 🆕 [FIX-20260529] 修复缺少开头的 {" (常见: AI直接输出 actions":[...)
+	if !strings.HasPrefix(jsonStr, "{") && (strings.HasPrefix(jsonStr, `"actions"`) || strings.Contains(jsonStr, `"actions":[`)) {
+		jsonStr = "{" + jsonStr
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 补全缺失的开头 {")
+	}
+
+	// 6.7 🆕 [FIX-20260529] 修复 "type":"execcommand" 粘连 (更精确的command检测)
+	execCmdRe := regexp.MustCompile(`"type"\s*:\s*"exec([a-z]+)command"`)
+	if execCmdRe.MatchString(jsonStr) {
+		jsonStr = execCmdRe.ReplaceAllString(jsonStr, `"type":"exec","command":"$1`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 exec+command粘连")
+	}
+
+	// 6.8 🆕 [FIX-20260529] 修复 "actions": "type": 格式错误 (缺少数组括号)
+	actionsFormatRe := regexp.MustCompile(`"actions"\s*:\s*"type"`)
+	if actionsFormatRe.MatchString(jsonStr) {
+		jsonStr = actionsFormatRe.ReplaceAllString(jsonStr, `"actions":[{"type"`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复actions数组格式")
+	}
+
+	// 7. 🆕 [FIX-20260529] 修复AI生成的Go代码常见语法错误
+	// 7.1 修复 "fmt.PrintlnWorld" → fmt.Println("World") (缺少括号和引号)
+	printRe := regexp.MustCompile(`fmt\.Println([a-zA-Z]\w*)`)
+	if printRe.MatchString(jsonStr) {
+		jsonStr = printRe.ReplaceAllString(jsonStr, `fmt.Println("$1")`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 Println缺少括号")
+	}
+
+	// 7.2 修复 "go run hello" (缺.go) → "go run hello.go" (在exec command中)
+	execGoRe := regexp.MustCompile(`"command"\s*:\s*"go\s+run\s+(\w+)(?!\.go)"`)
+	if execGoRe.MatchString(jsonStr) {
+		jsonStr = execGoRe.ReplaceAllString(jsonStr, `"command":"go run $1.go"`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 go run 缺少.go后缀")
+	}
+
+	// 7.3 修复 "go hello.go" (缺run) → "go run hello.go"
+	goRunRe := regexp.MustCompile(`"command"\s*:\s*"go\s+([^r]\w*\.go)"`)
+	if goRunRe.MatchString(jsonStr) {
+		jsonStr = goRunRe.ReplaceAllString(jsonStr, `"command":"go run $1"`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 go 命令缺少run")
+	}
+
+	// 8. 🆕 [FIX-20260529] 修复content中的常见Go错误
+	// 8.1 修复 import "\"fmt\"" → import "fmt"
+	importRe := regexp.MustCompile(`import\s+"\\?"fmt"\\?"`)
+	if importRe.MatchString(jsonStr) {
+		jsonStr = importRe.ReplaceAllString(jsonStr, `import "fmt"`)
+		totalFixes++
+		fmt.Println("[SE Debug] fixMalformedJSON: 修复 import 语句格式错误")
+	}
+
+	fmt.Printf("[SE Debug] fixMalformedJSON: %d fixes applied | result first_200=%q\n", totalFixes, truncate(jsonStr, 200))
+
+	// 9. 🆕 [FIX-20260529] 终极验证：尝试解析修复后的JSON
+	if totalFixes > 0 {
+		var testStruct struct {
+			Actions []SEAction `json:"actions"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &testStruct); err != nil {
+			fmt.Printf("[SE Debug] ⚠️ 修复后仍无法解析: %v | 尝试激进重组...\n", err)
+			jsonStr = s.aggressiveJSONReconstruct(jsonStr)
+			totalFixes++
+		} else if len(testStruct.Actions) > 0 {
+			fmt.Printf("[SE Debug] ✅ 修复成功! 解析出 %d 个actions\n", len(testStruct.Actions))
+		}
+	}
+
+	return jsonStr
+}
+
+// aggressiveJSONReconstruct: Rebuild JSON structure when normal fixes fail
+func (s *SEProcessor) aggressiveJSONReconstruct(jsonStr string) string {
+	fmt.Println("[SE Debug] aggressiveJSONReconstruct: Starting aggressive restructure...")
+
+	re := regexp.MustCompile(`\{[^{}]*"([^"]+)"\s*:\s*"([^"]*)"[^{}]*\}`)
+	matches := re.FindAllString(jsonStr, -1)
+
+	if len(matches) < 2 {
+		fmt.Printf("[SE Debug] aggressiveJSONReconstruct: Only %d objects found, abort\n", len(matches))
+		return jsonStr
+	}
+
+	fmt.Printf("[SE Debug] aggressiveJSONReconstruct: Extracted %d object blocks\n", len(matches))
+
+	var actions []string
+	for _, match := range matches {
+		if !strings.Contains(match, `"type"`) {
+			if strings.Contains(match, `"command"`) {
+				match = `{"type":"exec",` + strings.TrimPrefix(match, "{")
+			} else if strings.Contains(match, `"path"`) {
+				match = `{"type":"write_file",` + strings.TrimPrefix(match, "{")
+			}
+		}
+		actions = append(actions, match)
+	}
+
+	reconstructed := `{"actions":[` + strings.Join(actions, ",") + `]}`
+	fmt.Printf("[SE Debug] aggressiveJSONReconstruct: Done | len=%d\n", len(reconstructed))
+	return reconstructed
 }
 
 // fixJSONNewlines 修复JSON中content字段的真实换行为\n转义
@@ -541,8 +763,9 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// extractCompletion 提取完成标记
+// extractCompletion 提取完成标记（增强版：支持GLM-5等模型的格式错误）
 func (s *SEProcessor) extractCompletion(response string) *SECompletion {
+	// 策略1: 标准解析 - 查找独立行的JSON
 	lines := strings.Split(response, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
@@ -553,7 +776,72 @@ func (s *SEProcessor) extractCompletion(response string) *SECompletion {
 			}
 		}
 	}
+
+	// 策略2: 增强搜索 - 查找响应中任何位置的completed标记（修复GLM-5格式错误）
+	if strings.Contains(response, "completed") || strings.Contains(response, "task_status") {
+		re := regexp.MustCompile(`(?i)\{[^{}]*"task_status"\s*:\s*"completed"[^{}]*\}`)
+		matches := re.FindStringSubmatch(response)
+		if len(matches) > 0 {
+			var completion SECompletion
+			if err := json.Unmarshal([]byte(matches[0]), &completion); err == nil {
+				fmt.Printf("[SE Debug] ✅ extractCompletion(策略2): 找到内嵌completed JSON\n")
+				return &completion
+			}
+		}
+
+		// 策略3: 激进修复 - 尝试修复常见格式错误后重新解析
+		fixed := s.fixCompletedJSON(response)
+		if fixed != "" {
+			var completion SECompletion
+			if err := json.Unmarshal([]byte(fixed), &completion); err == nil {
+				fmt.Printf("[SE Debug] ✅ extractCompletion(策略3): 修复后的completed JSON解析成功\n")
+				return &completion
+			}
+		}
+	}
+
 	return nil
+}
+
+// fixCompletedJSON 修复AI生成的completed JSON常见格式错误
+func (s *SEProcessor) fixCompletedJSON(response string) string {
+	start := strings.Index(response, "task_status")
+	if start == -1 {
+		return ""
+	}
+
+	// 向前查找 { 或 @PM 位置
+	jsonStart := strings.LastIndex(response[:start], "{")
+	if jsonStart == -1 {
+		jsonStart = strings.LastIndex(response[:start], "@PM")
+		if jsonStart != -1 {
+			jsonStart += 4 // 跳过 "@PM "
+		} else {
+			jsonStart = start
+		}
+	}
+
+	// 向后查找 } 结束
+	jsonEnd := strings.Index(response[start:], "}")
+	if jsonEnd == -1 {
+		return ""
+	}
+	jsonEnd = start + jsonEnd + 1
+
+	candidate := response[jsonStart:jsonEnd]
+
+	// 修复常见错误
+	candidate = strings.ReplaceAll(candidate, `\"`, `"`)  // 移除多余转义
+	candidate = strings.ReplaceAll(candidate, `completed.go`, `"completed"`)  // 修复粘连
+	if !strings.HasPrefix(candidate, "{") {
+		candidate = "{" + candidate
+	}
+	if !strings.HasSuffix(candidate, "}") {
+		candidate = candidate + "}"
+	}
+
+	fmt.Printf("[SE Debug] fixCompletedJSON: fixed=%q\n", truncate(candidate, 200))
+	return candidate
 }
 
 // checkNeedHelp 检查是否需要PM帮助

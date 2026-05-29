@@ -1591,8 +1591,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 
-		m.addPMToUserMsg(resp.Content)
-		return m.startSETask(resp.Tasks.CurrentTask)
+	return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
 	// 🆕 @AP 检测：第三优先级（在 @SE 和 HasTasks 之后）
@@ -1706,6 +1705,41 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	// [方案1-已移除] 旧的 @SE 和 HasTasks 检测已移至文件前面（最高优先级）
+
+	// 🆕 [FIX-20260529] 精准兜底检测：仅对明确编程信号强制转SE（避免误判闲聊）
+	originalUserMsg := strings.ToLower(parsedMsg.Content)
+	strongProgrammingSignals := []string{
+		".go", ".py", ".js", ".ts", ".java", ".cpp", ".c ", ".h ",
+		"go run", "npm run", "python ", "javac ",
+		"hello world", "hello.go", "main()",
+		"fmt.Println", "console.log", "print(",
+		"func main", "def main", "public static void",
+	}
+	isClearProgrammingTask := false
+	for _, signal := range strongProgrammingSignals {
+		if strings.Contains(originalUserMsg, signal) {
+			isClearProgrammingTask = true
+			break
+		}
+	}
+
+	if isClearProgrammingTask && !resp.HasTasks && !strings.Contains(strings.ToLower(resp.Content), "@se") {
+		fmt.Println("[TRACE-PM-ROUTE] 🔧 精准兜底: 检测到明确编程信号但PM未@SE, 强制转SE!")
+		m.writeRouteLog("[FALLBACK-FIX] 明确编程请求走闲聊分支, 强制转SE")
+
+		taskDesc := fmt.Sprintf("请%s", parsedMsg.Content)
+		m.addPMToSEMsg(taskDesc)
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+
+		go func() {
+			filteredTask := filterDuplicateMentions(taskDesc)
+			m.sendToDingTalk(fmt.Sprintf("[PM→SE 任务(兜底)] %s", filteredTask))
+		}()
+
+		return m.startSETask(taskDesc)
+	}
+
 	// 没有@SE/没有任务 = 普通对话，PM回复用户
 	fmt.Printf("[TRACE-PM-ROUTE] ⚠️ PM走【闲聊分支】! to=%q hasTasks=%v content_head=%q | AP不会启动!\n",
 		parsedMsg.To, resp.HasTasks, resp.Content[:min(100, len(resp.Content))])
@@ -2341,10 +2375,25 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	}
 	if m.isGhostCall(aiGen) {
 		fmt.Printf("[startSETask] ⚠️ 检测到复位后的幽灵SE调用，丢弃结果\n")
+		m.writeRouteLog("[GHOST-CALL] SE响应被丢弃(复位检测)")
+		func() {
+			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_diag.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(fmt.Sprintf("[%s] GHOST-CALL aiGen=%d currentGen=%d\n", time.Now().Format("15:04:05"), aiGen, m.getResetGeneration()))
+				f.Close()
+			}
+		}()
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		return nil
 	}
+	func() {
+		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_diag.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			f.WriteString(fmt.Sprintf("[%s] GHOST-PASSED err=%v actions=%d\n", time.Now().Format("15:04:05"), err, len(resp.Actions)))
+			f.Close()
+		}
+	}()
 	if err != nil {
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2393,6 +2442,32 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.writeRouteLog(fmt.Sprintf("[SE-EMPTY-ACTION] count=%d content_len=%d continueCount=%d",
 			m.seEmptyActionCount, len(resp.Content), m.seContinueCount))
 
+		// 🆕 [FIX-JSON-FALLBACK] 第1次空actions时，用严格JSON重试
+		if m.seEmptyActionCount == 1 && len(resp.Content) > 0 {
+			fmt.Println("[SE-DEBUG] 🔄 检测到空actions，用严格JSON提示词重试AI调用...")
+			m.writeRouteLog("[SE-RETRY-JSON] 空actions，用JSON-only提示词重试")
+			retryPrompt := fmt.Sprintf(
+				"Your last response had JSON errors. Output ONLY valid JSON:\n%s",
+				`{"actions":[{"type":"write_file","path":"FILENAME","content":"CODE"},{"type":"exec","command":"COMMAND"}]}`,
+			)
+			retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
+			m.seProcessor.SetContext(retryCtx)
+			retryResp, retryErr := m.seProcessor.ProcessTaskStream(retryPrompt, func(delta string) {
+				m.cMonitor.UpdateSeChunkTime()
+				m.emitStreamChunk("se", delta)
+			})
+			retryCancel()
+			if retryErr == nil && len(retryResp.Actions) > 0 {
+				fmt.Printf("[SE-DEBUG] ✅ JSON重试成功! actions=%d\n", len(retryResp.Actions))
+				m.writeRouteLog(fmt.Sprintf("[SE-RETRY-JSON] ✅ 重试成功 actions=%d", len(retryResp.Actions)))
+				m.seEmptyActionCount = 0
+				resp = retryResp
+			} else {
+				fmt.Println("[SE-DEBUG] ❌ JSON重试失败")
+				m.writeRouteLog("[SE-RETRY-JSON] ❌ 重试失败")
+			}
+		}
+
 		if m.seEmptyActionCount >= 3 {
 			fmt.Println("[🛡️ 防死循环] SE连续3次返回空actions，强制路由到PM [TAG-E1]")
 			m.writeRouteLog("[SE-FORCE-ROUTE] 连续3次空actions，强制路由到PM")
@@ -2425,6 +2500,13 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 	// 执行actions（先执行动作，确保有效操作不被NeedHelp跳过）
 	if len(resp.Actions) > 0 {
+		func() {
+			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_diag.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(fmt.Sprintf("[%s] CALLING-EXECUTE-ACTIONS count=%d\n", time.Now().Format("15:04:05"), len(resp.Actions)))
+				f.Close()
+			}
+		}()
 		if err := m.executeSEActions(resp.Actions); err != nil {
 			// 执行失败，通知SE，让SE决定如何处理
 			failMsg := fmt.Sprintf("执行失败: %v", err)
@@ -2612,8 +2694,9 @@ func (m *Manager) continueSETask() (err error) {
 		}
 	}()
 	m.seContinueCount++
-	if m.seContinueCount > 19 {
-		fmt.Printf("[System] SE继续次数超限(%d)，任务失败\n", m.seContinueCount)
+	// 🆕 [FIX-20260529] 严格限制SE继续次数，防止AI质量差时死循环（原19次→5次）
+	if m.seContinueCount > 5 {
+		fmt.Printf("[System] ⚠️ SE继续次数超限(%d>5)，强制结束任务\n", m.seContinueCount)
 
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2635,7 +2718,8 @@ func (m *Manager) continueSETask() (err error) {
 	}
 	m.mu.RUnlock()
 
-	const seContinueTimeout = 120 * time.Second
+	// ⏰ 🆕 [FIX-20260529] SE继续执行超时缩短（原120s→60s），快速失败
+	const seContinueTimeout = 60 * time.Second
 	seCtx, seCancel := context.WithTimeout(safeCtx, seContinueTimeout)
 	defer seCancel()
 	m.seProcessor.SetContext(seCtx)
@@ -3358,6 +3442,27 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 			}
 
+			// 🆕 [FIX-20260529] exec命令预检：自动修复常见错误
+			originalCommand := action.Command
+			fixedCommand := action.Command
+
+			// 2.1 修复 "go run hello" → "go run hello.go"
+			if strings.HasPrefix(fixedCommand, "go run ") && !strings.HasSuffix(fixedCommand, ".go") {
+				parts := strings.Fields(fixedCommand)
+				if len(parts) >= 3 && !strings.Contains(parts[2], ".") {
+					fixedCommand = "go run " + parts[2] + ".go"
+					fmt.Printf("[EXEC-PRECHECK] 🔄 修复go命令: %q → %q\n", originalCommand, fixedCommand)
+					action.Command = fixedCommand
+				}
+			}
+
+			// 2.2 修复 "go hello.go" → "go run hello.go"
+			if strings.HasPrefix(fixedCommand, "go ") && !strings.HasPrefix(fixedCommand, "go run") && strings.HasSuffix(fixedCommand, ".go") {
+				fixedCommand = strings.Replace(fixedCommand, "go ", "go run ", 1)
+				fmt.Printf("[EXEC-PRECHECK] 🔄 补全run: %q → %q\n", originalCommand, fixedCommand)
+				action.Command = fixedCommand
+			}
+
 			if seTaskId != "" && m.richBuilder != nil {
 				m.richBuilder.PushShellStart("se", seTaskId, 1, "exec", action.Command, nil)
 			}
@@ -3732,29 +3837,29 @@ func (m *Manager) addSEToPMMsg(content string) {
 
 // ensurePMToUSR 确保PM消息带@USR前缀，并清理多余@
 func (m *Manager) ensurePMToUSR(content string) string {
-	// 🔬 探针：记录处理前的原始内容
-	if strings.Contains(content, "@") && (strings.Contains(content, "@USR") || strings.Contains(content, "@SE")) {
-		fmt.Printf("🔬 [PROBE-ensurePMToUSR] 输入: %q\n", content[:min(150, len(content))])
-	}
-
 	content = strings.TrimSpace(content)
-	re := regexp.MustCompile(`^@[A-Za-z]+\s+@`)
-	content = re.ReplaceAllString(content, "@")
 
-	// 🔬 探针：记录正则清理后的内容
-	if strings.Contains(content, "@") && (strings.Contains(content, "@USR") || strings.Contains(content, "@SE")) {
-		fmt.Printf("🔬 [PROBE-ensurePMToUSR] 正则后: %q\n", content[:min(150, len(content))])
-	}
+	// 0. 清除开头的裸@ + 空格（AI输出 "@ 请创建..." 模式）
+	re0 := regexp.MustCompile(`^@\s+`)
+	content = re0.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re3 := regexp.MustCompile(`^@[A-Za-z]+\s+@[A-Z]{2,3}\s+`)
+	content = re3.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re1 := regexp.MustCompile(`^@[A-Za-z]+\s+@\s*`)
+	content = re1.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re2 := regexp.MustCompile(`^@[A-Za-z]+\s+[A-Z]{2,3}\s+`)
+	content = re2.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
 
 	if strings.HasPrefix(content, "@USR") {
 		return content
 	}
-	result := "@USR " + content
-
-	// 🔬 探针：记录最终输出
-	fmt.Printf("🔬 [PROBE-ensurePMToUSR] 输出: %q\n", result[:min(150, len(result))])
-
-	return result
+	return "@USR " + content
 }
 
 // addPMToUserMsg 发送PM→USR消息（自动加@USR）
@@ -3870,8 +3975,24 @@ func extractLastSETask(content string) (taskContent, userReply string) {
 // ensurePMToSE 确保PM消息带@SE前缀，并清理多余@
 func (m *Manager) ensurePMToSE(content string) string {
 	content = strings.TrimSpace(content)
-	re := regexp.MustCompile(`^@[A-Za-z]+\s+@`)
-	content = re.ReplaceAllString(content, "@")
+
+	// 0. 清除开头的裸@ + 空格（AI输出 "@ 请创建..." 模式）
+	re0 := regexp.MustCompile(`^@\s+`)
+	content = re0.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re3 := regexp.MustCompile(`^@[A-Za-z]+\s+@[A-Z]{2,3}\s+`)
+	content = re3.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re1 := regexp.MustCompile(`^@[A-Za-z]+\s+@\s*`)
+	content = re1.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
+	re2 := regexp.MustCompile(`^@[A-Za-z]+\s+[A-Z]{2,3}\s+`)
+	content = re2.ReplaceAllString(content, "")
+	content = strings.TrimSpace(content)
+
 	if !strings.HasPrefix(content, "@SE ") && !strings.HasPrefix(content, "@SE\n") {
 		if strings.HasPrefix(content, "@SE") {
 			return content

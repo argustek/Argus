@@ -116,6 +116,7 @@ func TestProcessingLock_PreventsConcurrentMessages(t *testing.T) {
 	results := make(chan string, 2)
 
 	m.isProcessing = true
+	m.processingStartTime = time.Now()
 
 	wg.Add(1)
 	go func() {
@@ -136,13 +137,13 @@ func TestProcessingLock_PreventsConcurrentMessages(t *testing.T) {
 	wg.Wait()
 	close(results)
 
-	rejectionCount := 0
+	queueCount := 0
 	for r := range results {
-		if strings.Contains(r, "仍在处理中") {
-			rejectionCount++
+		if r == "" || strings.Contains(r, "消息已暂存") {
+			queueCount++
 		}
 	}
-	assert.Equal(t, 2, rejectionCount, "both concurrent messages should be rejected when processing")
+	assert.Equal(t, 2, queueCount, "both concurrent messages should be queued when processing")
 }
 
 func TestSetUserStopped_True(t *testing.T) {

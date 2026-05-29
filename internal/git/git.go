@@ -263,15 +263,15 @@ func GetStatus(dir string) (entries []map[string]interface{}) {
 func GetCommitLog(dir string, limit int) ([]CommitLogEntry, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return []CommitLogEntry{}, fmt.Errorf(i18n.T("err.git_log_failed", err))
+		return []CommitLogEntry{}, fmt.Errorf("%s", i18n.T("err.git_log_failed", err))
 	}
 	head, err := repo.Head()
 	if err != nil {
-		return []CommitLogEntry{}, fmt.Errorf(i18n.T("err.git_head_failed", err))
+		return []CommitLogEntry{}, fmt.Errorf("%s", i18n.T("err.git_head_failed", err))
 	}
 	logIter, err := repo.Log(&git.LogOptions{From: head.Hash()})
 	if err != nil {
-		return []CommitLogEntry{}, fmt.Errorf(i18n.T("err.git_log_failed", err))
+		return []CommitLogEntry{}, fmt.Errorf("%s", i18n.T("err.git_log_failed", err))
 	}
 	defer logIter.Close()
 
@@ -299,7 +299,7 @@ func GetCommitLog(dir string, limit int) ([]CommitLogEntry, error) {
 func GetBranches(dir string) ([]BranchInfo, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return []BranchInfo{}, fmt.Errorf(i18n.T("err.git_branch_failed", err))
+		return []BranchInfo{}, fmt.Errorf("%s", i18n.T("err.git_branch_failed", err))
 	}
 	branches := []BranchInfo{}
 
@@ -346,17 +346,17 @@ func GetBranches(dir string) ([]BranchInfo, error) {
 func SwitchBranch(dir, branch string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_worktree", err))
+		return fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	err = wt.Checkout(&git.CheckoutOptions{
 		Branch: plumbing.NewBranchReferenceName(branch),
 	})
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_checkout_failed", err))
+		return fmt.Errorf("%s", i18n.T("err.git_checkout_failed", err))
 	}
 	return nil
 }
@@ -364,18 +364,18 @@ func SwitchBranch(dir, branch string) error {
 func CreateBranch(dir, name string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_worktree", err))
+		return fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	err = wt.Checkout(&git.CheckoutOptions{
 		Create: true,
 		Branch: plumbing.NewBranchReferenceName(name),
 	})
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_create_branch", err))
+		return fmt.Errorf("%s", i18n.T("err.git_create_branch", err))
 	}
 	return nil
 }
@@ -383,7 +383,7 @@ func CreateBranch(dir, name string) error {
 func GetRemotes(dir string) ([]RemoteInfo, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return []RemoteInfo{}, fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return []RemoteInfo{}, fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	remotes, err := repo.Remotes()
 	if err != nil {
@@ -402,7 +402,7 @@ func GetRemotes(dir string) ([]RemoteInfo, error) {
 func AddRemote(dir, name, url string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	repo.DeleteRemote(name)
 	_, err = repo.CreateRemote(&config.RemoteConfig{
@@ -410,7 +410,7 @@ func AddRemote(dir, name, url string) error {
 		URLs: []string{url},
 	})
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_add_remote", err))
+		return fmt.Errorf("%s", i18n.T("err.git_add_remote", err))
 	}
 	return nil
 }
@@ -418,11 +418,11 @@ func AddRemote(dir, name, url string) error {
 func RemoveRemote(dir, name string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	err = repo.DeleteRemote(name)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_remove_remote", err))
+		return fmt.Errorf("%s", i18n.T("err.git_remove_remote", err))
 	}
 	return nil
 }
@@ -455,7 +455,7 @@ func Clone(url, dir, branch string) *CloneResult {
 func Push(dir, remote, branch string) (string, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_not_repo"))
+		return "", fmt.Errorf("%s", i18n.T("err.git_not_repo"))
 	}
 	if remote == "" {
 		remote = "origin"
@@ -465,7 +465,7 @@ func Push(dir, remote, branch string) (string, error) {
 		if head != nil {
 			branch = head.Name().Short()
 		} else {
-			return "", fmt.Errorf(i18n.T("err.git_no_branch"))
+			return "", fmt.Errorf("%s", i18n.T("err.git_no_branch"))
 		}
 	}
 	refSpec := config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch))
@@ -482,7 +482,7 @@ func Push(dir, remote, branch string) (string, error) {
 	}
 	err = repo.Push(pushOpts)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_push_failed", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_push_failed", err))
 	}
 	return fmt.Sprintf("推送到 %s 成功 (%s)", remote, branch), nil
 }
@@ -490,11 +490,11 @@ func Push(dir, remote, branch string) (string, error) {
 func Pull(dir, remote, branch string) (string, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_not_repo"))
+		return "", fmt.Errorf("%s", i18n.T("err.git_not_repo"))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_worktree", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	if remote == "" {
 		remote = "origin"
@@ -504,13 +504,13 @@ func Pull(dir, remote, branch string) (string, error) {
 		if head != nil {
 			branch = head.Name().Short()
 		} else {
-			return "", fmt.Errorf(i18n.T("err.git_no_branch"))
+			return "", fmt.Errorf("%s", i18n.T("err.git_no_branch"))
 		}
 	}
 
 	gitRemote, err := repo.Remote(remote)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_remote_not_exist", remote, err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_remote_not_exist", remote, err))
 	}
 
 	sshAuth, httpAuth := GetAuth()
@@ -530,13 +530,13 @@ func Pull(dir, remote, branch string) (string, error) {
 		return "已经是最新的", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_pull_failed", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_pull_failed", err))
 	}
 
 	remoteRefName := plumbing.NewRemoteReferenceName(remote, branch)
 	remoteRef, err := repo.Reference(remoteRefName, true)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_fetch_remote", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_fetch_remote", err))
 	}
 
 	err = wt.Reset(&git.ResetOptions{
@@ -544,7 +544,7 @@ func Pull(dir, remote, branch string) (string, error) {
 		Commit: remoteRef.Hash(),
 	})
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_merge_failed", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_merge_failed", err))
 	}
 
 	return fmt.Sprintf("从 %s/%s 拉取成功", remote, branch), nil
@@ -553,15 +553,15 @@ func Pull(dir, remote, branch string) (string, error) {
 func StageFile(dir, path string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_worktree", err))
+		return fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	_, err = wt.Add(path)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_stage_failed", err))
+		return fmt.Errorf("%s", i18n.T("err.git_stage_failed", err))
 	}
 	return nil
 }
@@ -569,18 +569,18 @@ func StageFile(dir, path string) error {
 func UnstageFile(dir, path string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_worktree", err))
+		return fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	err = wt.Reset(&git.ResetOptions{
 		Mode:   git.MixedReset,
 		Files:  []string{path},
 	})
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_unstage_failed", err))
+		return fmt.Errorf("%s", i18n.T("err.git_unstage_failed", err))
 	}
 	return nil
 }
@@ -588,17 +588,17 @@ func UnstageFile(dir, path string) error {
 func Commit(dir, message string) (string, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_worktree", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	hash, err := wt.Commit(message, &git.CommitOptions{
 		All: true,
 	})
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_commit_failed", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_commit_failed", err))
 	}
 	return hash.String(), nil
 }
@@ -606,17 +606,17 @@ func Commit(dir, message string) (string, error) {
 func RestoreFile(dir, path string) error {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_worktree", err))
+		return fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	err = wt.Checkout(&git.CheckoutOptions{
 		Force: true,
 	})
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_restore_failed", err))
+		return fmt.Errorf("%s", i18n.T("err.git_restore_failed", err))
 	}
 	return nil
 }
@@ -624,15 +624,15 @@ func RestoreFile(dir, path string) error {
 func DiscardAllChanges(dir string) (string, error) {
 	repo, err := git.PlainOpen(dir)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_open_repo", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_open_repo", err))
 	}
 	wt, err := repo.Worktree()
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_worktree", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_worktree", err))
 	}
 	err = wt.Checkout(&git.CheckoutOptions{Force: true})
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.git_discard_failed", err))
+		return "", fmt.Errorf("%s", i18n.T("err.git_discard_failed", err))
 	}
 	return "已丢弃所有更改", nil
 }
@@ -853,7 +853,7 @@ func GetCommitDiff(dir, hash string) (result *FileDiff) {
 func InitRepo(dir string) error {
 	_, err := git.PlainInit(dir, false)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.git_init_failed", err))
+		return fmt.Errorf("%s", i18n.T("err.git_init_failed", err))
 	}
 	return nil
 }

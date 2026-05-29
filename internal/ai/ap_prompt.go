@@ -286,7 +286,7 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 						if len(resultPreview) > 150 {
 							resultPreview = resultPreview[:150] + "..."
 						}
-						onChunk(fmt.Sprintf("%s bytes)\n", len(toolResult)))
+						onChunk(fmt.Sprintf("%d bytes)\n", len(toolResult)))
 					}
 					aiHistory = append(aiHistory, Message{
 						Role:       "tool",
