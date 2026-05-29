@@ -640,7 +640,14 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('pm_streaming_done', () => {
+  EventsOn('pm_started', (data: { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+    aiThinking.value = true
+  })
+
+  EventsOn('pm_streaming_done', (data: { content?: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+
     const pmMsgs = messages.value.filter(m => m.role === 'pm')
     for (const msg of pmMsgs) {
       if ((msg as any)._streaming) {
