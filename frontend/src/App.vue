@@ -645,6 +645,22 @@ onMounted(async () => {
     aiThinking.value = true
   })
 
+  EventsOn('se_task_assigned', (data: { task?: string; steps?: number; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+  })
+
+  EventsOn('error', (data: { error?: string; stage?: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+    console.error('[ERROR]', data)
+    messages.value.push({
+      id: Date.now(),
+      role: 'system',
+      content: `❌ **错误** (${data.stage || 'unknown'})\n${data.error || '未知错误'}`,
+      timestamp: new Date().toISOString(),
+      _isError: true
+    })
+  })
+
   EventsOn('pm_streaming_done', (data: { content?: string; _msgId?: string }) => {
     ackMessage(data._msgId || '')
 
