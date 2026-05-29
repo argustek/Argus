@@ -95,7 +95,7 @@ func NewClient(config types.APIConfig) *Client {
 	return &Client{
 		config: config,
 		client: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        10,
 				MaxConnsPerHost:     5,
@@ -277,11 +277,15 @@ type StreamChunk struct {
 
 // ChatStream 流式聊天请求，每收到文本片段调用 onChunk，返回累积的完整文本
 func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
-	maxRetries := 3
+	maxRetries := 1
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			if ctx.Err() != nil {
+				fmt.Printf("[AI Retry] ⛔ 上下文已取消(用户停止)，放弃重试\n")
+				return "", lastErr
+			}
 			waitTime := time.Duration(attempt*2) * time.Second
 			fmt.Printf("[AI Retry] 第%d次重试，等待%v...\n", attempt, waitTime)
 			time.Sleep(waitTime)
@@ -363,7 +367,7 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 	leftover := ""
 
 	lastChunkTime := time.Now()
-	streamTimeout := 90 * time.Second
+	streamTimeout := 30 * time.Second
 
 	for {
 		select {
@@ -652,6 +656,7 @@ func isRetryableError(err error) bool {
 		"socket",
 		"i/o timeout",
 		"context deadline exceeded",
+		"context canceled",
 		"tls handshake",
 	}
 

@@ -136,6 +136,30 @@ func (r *Router) TempReleaseProcessing() (restore func()) {
 	}
 }
 
+func (r *Router) TempReleaseForHandover(handoverFrom string) (restore func()) {
+	r.mu.Lock()
+	wasProcessing := r.isProcessing
+	r.isProcessing = false
+	r.lastSpokenBy = handoverFrom
+	r.mu.Unlock()
+
+	fmt.Printf("[TurnCheck] 🔸 临时释放+交接: handoverFrom=%s (原processing=%v)\n", handoverFrom, wasProcessing)
+	return func() {
+		if wasProcessing {
+			r.mu.Lock()
+			r.isProcessing = true
+			r.mu.Unlock()
+			fmt.Println("[TurnCheck] 🔹 恢复processing锁")
+		}
+	}
+}
+
+func (r *Router) SetLastSpokenBy(role string) {
+	r.mu.Lock()
+	r.lastSpokenBy = role
+	r.mu.Unlock()
+}
+
 // ForceClear 强制清除处理状态（用于打断）
 func (r *Router) ForceClear() {
 	r.mu.Lock()

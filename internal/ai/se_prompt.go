@@ -374,7 +374,35 @@ func (s *SEProcessor) extractActions(response string) []SEAction {
 func (s *SEProcessor) extractActionsFromJSON(response string) []SEAction {
 	start := strings.Index(response, "{\"actions\"")
 	if start == -1 {
-		return nil
+		start = strings.Index(response, "\"actions\":[")
+		if start == -1 {
+			return nil
+		}
+		jsonStr := "{" + response[start:]
+		braceCount := 0
+		end := 0
+		for i := 0; i < len(jsonStr); i++ {
+			if jsonStr[i] == '{' {
+				braceCount++
+			} else if jsonStr[i] == '}' {
+				braceCount--
+				if braceCount == 0 {
+					end = i + 1
+					break
+				}
+			}
+		}
+		if end == 0 {
+			return nil
+		}
+		jsonStr = jsonStr[:end]
+		var result struct {
+			Actions []SEAction `json:"actions"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+			return nil
+		}
+		return result.Actions
 	}
 
 	braceCount := 0

@@ -951,18 +951,33 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 	m.processingMu.Lock()
 	if m.isProcessing {
 		if time.Since(m.processingStartTime) > 60*time.Second {
-			fmt.Printf("[ProcessMessage] ⚠️ isProcessing 超时(%.0f秒)，强制清理旧任务!\n", time.Since(m.processingStartTime).Seconds())
 			m.mu.Lock()
+			wasInSE := m.currentRole == "se"
+			fmt.Printf("[ProcessMessage] ⚠️ isProcessing 超时(%.0f秒)，强制清理旧任务! currentRole=%s wasInSE=%v\n", time.Since(m.processingStartTime).Seconds(), m.currentRole, wasInSE)
 			if m.cancelFunc != nil {
 				m.cancelFunc()
 				m.cancelFunc = nil
 			}
-			m.currentRole = ""
+			if !wasInSE {
+				m.currentRole = ""
+			}
 			m.isRecovering = false
 			m.mu.Unlock()
 			if m.cMonitor != nil {
 				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+				if !wasInSE {
+					m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+				}
+			}
+			if wasInSE {
+				m.isProcessing = false
+				m.processingMu.Unlock()
+				m.pendingMu.Lock()
+				m.pendingQueue = append(m.pendingQueue, input)
+				queueLen := len(m.pendingQueue)
+				m.pendingMu.Unlock()
+				fmt.Printf("[ProcessMessage] 📥 SE正在执行中，新消息排队 (队列长度=%d)\n", queueLen)
+				return "", nil
 			}
 			m.isProcessing = false
 		} else {
@@ -1164,7 +1179,7 @@ func (m *Manager) ProcessMessageFrom(fromRole, input string) (string, error) {
 
 	// 🔑 内部路由（如 SE→PM）时，父函数的 MarkProcessingStart 尚未释放
 	// 临时释放 Router processing 锁，让 handleToPM 的 CheckTurn 能正常放行 PM
-	restoreRouteLock := m.router.TempReleaseProcessing()
+	restoreRouteLock := m.router.TempReleaseForHandover(fromRole)
 	err := m.handleToPM(msg.Content)
 	restoreRouteLock()
 	if err != nil {
@@ -2279,7 +2294,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		return nil
 	}
 
-	if allowed, reason := m.router.CheckTurnInternal("se", "se_task_"+from, true); !allowed {
+	if allowed, reason := m.router.CheckTurnInternal(from, "se_task_"+from, true); !allowed {
 		m.writeRouteLog(fmt.Sprintf("[SE-TASK] ❌ BLOCKED by turn: %s", reason))
 		fmt.Printf("[startSETask] ⚠️ 轮换拦截: %s\n", reason)
 		return nil
@@ -2293,6 +2308,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		}
 		m.router.MarkProcessingEnd("se")
 		m.currentSETask = "" // [FIX-20260529] SE任务完成，清除任务描述
+		m.currentRole = ""   // [FIX-20260529] 互斥检查用，出错时也清理
 	}()
 
 	m.currentRole = "se"
@@ -2360,6 +2376,10 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	var err error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			if m.IsUserStopped() {
+				fmt.Printf("[SE] ⛔ 用户已停止，放弃重试\n")
+				break
+			}
 			backoff := time.Duration(attempt) * 5 * time.Second
 			fmt.Printf("[SE] ⏳ 第%d次重试，等待%v...\n", attempt, backoff)
 			m.syncBackendStatus("se_retry", fmt.Sprintf("SE第%d次重试(等待%v)", attempt, backoff))
@@ -2368,6 +2388,9 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 		seCtx, seCancel := context.WithTimeout(safeCtx, seTimeout)
 		m.seProcessor.SetContext(seCtx)
+
+		m.writeRouteLog(fmt.Sprintf("[SE-API-START] from=%s attempt=%d/%d ctx_err=%v time=%s",
+			from, attempt, maxRetries, seCtx.Err(), time.Now().Format("15:04:05")))
 
 		if m.richBuilder != nil && attempt == 0 {
 			m.richBuilder.StartTaskList("se", "SE 执行: "+taskDesc[:min(30, len(taskDesc))], []types.TaskItemDef{
@@ -2382,13 +2405,22 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		})
 		seCancel()
 
+		respActions := -1
+		if resp != nil {
+			respActions = len(resp.Actions)
+		}
+		m.writeRouteLog(fmt.Sprintf("[SE-API-CALL] from=%s attempt=%d/%d err=%v actions=%d time=%s",
+			from, attempt, maxRetries, err, respActions, time.Now().Format("15:04:05")))
+
 		if err == nil {
 			break
 		}
 
 		fmt.Printf("[SE] ❌ 第%d/%d次尝试失败: %v\n", attempt+1, maxRetries+1, err)
 
-		if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "timeout") {
+		if strings.Contains(err.Error(), "context deadline exceeded") ||
+			strings.Contains(err.Error(), "timeout") ||
+			strings.Contains(err.Error(), "context canceled") {
 			m.syncBackendStatus("se_timeout", fmt.Sprintf("SE超时(%d/%d): %v", attempt+1, maxRetries+1, err.Error()[:min(60, len(err.Error()))]))
 			continue
 		}
@@ -4898,6 +4930,7 @@ func (m *Manager) handleAPReview(reviewMsg string) error {
 		m.taskManager.CreateTask("审核：任务完成情况及质量审批", "AP")
 	}
 
+	m.router.SetLastSpokenBy("pm")
 	if allowed, reason := m.router.CheckTurnInternal("ap", "ap_review", true); !allowed {
 		fmt.Printf("[TRACE-AP] ❌ AP被轮换拦截: %s\n", reason)
 		return nil
