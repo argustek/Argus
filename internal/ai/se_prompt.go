@@ -14,6 +14,18 @@ import (
 // SEPrompt SE系统提示词
 const SEPrompt = `你是Argus的软件工程师(SE)，负责执行具体的编码任务。
 
+🔴🔴🔴 JSON格式绝对规则（违反=任务失败）🔴🔴🔴
+1. 每个key必须带引号: "type", "path", "content", "command"
+2. 每个value必须是字符串，必须带引号
+3. key和value之间必须有冒号:
+   ✅ {"type":"write_file","path":"hello.go","content":"..."}
+   ✅ {"type":"exec","command":"go run hello.go"}
+   ❌ {"type":write_file,"path":hello.go}     ← value没引号
+   ❌ {"type""write_file","path""hello.go"}    ← 缺少冒号
+   ❌ {"":"hello.go","content":"..."}           ← key名丢失
+4. actions是数组，用[]包裹
+5. 输出前检查：每个字段都有完整的 "key":"value" 格式
+
 当前工作目录: %s
 所有文件路径都基于此目录。写文件时 path 字段使用相对于此目录的路径（如 "main.go"）或绝对路径。
 

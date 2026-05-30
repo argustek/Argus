@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -347,6 +349,10 @@ func (c *ArgusCore) parsePMResponse(response string) (bool, string) {
 }
 
 func (c *ArgusCore) parseSEResponse(response string) ([]ai.SEAction, bool) {
+	fmt.Printf("[parseSE] raw_len=%d first_400=%q\n", len(response), func() string {
+		if len(response) > 400 { return response[:400] }
+		return response
+	}())
 	jsonIdx := strings.Index(response, `"actions"`)
 	if jsonIdx == -1 {
 		jsonIdx = strings.Index(response, `"task_status"`)
@@ -389,6 +395,26 @@ func (c *ArgusCore) parseSEResponse(response string) ([]ai.SEAction, bool) {
 					if len(actions) > 0 {
 						return actions, false
 					}
+				} else {
+					fixedJSON := fixMalformedSEJSON(jsonStr)
+					var parseErr error
+					if parseErr = json.Unmarshal([]byte(fixedJSON), &actionList); parseErr == nil {
+						actions := make([]ai.SEAction, 0, len(actionList))
+						for _, a := range actionList {
+							action := ai.SEAction{Type: fmt.Sprintf("%v", a["type"])}
+							if v, ok := a["path"].(string); ok { action.Path = v }
+							if v, ok := a["content"].(string); ok { action.Content = v }
+							if v, ok := a["command"].(string); ok { action.Command = v }
+							if v, ok := a["old_str"].(string); ok { action.OldStr = v }
+							if v, ok := a["new_str"].(string); ok { action.NewStr = v }
+							actions = append(actions, action)
+						}
+						if len(actions) > 0 {
+							fmt.Printf("[parseSE] ✅ JSON fix success! %d actions\n", len(actions))
+							return actions, false
+						}
+					}
+					fmt.Printf("[parseSE] JSON parse failed: %v | fixed: %v\n", err, parseErr)
 				}
 			}
 		}
@@ -403,7 +429,183 @@ func (c *ArgusCore) parseSEResponse(response string) ([]ai.SEAction, bool) {
 		return nil, true
 	}
 
+	if fallbackActions := extractActionsFromText(response); len(fallbackActions) > 0 {
+		fmt.Printf("[parseSE] ✅ Fallback text extraction found %d actions\n", len(fallbackActions))
+		return fallbackActions, false
+	}
+
 	return nil, false
+}
+
+func extractActionsFromText(response string) []ai.SEAction {
+	var actions []ai.SEAction
+
+	rePath := regexp.MustCompile(`"path"\s*:\s*"([^"]+)"`)
+	reContent := regexp.MustCompile(`"content"\s*:\s*"((?:[^"\\]|\\.)*)"`)
+	reCommand := regexp.MustCompile(`"command"\s*:\s*"([^"]+)"`)
+	reType := regexp.MustCompile(`"type"\s*:\s*"([^"]+)"`)
+	reGoFile := regexp.MustCompile(`"(\w+\.go)"|(\w+\.go)`)
+	reExecCmd := regexp.MustCompile(`(?:go run |python |npm )([^\s"]+)`)
+
+	paths := rePath.FindAllStringSubmatch(response, -1)
+	contents := reContent.FindAllStringSubmatch(response, -1)
+	commands := reCommand.FindAllStringSubmatch(response, -1)
+	types := reType.FindAllStringSubmatch(response, -1)
+
+	maxItems := max(len(paths), len(contents), len(commands))
+	if maxItems == 0 {
+		goFiles := reGoFile.FindAllStringSubmatch(response, -1)
+		execMatches := reExecCmd.FindAllStringSubmatch(response, -1)
+
+		for _, gf := range goFiles {
+			filename := gf[1]
+			if filename == "" {
+				filename = gf[2]
+			}
+			actions = append(actions, ai.SEAction{Type: "write_file", Path: filename})
+		}
+		for _, em := range execMatches {
+			cmd := em[0]
+			if !strings.Contains(cmd, "run ") {
+				cmd = "go run " + cmd
+			}
+			actions = append(actions, ai.SEAction{Type: "exec", Command: cmd})
+		}
+
+		if len(actions) > 0 {
+			return inferMissingFields(actions, response)
+		}
+		return nil
+	}
+
+	for i := 0; i < maxItems; i++ {
+		action := ai.SEAction{}
+		if i < len(types) && types[i][1] != "" {
+			action.Type = types[i][1]
+		}
+		if i < len(paths) && paths[i][1] != "" {
+			action.Path = paths[i][1]
+		}
+		if i < len(contents) && contents[i][1] != "" {
+			action.Content = unescapeJSONString(contents[i][1])
+		}
+		if i < len(commands) && commands[i][1] != "" {
+			action.Command = commands[i][1]
+		}
+
+		if action.Type == "" && action.Path != "" {
+			action.Type = "write_file"
+		}
+		if action.Type == "" && action.Command != "" {
+			action.Type = "exec"
+		}
+
+		if action.Type != "" {
+			actions = append(actions, action)
+		}
+	}
+
+	return inferMissingFields(actions, response)
+}
+
+func inferMissingFields(actions []ai.SEAction, rawResponse string) []ai.SEAction {
+	hasCode := strings.Contains(rawResponse, "package main") ||
+		strings.Contains(rawResponse, "import \"fmt\"") ||
+		strings.Contains(rawResponse, "func main")
+
+	for i := range actions {
+		a := &actions[i]
+
+		if a.Type == "write_file" && a.Content == "" && hasCode {
+			reCode := regexp.MustCompile(`package main[\s\S]*?(?:\n\s*\})?`)
+			codeMatch := reCode.FindString(rawResponse)
+			if codeMatch != "" {
+				a.Content = cleanExtractedCode(codeMatch)
+			} else {
+				a.Content = `package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello, World!")
+}`
+			}
+		}
+
+		if a.Type == "exec" && a.Command == "" && a.Path != "" {
+			ext := filepath.Ext(a.Path)
+			switch ext {
+			case ".go":
+				a.Command = "go run " + a.Path
+			case ".py":
+				a.Command = "python " + a.Path
+			case ".js":
+				a.Command = "node " + a.Path
+			default:
+				a.Command = "type " + a.Path
+			}
+		}
+
+		if a.Type == "" || (a.Type == "write_file" && a.Path == "") {
+			continue
+		}
+	}
+
+	validActions := make([]ai.SEAction, 0, len(actions))
+	for _, a := range actions {
+		if a.Type != "" && ((a.Type == "write_file" && a.Path != "") || (a.Type == "exec" && a.Command != "")) {
+			validActions = append(validActions, a)
+		}
+	}
+
+	return validActions
+}
+
+func cleanExtractedCode(code string) string {
+	code = strings.TrimSpace(code)
+	code = regexp.MustCompile(`\\n`).ReplaceAllString(code, "\n")
+	code = regexp.MustCompile(`\\"`).ReplaceAllString(code, "\"")
+	return code
+}
+
+func unescapeJSONString(s string) string {
+	s = strings.ReplaceAll(s, "\\n", "\n")
+	s = strings.ReplaceAll(s, "\\t", "\t")
+	s = strings.ReplaceAll(s, "\\\"", "\"")
+	s = strings.ReplaceAll(s, "\\\\", "\\")
+	return s
+}
+
+func fixMalformedSEJSON(jsonStr string) string {
+	fixed := jsonStr
+
+	reUnquotedValue := regexp.MustCompile(`"([a-z_]+)":([a-zA-Z][a-zA-Z0-9_.]*)`)
+	fixed = reUnquotedValue.ReplaceAllStringFunc(fixed, func(match string) string {
+		parts := reUnquotedValue.FindStringSubmatch(match)
+		if len(parts) == 3 {
+			return fmt.Sprintf(`"%s":"%s"`, parts[1], parts[2])
+		}
+		return match
+	})
+
+	reStuckKey := regexp.MustCompile(`"(type|path|content|command)([a-zA-Z/_.])`)
+	fixed = reStuckKey.ReplaceAllString(fixed, `"$1":"$2`)
+
+	reEmptyKey := regexp.MustCompile(`"":\s*"([^"]{10,})"`)
+	fixed = reEmptyKey.ReplaceAllStringFunc(fixed, func(match string) string {
+		parts := reEmptyKey.FindStringSubmatch(match)
+		if len(parts) >= 2 && (strings.Contains(parts[1], ".go") || strings.Contains(parts[1], ".py") || strings.Contains(parts[1], "package")) {
+			return `"path":"` + parts[1] + `"`
+		} else if len(parts) >= 2 && (strings.Contains(parts[1], "func ") || strings.Contains(parts[1], "import ") || strings.Contains(parts[1], "fmt.")) {
+			return `"content":"` + parts[1] + `"`
+		} else if len(parts) >= 2 && (parts[1] == "exec" || strings.Contains(parts[1], "go run") || strings.Contains(parts[1], "python ")) {
+			return `"command":"` + parts[1] + `"`
+		}
+		return match
+	})
+
+	fmt.Printf("[fixMalformedSEJSON] input_len=%d output_len=%d\n", len(jsonStr), len(fixed))
+	return fixed
 }
 
 func findMatchingBracket(s string) int {

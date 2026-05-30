@@ -78,9 +78,15 @@ func (b *Bridge) emitStatus(status string) {
 
 func (b *Bridge) onCoreMessage(source, content string) {
 	if b.onMessage != nil && content != "" {
+		parts := strings.Split(source, "_to_")
+		from := parts[0]
+		to := ""
+		if len(parts) > 1 {
+			to = parts[1]
+		}
 		msg := &Message{
-			From:      strings.Split(source, "_to_")[0],
-			To:        strings.Split(source, "_to_")[1],
+			From:      from,
+			To:        to,
 			Role:      b.roleFromSource(source),
 			Content:   content,
 			Timestamp: time.Now(),
@@ -121,6 +127,9 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 		b.mu.Lock()
 		b.isProcessing = false
 		b.mu.Unlock()
+		if r := recover(); r != nil {
+			fmt.Printf("[Bridge-PANIC] recover: %v\n", r)
+		}
 	}()
 
 	b.emitStatus("phase:pm|role:pm|status:busy")

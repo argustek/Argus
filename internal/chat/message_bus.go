@@ -184,7 +184,7 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	switch path {
 	case PathCoreOutput:
-		return true
+		return false
 	default:
 		return false
 	}

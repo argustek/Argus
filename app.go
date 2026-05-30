@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -228,6 +229,10 @@ type App struct {
 	// 消息去重（防止前端重复显示）
 	msgIDCounter  int64
 	emittedMsgIDs map[int64]bool
+
+	// SendMessage 并发保护
+	sendMu      sync.Mutex
+	isSending   bool
 }
 
 // ChangeRecord 改动记录
@@ -630,7 +635,7 @@ func (a *App) initChatManager() {
 				return
 			}
 
-			if msg.Role == "status" {
+			if msg.Role == "status" || msg.From == "status" {
 				fmt.Printf("[Bridge-Status] %s\n", msg.Content)
 				if strings.Contains(msg.Content, "status:busy") {
 					a.aiThinking = true
@@ -647,7 +652,12 @@ func (a *App) initChatManager() {
 			a.messages = append(a.messages, chatMsg)
 			a.saveMessages()
 
-			a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+			switch msg.Role {
+			case "pm":
+				a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+			default:
+				a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+			}
 		})
 
 		a.bridge.SetOnChunk(func(delta string) {
@@ -796,15 +806,17 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 			}
 			return merged
 		}())
-
-		fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
-			eventType, msgPath, sourceLoc, len(payloadStr))
-		return
 	}
 
-	runtime.EventsEmit(a.ctx, eventType, payload)
-	fmt.Printf("[emit→Frontend] ⚠️ fallback(no-msgbus) %s | src=%s | size=%d\n",
-		eventType, sourceLoc, len(payloadStr))
+	var finalPayload interface{}
+	json.Unmarshal([]byte(payloadStr), &finalPayload)
+	if finalPayload == nil {
+		finalPayload = payload
+	}
+	runtime.EventsEmit(a.ctx, eventType, finalPayload)
+
+	fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
+		eventType, msgPath, sourceLoc, len(payloadStr))
 }
 
 // ==================== 日志相关 ====================
@@ -3027,6 +3039,20 @@ func (a *App) SetLang(lang string) {
 }
 
 func (a *App) SendMessage(content string) error {
+	a.sendMu.Lock()
+	if a.isSending {
+		a.sendMu.Unlock()
+		return fmt.Errorf("busy processing another message")
+	}
+	a.isSending = true
+	a.sendMu.Unlock()
+
+	defer func() {
+		a.sendMu.Lock()
+		a.isSending = false
+		a.sendMu.Unlock()
+	}()
+
 	a.writeDebugLog(fmt.Sprintf("[SendMessage] CALLED content=%s", truncate(content, 50)))
 	fmt.Printf("[SendMessage] Step 1: 函数开始\n")
 	fmt.Printf("[SendMessage] Step 2: 收到消息: %s\n", content)
