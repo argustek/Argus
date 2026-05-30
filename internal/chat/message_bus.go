@@ -95,6 +95,12 @@ func (mb *MessageBus) generateChecksum(content string) string {
 	return fmt.Sprintf("%d_%d_%d", len, first, last)
 }
 
+func (mb *MessageBus) SetContext(ctx context.Context) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.ctx = ctx
+}
+
 // generateMsgId 生成唯一消息ID（含校验信息）
 func (mb *MessageBus) generateMsgId(role, eventName string, tag MessageTag) string {
 	mb.seqNum++

@@ -620,6 +620,11 @@ func (a *App) initChatManager() {
 		if aiClient != nil {
 			a.bridge = chat.NewBridge(aiClient, a.chatManager.GetExecutor(), projectDir)
 			a.bridge.SetContext(a.ctx)
+
+			if a.chatManager.GetMessageBus() != nil {
+				a.chatManager.GetMessageBus().SetContext(a.ctx)
+			}
+
 			a.bridge.SetOnMessage(func(msg *chat.Message) {
 			if msg == nil || msg.Content == "" {
 				return
@@ -777,17 +782,29 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 				return ""
 			}())
 
-		msgBus.Send(eventType, payloadStr, sourceLoc, msgPath, "App:emitToFrontend", map[string]interface{}{
-			"event":    eventType,
-			"checksum": checksum,
-			"source":   sourceLoc,
-		})
+		msgBus.Send(eventType, payloadStr, sourceLoc, msgPath, "App:emitToFrontend", func() map[string]interface{} {
+			merged := map[string]interface{}{
+				"event":    eventType,
+				"checksum": checksum,
+				"source":   sourceLoc,
+			}
+			var parsed map[string]interface{}
+			if json.Unmarshal([]byte(payloadStr), &parsed) == nil {
+				for k, v := range parsed {
+					merged[k] = v
+				}
+			}
+			return merged
+		}())
+
+		fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
+			eventType, msgPath, sourceLoc, len(payloadStr))
+		return
 	}
 
 	runtime.EventsEmit(a.ctx, eventType, payload)
-
-	fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
-		eventType, msgPath, sourceLoc, len(payloadStr))
+	fmt.Printf("[emit→Frontend] ⚠️ fallback(no-msgbus) %s | src=%s | size=%d\n",
+		eventType, sourceLoc, len(payloadStr))
 }
 
 // ==================== 日志相关 ====================
