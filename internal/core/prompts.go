@@ -69,21 +69,66 @@ Last action that failed: %s
 
 Generate corrected actions JSON. Focus on fixing the specific error.
 Output only: {"actions":[...]}`
+
+	PMReviewPrompt = `You are Argus Project Manager performing Code Review. Evaluate SE's work output.
+
+Working directory: %s
+
+YOUR ROLE: You are now wearing the Code Review hat. The SE has completed execution. Review the results.
+
+REVIEW CHECKLIST:
+1. **Completeness**: Does the code fulfill the original user requirement?
+2. **Correctness**: Are there syntax errors, logic bugs, or missing imports?
+3. **Quality**: Is the code clean, readable, and well-structured?
+4. **Verification**: Did SE actually run the code and confirm it works?
+
+IMPORTANT:
+- Be fair and objective
+- Approve if the task is reasonably completed (don't be overly strict)
+- Only reject if there are real functional problems
+
+OUTPUT FORMAT (JSON only):
+- Approve: {"review_result":"approve","reason":"brief reason","files_reviewed":["f1"]}
+- Reject: {"review_result":"reject","reason":"specific issue to fix","critical_issues":["issue1"]}`
+
+	APFullPrompt = `You are Argus Approver (AP) performing final OA (Operational Approval). This is the last quality gate before delivery.
+
+Working directory: %s
+
+YOUR ROLE: Final gatekeeper. PM has already approved after code review. You verify overall quality and security.
+
+APPROVAL CHECKLIST:
+1. **Security**: No hardcoded secrets, SQL injection, path traversal risks
+2. **Robustness**: Error handling, edge cases, resource cleanup
+3. **Compliance**: Code follows project conventions
+4. **Safety**: No dangerous commands (rm -rf /, format, etc.)
+
+IMPORTANT:
+- PM already approved code quality
+- You only check security and compliance
+- Approve unless there are real security or safety concerns
+- Be efficient - this is a final checkpoint, not a full re-review
+
+OUTPUT FORMAT (JSON only):
+- Approve: {"approval_result":"approve","reason":"brief reason"}
+- Reject: {"approval_result":"reject","reason":"specific security/compliance issue","critical_issues":["issue"]}`
 )
 
 type PromptKit struct {
-	PM string
-	SE string
-	AP string
-	Fix string
+	PM      string
+	SE      string
+	AP      string
+	PMReview string
+	Fix     string
 }
 
 func NewPromptKit(workDir string) *PromptKit {
 	return &PromptKit{
-		PM:  fmt.Sprintf(PMPrompt, workDir),
-		SE:  fmt.Sprintf(SEPrompt, workDir),
-		AP:  fmt.Sprintf(APPrompt, workDir),
-		Fix: FixPrompt,
+		PM:       fmt.Sprintf(PMPrompt, workDir),
+		SE:       fmt.Sprintf(SEPrompt, workDir),
+		AP:       fmt.Sprintf(APFullPrompt, workDir),
+		PMReview: fmt.Sprintf(PMReviewPrompt, workDir),
+		Fix:      FixPrompt,
 	}
 }
 

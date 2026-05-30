@@ -36,6 +36,7 @@ const (
 	PhaseAnalyze Phase = iota
 	PhaseExecute
 	PhaseReview
+	PhaseApprove
 )
 
 type ProcessResult struct {
@@ -54,6 +55,20 @@ type PhaseResult struct {
 	Output   string
 	Raw      string
 	Duration time.Duration
+}
+
+type ReviewResult struct {
+	Approved    bool
+	Rejected    bool
+	Reason      string
+	DisplayText string
+}
+
+type APResult struct {
+	Approved    bool
+	Rejected    bool
+	Reason      string
+	DisplayText string
 }
 
 type ArgusCore struct {
@@ -168,13 +183,13 @@ func (c *ArgusCore) emitChunk(delta string) {
 }
 
 func (c *ArgusCore) callAI(role Role, prompt string, memoryContext string) (string, error) {
+	systemPrompt := c.prompts.Get(role)
+	return c.callAIWithPrompt(systemPrompt, string(role), prompt, memoryContext)
+}
+
+func (c *ArgusCore) callAIWithPrompt(systemPrompt, roleLabel, prompt, memoryContext string) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("AICaller is nil")
-	}
-
-	systemPrompt := c.prompts.Get(role)
-	if systemPrompt == "" {
-		return "", fmt.Errorf("no prompt for role: %s", role)
 	}
 
 	history := buildHistoryFromMemory(c.memory.GetAll())
@@ -196,7 +211,7 @@ func (c *ArgusCore) callAI(role Role, prompt string, memoryContext string) (stri
 	callCancel()
 
 	duration := time.Since(start)
-	fmt.Printf("[Core:%s] AI call completed in %v (len=%d, err=%v)\n", role, duration, len(response), err)
+	fmt.Printf("[Core:%s] AI call completed in %v (len=%d, err=%v)\n", roleLabel, duration, len(response), err)
 
 	return response, err
 }
@@ -348,12 +363,89 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	seDisplay := c.extractDisplayText(seResponse)
 	c.emit("se_to_user", seDisplay)
 
-	if result.Error == nil {
-		c.emit("se_to_user", "@PM ✅ 任务完成")
-		c.emitStatus("done", "none", "idle")
-		result.Success = true
+	if result.Error != nil {
+		c.emitStatus("error", "se", "idle")
+		return result
 	}
 
+	c.emit("se_to_user", "✅ SE execution completed, submitting for PM review...")
+	c.memory.Add(RoleSE, fmt.Sprintf("SE completed. Actions: %d, Results: %v", len(actions), execResults))
+
+	// --- Phase 3: PM Code Review ---
+	c.emitStatus("review", "pm", "busy")
+	c.emit("review_start", "📋 PM reviewing SE's work...")
+
+	reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s",
+		userMsg, actions, execResults, seResponse)
+
+	reviewPrompt := fmt.Sprintf("Review the SE's work above. Check code quality, correctness, and completeness.\n\nFiles changed: %v\nExecution results: %v\n\nDecide: approve or reject with specific reasons.",
+		getFilePaths(actions), execResults)
+
+	pmReviewResponse, reviewErr := c.callAIWithPrompt(c.prompts.PMReview, "pm_review", reviewPrompt, reviewCtx)
+	phaseReview := PhaseResult{
+		Phase:  PhaseReview,
+		Role:   RolePM,
+		Input:  reviewPrompt,
+		Output: pmReviewResponse,
+		Raw:    pmReviewResponse,
+	}
+	result.Phases = append(result.Phases, phaseReview)
+
+	if reviewErr != nil {
+		c.emit("pm_review", fmt.Sprintf("@USR PM review error: %v (auto-approve)", reviewErr))
+		pmReviewResponse = "auto-approved"
+	} else {
+		c.memory.Add(RolePM, pmReviewResponse)
+	}
+
+	reviewResult := c.parseReviewResponse(pmReviewResponse)
+	c.emit("pm_review", reviewResult.DisplayText)
+
+	if reviewResult.Rejected {
+		c.emit("pm_review", fmt.Sprintf("@SE ❌ PM rejected: %s", reviewResult.Reason))
+		c.emitStatus("error", "pm", "idle")
+		result.Error = fmt.Errorf("PM review rejected: %s", reviewResult.Reason)
+		return result
+	}
+
+	// --- Phase 4: AP Approval (OA) ---
+	c.emitStatus("approve", "ap", "busy")
+	c.emit("ap_start", "🔒 AP final approval...")
+
+	apCtx := c.memory.FormatForPrompt()
+	apPrompt := fmt.Sprintf("Final approval for task: %s\nSE executed %d actions successfully.\nPM review approved.\n\nPerform final quality and security check. Approve or reject.",
+		userMsg, len(actions))
+
+	apResponse, apErr := c.callAI(RoleAP, apPrompt, apCtx)
+	phaseAP := PhaseResult{
+		Phase:  PhaseApprove,
+		Role:   RoleAP,
+		Input:  apPrompt,
+		Output: apResponse,
+		Raw:    apResponse,
+	}
+	result.Phases = append(result.Phases, phaseAP)
+
+	if apErr != nil {
+		c.emit("ap_result", fmt.Sprintf("@USR AP error: %v (auto-approve)", apErr))
+		apResponse = "auto-approved"
+	} else {
+		c.memory.Add(RoleAP, apResponse)
+	}
+
+	apResult := c.parseAPResponse(apResponse)
+	c.emit("ap_result", apResult.DisplayText)
+
+	if apResult.Rejected {
+		c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected: %s", apResult.Reason))
+		c.emitStatus("error", "ap", "idle")
+		result.Error = fmt.Errorf("AP rejected: %s", apResult.Reason)
+		return result
+	}
+
+	c.emit("ap_result", "✅ 交付完成！PM Review + AP Approval 全部通过")
+	c.emitStatus("done", "none", "idle")
+	result.Success = true
 	return result
 }
 
@@ -774,4 +866,85 @@ func (c *ArgusCore) Stats() map[string]interface{} {
 		"work_dir":       c.workDir,
 		"language":       c.language,
 	}
+}
+
+func (c *ArgusCore) parseReviewResponse(response string) ReviewResult {
+	lower := strings.ToLower(response)
+
+	if strings.Contains(lower, `"reject"`) ||
+		strings.Contains(lower, `"review_result":"reject"`) ||
+		strings.Contains(lower, `"approval":"reject"`) {
+		reason := extractJSONValue(response, "reason")
+		if reason == "" {
+			reason = extractJSONValue(response, "review_comment")
+		}
+		if reason == "" {
+			reason = "PM review rejected"
+		}
+		return ReviewResult{
+			Rejected:    true,
+			Reason:      reason,
+			DisplayText: fmt.Sprintf("@USR 📋 PM Code Review ❌ REJECTED: %s", reason),
+		}
+	}
+
+	return ReviewResult{
+		Approved:    true,
+		DisplayText: "@USR 📋 PM Code Review ✅ APPROVED",
+	}
+}
+
+func (c *ArgusCore) parseAPResponse(response string) APResult {
+	lower := strings.ToLower(response)
+
+	if strings.Contains(lower, `"reject"`) ||
+		strings.Contains(lower, `"approval_result":"reject"`) ||
+		strings.Contains(lower, `"approval":"reject"`) {
+		reason := extractJSONValue(response, "reason")
+		if reason == "" {
+			reason = extractJSONValue(response, "critical_issues")
+		}
+		if reason == "" {
+			reason = "AP rejected"
+		}
+		return APResult{
+			Rejected:    true,
+			Reason:      reason,
+			DisplayText: fmt.Sprintf("@USR 🔒 AP Approval ❌ REJECTED: %s", reason),
+		}
+	}
+
+	return APResult{
+		Approved:    true,
+		DisplayText: "@USR 🔒 AP Approval ✅ PASSED",
+	}
+}
+
+func extractJSONValue(jsonStr, key string) string {
+	patterns := []string{
+		fmt.Sprintf(`"%s"`, key) + `:\s*"`,
+		fmt.Sprintf(`"%s"`, key) + `"\s*:\s*"`,
+	}
+	for _, pat := range patterns {
+		re := regexp.MustCompile(pat)
+		loc := re.FindStringIndex(jsonStr)
+		if loc != nil {
+			rest := jsonStr[loc[1]:]
+			end := strings.Index(rest, `"`)
+			if end > 0 {
+				return rest[:end]
+			}
+		}
+	}
+	return ""
+}
+
+func getFilePaths(actions []ai.SEAction) []string {
+	paths := make([]string, 0, len(actions))
+	for _, a := range actions {
+		if a.Path != "" {
+			paths = append(paths, a.Path)
+		}
+	}
+	return paths
 }

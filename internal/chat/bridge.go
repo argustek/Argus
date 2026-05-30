@@ -108,11 +108,11 @@ func (b *Bridge) onCoreChunk(delta string) {
 
 func (b *Bridge) roleFromSource(source string) string {
 	switch source {
-	case "pm_to_user", "pm_to_se":
+	case "pm_to_user", "pm_to_se", "review_start", "pm_review":
 		return "pm"
 	case "se_to_user", "se_to_pm":
 		return "se"
-	case "ap_to_user", "ap_to_pm":
+	case "ap_to_user", "ap_to_pm", "ap_start", "ap_result":
 		return "ap"
 	default:
 		return "system"

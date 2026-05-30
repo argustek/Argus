@@ -657,7 +657,7 @@ onMounted(async () => {
     if (data.task) aiStatus.currentTask = data.task
     if (data.phase) {
       aiStatus.progress = data.phase
-      aiThinking.value = ['pm', 'se', 'ap'].includes(data.phase)
+      aiThinking.value = ['pm', 'se', 'ap', 'review', 'approve'].includes(data.phase)
     }
     ;(window as any).__stateUpdated?.()
   })

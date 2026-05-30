@@ -150,11 +150,26 @@ func cleanCodeTrailingGarbage(content string) string {
 	if lastBraceIdx >= 0 && lastBraceIdx < len(lines)-1 {
 		trailing := strings.Join(lines[lastBraceIdx+1:], "\n")
 		if strings.TrimSpace(trailing) != "" {
-			fmt.Printf("[Executor] 🧹 清理代码末尾垃圾字符: %q\n", trailing)
+			fmt.Printf("[Executor] 🧹 清理代码末尾垃圾: %q\n", trailing)
 			content = strings.Join(lines[:lastBraceIdx+1], "\n")
 		}
 	}
-	return content
+
+	lines = strings.Split(content, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == `"` || trimmed == `'` || trimmed == `,"` || trimmed == `"'` {
+			fmt.Printf("[Executor] 🧹 清理孤立引号行: %q\n", trimmed)
+			continue
+		}
+		if trimmed == `}` && strings.Count(line, `}`) != 1 {
+			cleaned = append(cleaned, line)
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	return strings.Join(cleaned, "\n")
 }
 
 func (e *Executor) checkPythonSyntax(filePath string) string {
