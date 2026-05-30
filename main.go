@@ -214,7 +214,7 @@ func handleCLICommand(app *App, command string) {
 	case "monitor":
 		printMonitorStatus(app)
 	case "dump-tasks":
-		fmt.Println("\n📋 ===== 全局任务列表 =====\n")
+		fmt.Println("\n📋 ===== 全局任务列表 =====")
 		fmt.Println(app.GetGlobalTasks())
 		fmt.Println()
 	case "recover":
@@ -234,7 +234,7 @@ func printSystemStatus(app *App) {
 	status := app.chatManager.GetCMonitor().GetSystemStatus()
 
 	data, _ := json.MarshalIndent(status, "", "  ")
-	fmt.Println("\n📊 ===== 系统完整状态 =====\n")
+	fmt.Println("\n📊 ===== 系统完整状态 =====")
 	fmt.Println(string(data))
 }
 
@@ -247,7 +247,7 @@ func printMemoryStatus(app *App) {
 	memoryStatus := app.chatManager.GetMemoryStatus()
 
 	data, _ := json.MarshalIndent(memoryStatus, "", "  ")
-	fmt.Println("\n🧠 ===== 记忆系统状态 =====\n")
+	fmt.Println("\n🧠 ===== 记忆系统状态 =====")
 	fmt.Println(string(data))
 
 	if hasUnfinished, ok := memoryStatus["hasUnfinished"].(bool); ok && hasUnfinished {
@@ -273,7 +273,7 @@ func printMonitorStatus(app *App) {
 
 	if monitorStatus, ok := status["monitor"].(map[string]interface{}); ok {
 		data, _ := json.MarshalIndent(monitorStatus, "", "  ")
-		fmt.Println("\n🐕 ===== C 监控状态 =====\n")
+		fmt.Println("\n🐕 ===== C 监控状态 =====")
 		fmt.Println(string(data))
 
 		if running, ok := monitorStatus["running"].(bool); ok && running {

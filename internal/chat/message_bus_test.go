@@ -22,7 +22,7 @@ func TestNewMessageBus(t *testing.T) {
 func TestSendAndAck(t *testing.T) {
 	mb := NewMessageBus(nil)
 
-	msgId := mb.Send("pm", "test content", "pm_message", PathPMToUser, "test_location", nil)
+	msgId := mb.Send("pm", "test content", "pm_message", PathCoreOutput, "test_location", nil)
 	if msgId == "" {
 		t.Fatal("msgId should not be empty")
 	}
@@ -78,7 +78,7 @@ func TestLostMessageDetection(t *testing.T) {
 	mb.timeout = 1 * time.Second
 	mb.checkInterval = 500 * time.Millisecond
 
-	msgId := mb.Send("pm", "lost content", "pm_message", PathPMToUser, "test_loc", nil)
+	msgId := mb.Send("pm", "lost content", "pm_message", PathCoreOutput, "test_loc", nil)
 
 	time.Sleep(2 * time.Second)
 
@@ -112,7 +112,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			msgId := mb.Send("pm", "concurrent test", "pm_message", PathPMToUser, "concurrent_loc", nil)
+			msgId := mb.Send("pm", "concurrent test", "pm_message", PathCoreOutput, "concurrent_loc", nil)
 			mu.Lock()
 			ids = append(ids, msgId)
 			mu.Unlock()
@@ -218,7 +218,7 @@ func TestGetStats(t *testing.T) {
 		t.Fatalf("Initial lost should be 0, got %d", stats["lost"])
 	}
 
-	mb.Send("pm", "test", "pm_message", PathPMToUser, "test_loc", nil)
+	mb.Send("pm", "test", "pm_message", PathCoreOutput, "test_loc", nil)
 
 	stats = mb.GetStats()
 	if stats["pending"].(int) != 1 {
