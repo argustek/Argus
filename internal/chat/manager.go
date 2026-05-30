@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -2362,7 +2363,17 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	m.router.MarkProcessingStart("se")
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("[startSETask] 💥 panic recovered: %v\n", r)
+			stack := debug.Stack()
+			fmt.Printf("[startSETask] 💥 PANIC recovered: %v\n", r)
+			fmt.Printf("[startSETask] 📋 Stack trace:\n%s\n", string(stack))
+			func() {
+				f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_panic.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if f != nil {
+					f.WriteString(fmt.Sprintf("[%s] PANIC: %v\nStack:\n%s\n",
+						time.Now().Format("15:04:05.000"), r, string(stack)))
+					f.Close()
+				}
+			}()
 			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		}
 		m.router.MarkProcessingEnd("se")
@@ -2481,6 +2492,28 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		}
 
 		fmt.Printf("[PROBE-CALL] 🚀 即将调用ProcessTaskStream (时间:%s)\n", time.Now().Format("15:04:05.000"))
+
+		if attempt == 0 {
+			func() {
+				f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_state_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if f != nil {
+					seProcStatus := "nil"
+					if m.seProcessor != nil {
+						seProcStatus = "ok"
+					}
+					f.WriteString(fmt.Sprintf("[%s] [PRE-CALL-PROBE] seProcessor=%s\n",
+						time.Now().Format("15:04:05.000"), seProcStatus))
+					f.Close()
+				}
+			}()
+			if m.seProcessor == nil {
+				errMsg := fmt.Errorf("seProcessor is nil")
+				fmt.Printf("[SE] 🔴 FATAL: %v\n", errMsg)
+				m.writeRouteLog(fmt.Sprintf("[SE-FATAL] %s", errMsg.Error()))
+				return errMsg
+			}
+		}
+
 		resp, err = m.seProcessor.ProcessTaskStream(taskDesc, func(delta string) {
 			m.cMonitor.UpdateSeChunkTime()
 			m.emitStreamChunk("se", delta)

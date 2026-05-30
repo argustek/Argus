@@ -670,9 +670,15 @@ func (s *SEProcessor) fixMalformedJSON(jsonStr string) string {
 	}
 
 	// 7.2 修复 "go run hello" (缺.go) → "go run hello.go" (在exec command中)
-	execGoRe := regexp.MustCompile(`"command"\s*:\s*"go\s+run\s+(\w+)(?!\.go)"`)
+	execGoRe := regexp.MustCompile(`"command"\s*:\s*"go\s+run\s+(\w+)"`)
 	if execGoRe.MatchString(jsonStr) {
-		jsonStr = execGoRe.ReplaceAllString(jsonStr, `"command":"go run $1.go"`)
+		jsonStr = execGoRe.ReplaceAllStringFunc(jsonStr, func(match string) string {
+			word := execGoRe.FindStringSubmatch(match)[1]
+			if strings.HasSuffix(word, ".go") {
+				return match
+			}
+			return strings.Replace(match, word, word+".go", 1)
+		})
 		totalFixes++
 		fmt.Println("[SE Debug] fixMalformedJSON: 修复 go run 缺少.go后缀")
 	}

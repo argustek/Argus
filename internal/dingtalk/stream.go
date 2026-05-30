@@ -225,28 +225,28 @@ func getAccessToken(clientID, clientSecret string) (string, error) {
 	
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.dingtalk_token"), err)
+		return "", fmt.Errorf("%s", i18n.T("err.dingtalk_token", err))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("err.dingtalk_read_resp"), err)
+		return "", fmt.Errorf("%s", i18n.T("err.dingtalk_read_resp", err))
 	}
 
 	var result struct {
 		ErrCode     int    `json:"errcode"`
 		ErrMsg      string `json:"errmsg"`
 		AccessToken string `json:"access_token"`
-		ExpiresIn   int    `json:"expires_in"`
+		ExpiresIn   int    `json:"expiresIn"`
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
-		return "", fmt.Errorf(i18n.T("err.dingtalk_parse_resp"), err)
+		return "", fmt.Errorf("%s", i18n.T("err.dingtalk_parse_resp", err))
 	}
 
 	if result.ErrCode != 0 {
-		return "", fmt.Errorf(i18n.T("err.dingtalk_token_err"), result.ErrMsg)
+		return "", fmt.Errorf("%s", i18n.T("err.dingtalk_token_err", result.ErrMsg))
 	}
 
 	// 缓存 Token，提前5分钟过期
@@ -264,13 +264,13 @@ func sendMessageViaOpenAPI(userID string, content string) error {
 	// 获取配置
 	cfg := getStreamConfig()
 	if cfg == nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_config"))
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_config"))
 	}
 
 	// 获取 AccessToken
 	accessToken, err := getAccessToken(cfg.ClientID, cfg.ClientSecret)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_token"), err)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_token", err))
 	}
 
 	// 使用批量发送 API（测试成功的API）
@@ -291,14 +291,14 @@ func sendMessageViaOpenAPI(userID string, content string) error {
 
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_build_req"), err)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_build_req", err))
 	}
 
 	logToFile(fmt.Sprintf("发送消息请求: URL=%s, Body=%s", url, string(jsonBody)))
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_create_req"), err)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_create_req", err))
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -307,18 +307,17 @@ func sendMessageViaOpenAPI(userID string, content string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_send_req"), err)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_send_req", err))
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf(i18n.T("err.dingtalk_read_resp"), err)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_read_resp", err))
 	}
 
 	logToFile(fmt.Sprintf("发送消息响应: %s", string(body)))
 
-	// 解析钉钉错误码
 	var result struct {
 		ErrCode int    `json:"errcode"`
 		ErrMsg  string `json:"errmsg"`
@@ -326,11 +325,11 @@ func sendMessageViaOpenAPI(userID string, content string) error {
 	json.Unmarshal(body, &result)
 
 	if result.ErrCode != 0 {
-		return fmt.Errorf(i18n.T("err.dingtalk_api_error"), result.ErrCode, result.ErrMsg)
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_api_error", result.ErrCode, result.ErrMsg))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf(i18n.T("err.dingtalk_http_error"), resp.StatusCode, string(body))
+		return fmt.Errorf("%s", i18n.T("err.dingtalk_http_error", resp.StatusCode, string(body)))
 	}
 
 	logToFile(fmt.Sprintf("发送消息成功，用户 %s", userID))
