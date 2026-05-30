@@ -256,6 +256,10 @@ func (s *SEProcessor) ProcessTask(taskDesc string) (*SEResponse, error) {
 
 // ProcessTaskStream 流式处理任务，每收到文本片段调用 onChunk
 func (s *SEProcessor) ProcessTaskStream(taskDesc string, onChunk func(delta string)) (*SEResponse, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("SEProcessor.client is nil - cannot call AI API")
+	}
+
 	func() {
 		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_entry_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if f != nil {
