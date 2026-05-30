@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -120,6 +122,12 @@ func (c *Client) checkBeforeCall() error {
 	return nil
 }
 
+func (c *Client) CloseIdleConnections() {
+	if t, ok := c.client.Transport.(*http.Transport); ok {
+		t.CloseIdleConnections()
+	}
+}
+
 func (c *Client) recordSuccess() {
 	c.circuitBreaker.RecordSuccess(apiCallOpType)
 }
@@ -213,15 +221,30 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, rep
 	if err != nil {
 		return "", fmt.Errorf("create request failed: %v", err)
 	}
-
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
 		c.recordFailure()
+		func() {
+			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_api_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(fmt.Sprintf("[%s] STREAM-ERROR err=%q (时间:%s)\n",
+					time.Now().Format("15:04:05.000"), err.Error()[:min(200, len(err.Error()))], time.Now().Format("15:04:05.000")))
+				f.Close()
+			}
+		}()
 		return "", fmt.Errorf("send request failed: %v", err)
 	}
+	func() {
+		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_api_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			f.WriteString(fmt.Sprintf("[%s] STREAM-RESP status=%d (时间:%s)\n",
+				time.Now().Format("15:04:05.000"), resp.StatusCode, time.Now().Format("15:04:05.000")))
+			f.Close()
+		}
+	}()
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
@@ -312,6 +335,15 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 }
 
 func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
+	func() {
+		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_entry_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			f.WriteString(fmt.Sprintf("[%s] [CHATSTREAM-ENTRY] user=%q history=%d ctx_err=%v\n",
+				time.Now().Format("15:04:05.000"), userContent[:min(60, len(userContent))], len(history), ctx.Err()))
+			f.Close()
+		}
+	}()
+
 	if err := c.checkBeforeCall(); err != nil {
 		return "", err
 	}

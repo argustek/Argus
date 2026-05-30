@@ -721,7 +721,34 @@ func (m *Manager) initCMonitor() {
 	})
 
 	m.cMonitor.SetRetryCallback(func() error {
-		fmt.Println("[C] 自动重试：清除记忆、复位看板、重置SE状态")
+		fmt.Println("[C] 自动重试：取消API调用、清除记忆、复位看板、重置SE状态")
+
+		m.mu.Lock()
+		if m.cancelFunc != nil {
+			fmt.Println("[C] 🛑 取消正在进行的AI调用（防止幽灵返回）")
+			m.cancelFunc()
+			m.cancelFunc = nil
+		}
+		m.mu.Unlock()
+
+		m.processingMu.Lock()
+		if m.isProcessing {
+			fmt.Println("[C] 🛑 重置处理状态")
+			m.isProcessing = false
+		}
+		m.processingMu.Unlock()
+
+		m.pendingMu.Lock()
+		if len(m.pendingQueue) > 0 {
+			fmt.Printf("[C] 🧹 清空待处理消息队列 (%d条)\n", len(m.pendingQueue))
+			m.pendingQueue = nil
+		}
+		m.pendingMu.Unlock()
+
+		m.resetMu.Lock()
+		m.resetGeneration++
+		m.resetMu.Unlock()
+
 		if m.memoryManager != nil {
 			m.memoryManager.ClearState()
 		}
@@ -729,11 +756,12 @@ func (m *Manager) initCMonitor() {
 		m.reviewCount = 0
 		m.seContinueCount = 0
 		m.seAskPMCount = 0
+		m.seEmptyActionCount = 0
 		m.seReportedComplete = false
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-		fmt.Println("[C] ✅ SE/PM状态已强制重置为IDLE")
+		fmt.Println("[C] ✅ SE/PM状态已强制重置为IDLE（含API取消+generation递增）")
 		return nil
 	})
 
@@ -1343,9 +1371,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 	isReviewScenario := strings.Contains(content, "已完成") ||
 		strings.Contains(content, "审核") ||
 		strings.Contains(content, "SE已完成")
+	fmt.Printf("[PROBE-handleToPM] 🔍 审核场景检测: isReview=%v seReportedComplete=%v content_preview=%q (时间:%s)\n",
+		isReviewScenario, m.seReportedComplete, content[:min(60, len(content))], time.Now().Format("15:04:05.000"))
 
 	if isReviewScenario && m.richBuilder != nil {
-		fmt.Println("[handleToPM] 🔄 G62修复: 审核场景改用ProcessStream(快速路径)，避免ChatWithTools超时")
+		fmt.Println("[handleToPM] 🔄 审核场景: 用ProcessReview(支持ChatWithTools工具调用验证)")
 		m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
 			{Text: "接收 SE 完成报告"},
 			{Text: "审核 SE 执行结果"},
@@ -1387,8 +1417,13 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.msgBusSend("pm", "", "pm_started", PathPMStream, "ProcessMessage:pm_started", map[string]string{})
 	}
 
-	// 更新PM状态为busy + 项目状态为running
-	m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+	// 更新PM状态为busy + 项目状态
+	// 🔴 [FIX-20260530] 审核场景保持Done状态，防止PM再次@SE分配任务
+	if m.seReportedComplete || isReviewScenario {
+		fmt.Printf("[handleToPM] 🛡️ 审核模式: seReportedComplete=%v isReview=%v, 保持Done状态\n", m.seReportedComplete, isReviewScenario)
+	} else {
+		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+	}
 	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
 	// 注意：API配置错误时不改变项目状态，只有真正的项目执行错误才改变
 
@@ -1401,15 +1436,23 @@ func (m *Manager) handleToPM(content string) (err error) {
 		pmHistory[i] = ai.ChatMessage{Role: msg.Role, Content: msg.Content}
 	}
 
-	fmt.Printf("[handleToPM] 调用 PMProcessor.ProcessStream\n")
+	fmt.Printf("[handleToPM] 调用 PMProcessor (isReview=%v)\n", isReviewScenario)
 	aiGen := m.getResetGeneration()
-	resp, err := m.pmProcessor.ProcessStream(content, pmHistory, func(delta string) {
-		m.emitStreamChunk("pm", delta)
-	})
-	if err != nil {
-		fmt.Printf("[handleToPM] PMProcessor.ProcessStream 失败: %v\n", err)
+	var resp *ai.PMResponse
+	if isReviewScenario {
+		fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
+		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, func(delta string) {
+			m.emitStreamChunk("pm", delta)
+		})
 	} else {
-		fmt.Printf("[handleToPM] PMProcessor.ProcessStream 成功，响应长度: %d\n", len(resp.Content))
+		resp, err = m.pmProcessor.ProcessStream(content, pmHistory, func(delta string) {
+			m.emitStreamChunk("pm", delta)
+		})
+	}
+	if err != nil {
+		fmt.Printf("[handleToPM] PMProcessor调用失败: %v (isReview=%v)\n", err, isReviewScenario)
+	} else {
+		fmt.Printf("[handleToPM] PMProcessor调用成功，响应长度: %d (isReview=%v)\n", len(resp.Content), isReviewScenario)
 		hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
 		m.writeRouteLog(fmt.Sprintf("[TRACE-AP-PM-RESP] hasAP=%v content_preview=%q", hasAP, resp.Content[:min(120, len(resp.Content))]))
 		fmt.Printf("[TRACE-AP-PM-RESP] hasAP=%v content_len=%d\n", hasAP, len(resp.Content))
@@ -1488,6 +1531,8 @@ func (m *Manager) handleToPM(content string) (err error) {
 	// 🔥🔥🔥 [方案1-核心修复] @SE 检测：最高优先级！必须在 @AP 和审批关键词之前！
 	// 根因：之前 @SE 检测在第1587行（@AP和审批关键词之后），导致 PM 的任务描述被误判为审批结论
 	// 证据：route.log 显示 [TRACE-AP-CHECK] 之后直接到 AP审批，缺失 [SE-TASK] 记录
+	fmt.Printf("[PROBE-handleToPM] 📋 PM路由决策: content_preview=%q (时间:%s)\n",
+		resp.Content[:min(80, len(resp.Content))], time.Now().Format("15:04:05.000"))
 	parsedMsg := m.router.Parse("pm", resp.Content)
 	m.writeRouteLog(fmt.Sprintf("[DEBUG-PARSE-1ST] to=%q content_head=%q", parsedMsg.To, resp.Content[:min(80, len(resp.Content))]))
 
@@ -1524,8 +1569,8 @@ func (m *Manager) handleToPM(content string) (err error) {
 		fmt.Printf("[SE-DEBUG] ✅ [方案1] 通过状态消息检查\n")
 
 		currentState := m.cMonitor.GetProjectState()
-		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
-			fmt.Printf("[SE-DEBUG] 🛡️ [方案1] 审核模式拦截@SE(state=%d)\n", currentState)
+		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError || m.seReportedComplete {
+			fmt.Printf("[SE-DEBUG] 🛡️ [方案1] 审核模式拦截@SE(state=%d seReportedComplete=%v)\n", currentState, m.seReportedComplete)
 
 			m.reviewCount++
 			if m.reviewCount >= 3 {
@@ -1577,9 +1622,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 			m.sendToDingTalk(fmt.Sprintf("[PM→SE] %s", filteredContent))
 		}()
 
-		fmt.Printf("[SE-DEBUG] 🚀 [方案1] 即将调用 startSETaskWithFrom: task=%q\n", finalTask[:min(60, len(finalTask))])
+		fmt.Printf("[SE-DEBUG] 🚀 [方案1] 即将调用 startSETaskWithFrom: task=%q (时间:%s)\n",
+			finalTask[:min(60, len(finalTask))], time.Now().Format("15:04:05.000"))
 		err := m.startSETaskWithFrom(finalTask, "pm")
-		fmt.Printf("[SE-DEBUG] ✅ [方案1] startSETaskWithFrom 返回: err=%v\n", err)
+		fmt.Printf("[SE-DEBUG] ✅ [方案1] startSETaskWithFrom 返回: err=%v (时间:%s)\n",
+			err, time.Now().Format("15:04:05.000"))
 
 		if pmTaskId != "" && m.richBuilder != nil {
 			if err != nil {
@@ -1595,6 +1642,18 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	// [方案1] HasTasks 检测：第二优先级（如果没有 @SE 但有任务JSON）
 	if resp.HasTasks {
+		if m.seReportedComplete {
+			fmt.Printf("[handleToPM] 🛡️ HasTasks审核拦截: seReportedComplete=true, PM不应再分配任务, 流转AP\n")
+			m.reviewCount++
+			m.currentRole = ""
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverPMToAP)
+			if m.apProcessor != nil {
+				return m.handleAPReview("PM在审核模式下通过HasTasks分配任务，系统转交AP审批")
+			}
+			m.forceProjectApproved()
+			return nil
+		}
 		fmt.Println("[System] [方案1] HasTasks命中 (无@SE但有任务JSON), starting SE...")
 		m.writeRouteLog("[SE-TASK-HASTASKS] from=pm")
 
@@ -2307,8 +2366,10 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		}
 		m.router.MarkProcessingEnd("se")
-		m.currentSETask = "" // [FIX-20260529] SE任务完成，清除任务描述
-		m.currentRole = ""   // [FIX-20260529] 互斥检查用，出错时也清理
+		m.currentSETask = ""
+		fmt.Printf("[PROBE-SE] ⬅️ startSETask defer执行: currentRole=%q → 清空 | seReportedComplete=%v (时间:%s)\n",
+			m.currentRole, m.seReportedComplete, time.Now().Format("15:04:05.000"))
+		m.currentRole = ""
 	}()
 
 	m.currentRole = "se"
@@ -2372,6 +2433,9 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	const seTimeout = 120 * time.Second
 	const maxRetries = 2
 
+	fmt.Printf("[PROBE-startSETask] 即将调用ProcessTaskStream: task=%q timeout=%v (时间:%s)\n",
+		taskDesc[:min(60, len(taskDesc))], seTimeout, time.Now().Format("15:04:05.000"))
+
 	var resp *ai.SEResponse
 	var err error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -2399,16 +2463,50 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running")
 		}
 
+		if attempt == 0 && m.aiClient != nil {
+			m.aiClient.CloseIdleConnections()
+			fmt.Println("[SE] 🔧 关闭空闲连接，避免复用PM用过的死连接")
+		}
+
+		if attempt == 0 {
+			state, _ := m.cMonitor.ReadState()
+			func() {
+				f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_state_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if f != nil {
+					f.WriteString(fmt.Sprintf("[%s] [BEFORE-API] attempt=%d cMonitor.SE=%q cMonitor.PM=%q currentRole=%q seReportedComplete=%v isProcessing=%v aiGen=%d curGen=%d\n",
+						time.Now().Format("15:04:05.000"), attempt, state.SeStatus, state.PmStatus, m.currentRole, m.seReportedComplete, m.isProcessing, aiGen, m.getResetGeneration()))
+					f.Close()
+				}
+			}()
+		}
+
+		fmt.Printf("[PROBE-CALL] 🚀 即将调用ProcessTaskStream (时间:%s)\n", time.Now().Format("15:04:05.000"))
 		resp, err = m.seProcessor.ProcessTaskStream(taskDesc, func(delta string) {
 			m.cMonitor.UpdateSeChunkTime()
 			m.emitStreamChunk("se", delta)
 		})
+		fmt.Printf("[PROBE-CALL] ✅ ProcessTaskStream已返回 (时间:%s)\n", time.Now().Format("15:04:05.000"))
+
+		if attempt == 0 {
+			state, _ := m.cMonitor.ReadState()
+			func() {
+				f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_state_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+				if f != nil {
+					f.WriteString(fmt.Sprintf("[%s] [AFTER-API] attempt=%d err=%v cMonitor.SE=%q cMonitor.PM=%q currentRole=%q isProcessing=%v aiGen=%d curGen=%d\n",
+						time.Now().Format("15:04:05.000"), attempt, err, state.SeStatus, state.PmStatus, m.currentRole, m.isProcessing, aiGen, m.getResetGeneration()))
+					f.Close()
+				}
+			}()
+		}
+
 		seCancel()
 
 		respActions := -1
 		if resp != nil {
 			respActions = len(resp.Actions)
 		}
+		fmt.Printf("[PROBE-SE] 📡 ProcessTaskStream返回: err=%v actions=%d content_len=%d (时间:%s)\n",
+			err, respActions, func() int { if resp != nil { return len(resp.Content) }; return 0 }(), time.Now().Format("15:04:05.000"))
 		m.writeRouteLog(fmt.Sprintf("[SE-API-CALL] from=%s attempt=%d/%d err=%v actions=%d time=%s",
 			from, attempt, maxRetries, err, respActions, time.Now().Format("15:04:05")))
 
@@ -2420,13 +2518,20 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 		if strings.Contains(err.Error(), "context deadline exceeded") ||
 			strings.Contains(err.Error(), "timeout") ||
-			strings.Contains(err.Error(), "context canceled") {
-			m.syncBackendStatus("se_timeout", fmt.Sprintf("SE超时(%d/%d): %v", attempt+1, maxRetries+1, err.Error()[:min(60, len(err.Error()))]))
+			strings.Contains(err.Error(), "context canceled") ||
+			strings.Contains(err.Error(), "connection") ||
+			strings.Contains(err.Error(), "forcibly closed") ||
+			strings.Contains(err.Error(), "read stream") {
+			m.syncBackendStatus("se_retry", fmt.Sprintf("SE网络错误重试(%d/%d): %v", attempt+1, maxRetries+1, err.Error()[:min(60, len(err.Error()))]))
 			continue
 		}
 
 		break
 	}
+
+	fmt.Printf("[PROBE-startSETask] ⏹️ ProcessTaskStream循环结束: err=%v actions=%d (时间:%s)\n",
+		err, func() int { if resp != nil { return len(resp.Actions) }; return -1 }(), time.Now().Format("15:04:05.000"))
+
 	if m.isGhostCall(aiGen) {
 		fmt.Printf("[startSETask] ⚠️ 检测到复位后的幽灵SE调用，丢弃结果\n")
 		m.writeRouteLog("[GHOST-CALL] SE响应被丢弃(复位检测)")
@@ -2561,16 +2666,25 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 				f.Close()
 			}
 		}()
+		fmt.Printf("[PROBE-startSETask] 🚀 开始执行actions: count=%d (时间:%s)\n",
+			len(resp.Actions), time.Now().Format("15:04:05.000"))
 		if err := m.executeSEActions(resp.Actions); err != nil {
+			fmt.Printf("[PROBE-startSETask] ❌ executeSEActions失败: %v (耗时:%s)\n",
+				err, time.Now().Format("15:04:05.000"))
 			// 执行失败，通知SE，让SE决定如何处理
 			failMsg := fmt.Sprintf("执行失败: %v", err)
 			m.seProcessor.AddResult(failMsg)
+
+			// ⚠️ [FIX] 恢复API调用前必须设置新context（原context已被seCancel()取消）
+			retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
+			m.seProcessor.SetContext(retryCtx)
 
 			// SE处理失败情况，可能需要问PM
 			resp2, err2 := m.seProcessor.ProcessTaskStream("上述执行失败，请分析原因并决定下一步", func(delta string) {
 				m.cMonitor.UpdateSeChunkTime()
 				m.emitStreamChunk("se", delta)
 			})
+			retryCancel()
 			if err2 != nil {
 				m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 
@@ -2599,6 +2713,8 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 		// 如果执行成功但没有completed
 		if resp.Completed == nil {
+			fmt.Printf("[PROBE-startSETask] ✅ actions执行成功, Completed=nil, NeedHelp=%v (时间:%s)\n",
+				resp.NeedHelp, time.Now().Format("15:04:05.000"))
 			if resp.NeedHelp {
 				fmt.Println("[System] SE actions done but still needs help, asking PM... [TAG-S1]")
 				return m.handleSEAskPM(resp.Content)
@@ -2740,6 +2856,8 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 
 // continueSETask 继续SE任务
 func (m *Manager) continueSETask() (err error) {
+	fmt.Printf("[PROBE-continueSETask] 🟢 入口: seContinueCount=%d seReportedComplete=%v currentRole=%q (时间:%s)\n",
+		m.seContinueCount, m.seReportedComplete, m.currentRole, time.Now().Format("15:04:05.000"))
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("[continueSETask] 💥 panic recovered: %v\n", r)
@@ -2748,9 +2866,8 @@ func (m *Manager) continueSETask() (err error) {
 		}
 	}()
 	m.seContinueCount++
-	// 🆕 [FIX-20260529] 严格限制SE继续次数，防止AI质量差时死循环（原19次→5次）
-	if m.seContinueCount > 5 {
-		fmt.Printf("[System] ⚠️ SE继续次数超限(%d>5)，强制结束任务\n", m.seContinueCount)
+	if m.seContinueCount > 10 {
+		fmt.Printf("[System] ⚠️ SE继续次数超限(%d>10)，强制结束任务\n", m.seContinueCount)
 
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2772,26 +2889,57 @@ func (m *Manager) continueSETask() (err error) {
 	}
 	m.mu.RUnlock()
 
-	// ⏰ 🆕 [FIX-20260529] SE继续执行超时缩短（原120s→60s），快速失败
-	const seContinueTimeout = 60 * time.Second
+	const seContinueTimeout = 90 * time.Second
 	seCtx, seCancel := context.WithTimeout(safeCtx, seContinueTimeout)
 	defer seCancel()
 	m.seProcessor.SetContext(seCtx)
 
+	if m.aiClient != nil {
+		m.aiClient.CloseIdleConnections()
+		fmt.Println("[continueSETask] 🔧 关闭空闲连接，避免复用死连接")
+	}
+
+	fmt.Printf("[PROBE-continueSETask] ⏳ 即将调用ProcessTaskStream(继续) (时间:%s)\n",
+		time.Now().Format("15:04:05.000"))
 	resp, err := m.seProcessor.ProcessTaskStream("继续", func(delta string) {
 		m.cMonitor.UpdateSeChunkTime()
 		m.emitStreamChunk("se", delta)
 	})
+	fmt.Printf("[PROBE-continueSETask] ⏹️ ProcessTaskStream返回: err=%v actions=%d content_len=%d (时间:%s)\n",
+		err, func() int { if resp != nil { return len(resp.Actions) }; return 0 }(),
+		func() int { if resp != nil { return len(resp.Content) }; return 0 }(),
+		time.Now().Format("15:04:05.000"))
 	if err != nil {
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		errMsg := fmt.Sprintf("❌ SE继续执行失败: %v", err)
 		m.addSEToPMMsg(errMsg)
+
+		if strings.Contains(err.Error(), "connection") ||
+			strings.Contains(err.Error(), "forcibly closed") ||
+			strings.Contains(err.Error(), "read stream") {
+			fmt.Println("[continueSETask] 🔄 网络错误，等待3秒后重试...")
+			time.Sleep(3 * time.Second)
+			retryCtx, retryCancel := context.WithTimeout(safeCtx, 90*time.Second)
+			defer retryCancel()
+			m.seProcessor.SetContext(retryCtx)
+			resp, err = m.seProcessor.ProcessTaskStream("继续", func(delta string) {
+				m.cMonitor.UpdateSeChunkTime()
+				m.emitStreamChunk("se", delta)
+			})
+			if err == nil {
+				fmt.Println("[continueSETask] ✅ 重试成功!")
+				goto continueProcess
+			}
+			fmt.Printf("[continueSETask] ❌ 重试也失败: %v\n", err)
+		}
+
 		if m.onProjectStateChanged != nil {
 			m.onProjectStateChanged("error")
 		}
 		return fmt.Errorf("SE continue failed: %w", err)
 	}
 
+continueProcess:
 	// ❌ 删除中间 addHistory（不发"继续"消息，只保留最终结果）
 	fmt.Printf("[SE] 继续处理中...\n")
 
@@ -2851,7 +2999,8 @@ func (m *Manager) continueSETask() (err error) {
 		fmt.Printf("[SE] Actions executed successfully\n")
 
 		// SE任务完成，切换到PM进行审核（走@层Router）
-		fmt.Println("[System] SE actions completed, routing to PM via @layer (Router)... [TAG-C1]")
+		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C1: actions完成，路由到PM (时间:%s)\n",
+			time.Now().Format("15:04:05.000"))
 		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2882,7 +3031,8 @@ func (m *Manager) continueSETask() (err error) {
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
 		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
-		fmt.Println("[System] SE task completed(continue), routing to PM via @layer (Router)... [TAG-C2]")
+		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C2: Completed分支，路由到PM (时间:%s)\n",
+			time.Now().Format("15:04:05.000"))
 
 		summary := "✅ 任务完成\n\n"
 		summary += fmt.Sprintf("📝 技术笔记:\n%s\n\n", resp.Completed.TechnicalNotes)
@@ -2894,7 +3044,8 @@ func (m *Manager) continueSETask() (err error) {
 	}
 
 	if resp.Content != "" {
-		fmt.Printf("[System] 🔑 continueSETask: SE无actions/Completed但有内容 → 走@层→PM | content_len=%d [TAG-C3]\n", len(resp.Content))
+		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C3: 有内容无actions，路由到PM content_len=%d (时间:%s)\n",
+			len(resp.Content), time.Now().Format("15:04:05.000"))
 		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2904,7 +3055,8 @@ func (m *Manager) continueSETask() (err error) {
 		return err
 	}
 
-	fmt.Printf("[System] ⚠️ continueSETask: SE回复为空且无actions，结束 [TAG-C4]\n")
+	fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C4: 回复空且无actions，结束 (时间:%s)\n",
+		time.Now().Format("15:04:05.000"))
 	m.seReportedComplete = true  // [FIX-20260528-E] 即使空回复也算完成
 	m.currentRole = ""
 	m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -2970,6 +3122,20 @@ func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, 
 
 // executeSEActions 执行SE的actions
 func (m *Manager) executeSEActions(actions []ai.SEAction) error {
+	fmt.Printf("[PROBE-executeSEActions] 🟢 入口: actions=%d (时间:%s)\n",
+		len(actions), time.Now().Format("15:04:05.000"))
+	
+	func() {
+		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_actions_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			for i, a := range actions {
+				f.WriteString(fmt.Sprintf("[%s] ACTION[%d/%d] type=%q path=%q command=%q content_len=%d tool=%q\n",
+					time.Now().Format("15:04:05.000"), i+1, len(actions), a.Type, a.Path, a.Command, len(a.Content), a.Tool))
+			}
+			f.Close()
+		}
+	}()
+	
 	totalActions := len(actions)
 	seTaskId := ""
 	if m.richBuilder != nil {
@@ -3007,6 +3173,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		}
 	}
 
+	fmt.Printf("[PROBE-executeSEActions] 🔄 开始action循环: total=%d (时间:%s)\n",
+		totalActions, time.Now().Format("15:04:05.000"))
 	for i, action := range actions {
 		actionLabel := fmt.Sprintf("%s %s", action.Type, func() string {
 			switch action.Type {
@@ -3033,6 +3201,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 		}())
 
+		fmt.Printf("[PROBE-executeSEActions] ▶️ action[%d/%d]: type=%s label=%q (时间:%s)\n",
+			i+1, totalActions, action.Type, actionLabel, time.Now().Format("15:04:05.000"))
+
 		var currentTask *types.GlobalTask
 		desc := fmt.Sprintf("%s%s", map[string]string{
 			"write_file":    "创建文件：",
@@ -3055,6 +3226,14 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			"command":  action.Command,
 			"status":   "running",
 		})
+
+		func() {
+			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_actions_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(fmt.Sprintf("[%s] SWITCH-ENTER action[%d/%d] type=%q\n", time.Now().Format("15:04:05.000"), i+1, totalActions, action.Type))
+				f.Close()
+			}
+		}()
 
 		switch action.Type {
 		case "write_file":
@@ -3652,6 +3831,14 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		default:
 			return fmt.Errorf("unknown action type: %s", action.Type)
 		}
+		
+		func() {
+			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_actions_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(fmt.Sprintf("[%s] SWITCH-DONE action[%d/%d] type=%q\n", time.Now().Format("15:04:05.000"), i+1, totalActions, action.Type))
+				f.Close()
+			}
+		}()
 	}
 	if seTaskId != "" && m.richBuilder != nil {
 		m.richBuilder.UpdateTask(seTaskId, 2, "done")
@@ -3673,6 +3860,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		fmt.Println("[executeSEActions] ⚠️ m.ctx 为 nil，无法发送 exec_completed")
 	}
 
+	fmt.Printf("[PROBE-executeSEActions] ⏹️ 函数正常结束 (时间:%s)\n",
+		time.Now().Format("15:04:05.000"))
 	return nil
 }
 

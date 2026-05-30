@@ -256,7 +256,23 @@ func (s *SEProcessor) ProcessTask(taskDesc string) (*SEResponse, error) {
 
 // ProcessTaskStream 流式处理任务，每收到文本片段调用 onChunk
 func (s *SEProcessor) ProcessTaskStream(taskDesc string, onChunk func(delta string)) (*SEResponse, error) {
-	fmt.Printf("[SE Stream] Starting task: %s\n", taskDesc)
+	func() {
+		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_entry_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			ctxStatus := "nil_ctx"
+			if s.ctx != nil {
+				ctxStatus = s.ctx.Err().Error()
+			}
+			clientOK := "not_nil"
+			if s.client == nil {
+				clientOK = "NIL"
+			}
+			f.WriteString(fmt.Sprintf("[%s] [SE-ENTRY] task=%q ctx=%q client=%q history=%d\n",
+				time.Now().Format("15:04:05.000"), taskDesc[:min(60, len(taskDesc))], ctxStatus, clientOK, len(s.history)))
+			f.Close()
+		}
+	}()
+
 	response, err := s.client.ChatStream(s.getCtx(), s.getSystemPrompt(), s.history, taskDesc, s.ReplyLanguage, onChunk)
 	if err != nil {
 		fmt.Printf("[SE Stream] AI call failed: %v\n", err)
@@ -486,6 +502,41 @@ func (s *SEProcessor) fixActionTypes(actions []SEAction) []SEAction {
 			} else if a.OldStr != "" && a.NewStr != "" {
 				a.Type = "edit_file"
 				fmt.Printf("[SE Debug] fixActionTypes: action #%d inferred as edit_file\n", i)
+			}
+		}
+
+		// 修复AI把命令嵌入type字段的情况：type="exec run hello2.go" → type="exec" + command="run hello2.go"
+		knownTypes := []string{"exec", "write_file", "edit_file", "read_file", "search_files", "run_tests", "check_env", "list_files", "git_operation"}
+		needsFix := true
+		for _, kt := range knownTypes {
+			if a.Type == kt {
+				needsFix = false
+				break
+			}
+		}
+		if needsFix {
+			for _, kt := range knownTypes {
+				prefix := kt + " "
+				if strings.HasPrefix(a.Type, prefix) {
+					extra := strings.TrimSpace(a.Type[len(prefix):])
+					a.Type = kt
+					switch kt {
+					case "exec":
+						if a.Command == "" {
+							a.Command = extra
+						}
+					case "write_file":
+						if a.Path == "" {
+							a.Path = extra
+						}
+					case "read_file":
+						if a.Path == "" {
+							a.Path = extra
+						}
+					}
+					fmt.Printf("[SE Debug] fixActionTypes: action #%d split type=%q extra=%q\n", i, kt, extra)
+					break
+				}
 			}
 		}
 	}
