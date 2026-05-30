@@ -25,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"argus/internal/chat"
+	"argus/internal/core"
 	"argus/internal/dingtalk"
 	"argus/internal/git"
 	"argus/internal/i18n"
@@ -628,6 +629,10 @@ func (a *App) initChatManager() {
 
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
+				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
+				a.chatManager.GetMessageBus().SetOnStateChange(func(state core.RoleState) {
+					a.emitToFrontend("role-state", state, "MessageBus:State", chat.PathStatus)
+				})
 			}
 
 			a.bridge.SetOnMessage(func(msg *chat.Message) {

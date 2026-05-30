@@ -645,11 +645,27 @@ onMounted(async () => {
     aiThinking.value = true
   })
 
-  // [V2] 角色状态同步 - 戴帽子→亮灯
+  // [V2-LabVIEW] 结构化角色状态（MessageBus RoleState → 前面板投影）
+  EventsOn('role-state', (data: { _msgId?: string; phase?: string; pm?: string; se?: string; ap?: string; mc?: boolean; task?: string; [key: string]: any }) => {
+    ackMessage(data._msgId || '')
+    console.log('[LabVIEW-State]', JSON.stringify(data))
+
+    if (data.pm) aiStatus.pmStatus = data.pm
+    if (data.se) aiStatus.seStatus = data.se
+    if (data.ap) aiStatus.apStatus = data.ap
+    if (data.mc !== undefined) aiStatus.cRunning = data.mc
+    if (data.task) aiStatus.currentTask = data.task
+    if (data.phase) {
+      aiStatus.progress = data.phase
+      aiThinking.value = ['pm', 'se', 'ap'].includes(data.phase)
+    }
+    ;(window as any).__stateUpdated?.()
+  })
+
+  // [Legacy] 兼容旧版字符串状态（逐步废弃）
   EventsOn('role-status', (data: { _msgId?: string; [key: string]: any }) => {
     ackMessage(data._msgId || '')
     const statusStr = typeof data === 'string' ? data : (data.delta || data.content || '')
-    console.log('[V2-Status]', statusStr)
 
     if (typeof statusStr === 'string' && statusStr.includes('role:')) {
       const roleMatch = statusStr.match(/role:(\w+)/)
@@ -657,19 +673,9 @@ onMounted(async () => {
       if (roleMatch && statusMatch) {
         const role = roleMatch[1]
         const status = statusMatch[1]
-        if (role === 'pm') {
-          aiStatus.pmStatus = status === 'busy' ? 'busy' : 'idle'
-        } else if (role === 'se') {
-          aiStatus.seStatus = status === 'busy' ? 'busy' : 'idle'
-        } else if (role === 'ap') {
-          aiStatus.apStatus = status === 'busy' ? 'busy' : 'idle'
-        }
-        if (role !== 'none') {
-          aiThinking.value = status === 'busy'
-        } else {
-          aiThinking.value = false
-        }
-        console.log(`[V2-Status] ${role} → ${status}`)
+        if (role === 'pm') aiStatus.pmStatus = status === 'busy' ? 'busy' : 'idle'
+        else if (role === 'se') aiStatus.seStatus = status === 'busy' ? 'busy' : 'idle'
+        else if (role === 'ap') aiStatus.apStatus = status === 'busy' ? 'busy' : 'idle'
       }
     }
   })
@@ -909,9 +915,15 @@ onMounted(async () => {
     console.error(t('app.loadConfigFailed'), e)
   }
   
-  // 定期检查 AI 状态和消息（不再使用事件推送，避免重复）
+  // LabVIEW式状态同步：以MessageBus事件为主，轮询为兜底
+  let lastStateUpdate = Date.now()
+  const STATE_STALE_MS = 3000
+
   setInterval(async () => {
     try {
+      const stale = (Date.now() - lastStateUpdate) > STATE_STALE_MS
+      if (!stale) return
+
       const pmThinking = await IsPMThinking()
       const cRunning = await IsCRunning()
       const seRunning = await IsSERunning()
@@ -921,20 +933,14 @@ onMounted(async () => {
       aiStatus.cRunning = cRunning
       aiStatus.seStatus = seRunning ? 'busy' : 'idle'
       aiStatus.apStatus = apThinking ? 'busy' : 'idle'
-
-      // 同步 aiThinking 状态，确保发送按钮状态正确
       aiThinking.value = pmThinking || apThinking
-
-      // 根据 AI 状态更新项目状态指示灯
-      updateProjectState(pmThinking, cRunning, seBusy)
-
-      // ✅ 移除定时器中的 loadMessages()
-      // 原因：消息已经通过 new-message 事件实时推送，定时刷新会导致竞态条件和消息重复
-      // 如需强制刷新，用户可以手动操作或切换工作目录
     } catch (e) {
       console.error(t('app.checkAIStatusFailed'), e)
     }
   }, 1000)
+
+  // 暴露给 role-state 事件更新时间戳
+  ;(window as any).__stateUpdated = () => { lastStateUpdate = Date.now() }
 
   // 定期刷新 Git 状态计数
   setInterval(async () => {

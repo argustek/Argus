@@ -49,6 +49,11 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.msgBus = bus
+	b.argus.SetOnStateChange(func(state core.RoleState) {
+		if bus != nil {
+			bus.EmitState(state)
+		}
+	})
 }
 
 func (b *Bridge) SetOnMessage(fn func(msg *Message)) {

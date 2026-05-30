@@ -14,6 +14,18 @@ import (
 	"argus/internal/executor"
 )
 
+// RoleState LabVIEW式角色状态（后面板控件值，前面板只读投影）
+type RoleState struct {
+	Phase     string `json:"phase"`               // idle, pm, se, ap, review, done, error
+	PM        string `json:"pm"`                  // idle, busy
+	SE        string `json:"se"`                  // idle, busy
+	AP        string `json:"ap"`                  // idle, busy
+	MC        bool   `json:"mc"`                  // C监控运行中
+	Task      string `json:"task,omitempty"`      // 当前任务描述
+	Progress  string `json:"progress,omitempty"`  // 进度信息
+	UpdatedAt int64  `json:"updated_at"`          // 时间戳
+}
+
 type AICaller interface {
 	ChatStream(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error)
 }
@@ -54,14 +66,17 @@ type ArgusCore struct {
 	workDir  string
 	language string
 
-	onMessage func(source, content string)
-	onChunk   func(delta string)
+	onMessage      func(source, content string)
+	onChunk        func(delta string)
+	onStateChange  func(RoleState)
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	maxRetries int
 	timeout    time.Duration
+
+	state RoleState
 }
 
 func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *ArgusCore {
@@ -117,10 +132,33 @@ func (c *ArgusCore) emit(source, content string) {
 }
 
 func (c *ArgusCore) emitStatus(phase, role, status string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.state.Phase = phase
+	c.state.Task = phase
+	switch role {
+	case "pm":
+		c.state.PM = status
+	case "se":
+		c.state.SE = status
+	case "ap":
+		c.state.AP = status
+	}
+
 	statusStr := fmt.Sprintf("phase:%s|role:%s|status:%s", phase, role, status)
 	if c.onMessage != nil {
 		c.onMessage("status", statusStr)
 	}
+	if c.onStateChange != nil {
+		c.onStateChange(c.state)
+	}
+}
+
+func (c *ArgusCore) SetOnStateChange(fn func(RoleState)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onStateChange = fn
 }
 
 func (c *ArgusCore) emitChunk(delta string) {

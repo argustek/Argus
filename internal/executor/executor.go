@@ -86,6 +86,14 @@ func (e *Executor) WriteFile(path, content string) error {
 		}
 	}
 
+	if isCodeFile(path) {
+		cleaned := cleanCodeTrailingGarbage(content)
+		if cleaned != content {
+			fmt.Printf("[Executor] Code trailing garbage cleaned: %s\n", path)
+			content = cleaned
+		}
+	}
+
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
@@ -117,6 +125,36 @@ func (e *Executor) WriteFile(path, content string) error {
 func isPythonFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	return ext == ".py" || ext == ".pyw"
+}
+
+func isCodeFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	codeExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".java": true,
+		".c": true, ".cpp": true, ".h": true, ".cs": true, ".rs": true,
+		".rb": true, ".php": true, ".swift": true, ".kt": true, ".scala": true,
+	}
+	return codeExts[ext]
+}
+
+func cleanCodeTrailingGarbage(content string) string {
+	lines := strings.Split(content, "\n")
+	lastBraceIdx := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "}" {
+			lastBraceIdx = i
+			break
+		}
+	}
+	if lastBraceIdx >= 0 && lastBraceIdx < len(lines)-1 {
+		trailing := strings.Join(lines[lastBraceIdx+1:], "\n")
+		if strings.TrimSpace(trailing) != "" {
+			fmt.Printf("[Executor] 🧹 清理代码末尾垃圾字符: %q\n", trailing)
+			content = strings.Join(lines[:lastBraceIdx+1], "\n")
+		}
+	}
+	return content
 }
 
 func (e *Executor) checkPythonSyntax(filePath string) string {

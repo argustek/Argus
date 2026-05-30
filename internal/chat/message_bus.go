@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"argus/internal/core"
+
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -55,6 +57,9 @@ type ReceivedMessage struct {
 	Latency   time.Duration // 网络延迟
 }
 
+// RoleState = core.RoleState (后面板控件值，前面板只读投影)
+type RoleState = core.RoleState
+
 // MessageBus 统一消息总线组件（LabVIEW式前后一致性保障）
 type MessageBus struct {
 	ctx           context.Context
@@ -66,6 +71,8 @@ type MessageBus struct {
 	checkInterval time.Duration            // 检查间隔
 	timeout       time.Duration            // 确认超时
 	enabled       bool                     // 是否启用
+	state         RoleState                // 当前角色状态（后面板控件）
+	onStateChange func(RoleState)          // 状态变更回调
 }
 
 // NewMessageBus 创建消息总线
@@ -329,6 +336,36 @@ func (mb *MessageBus) Clear() {
 	mb.lostMessages = make([]*PendingMessage, 0)
 	
 	fmt.Println("[🧹MSG] 已清理所有状态")
+}
+
+// EmitState 推送角色状态变更（后面板→前面板）
+func (mb *MessageBus) EmitState(state RoleState) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	state.UpdatedAt = time.Now().UnixMilli()
+	mb.state = state
+
+	if mb.onStateChange != nil {
+		mb.onStateChange(state)
+	}
+
+	fmt.Printf("[📊STATE] phase=%s pm=%s se=%s ap=%s mc=%v task=%q\n",
+		state.Phase, state.PM, state.SE, state.AP, state.MC, state.Task)
+}
+
+// GetState 获取当前状态（前面板读取）
+func (mb *MessageBus) GetState() RoleState {
+	mb.mu.RLock()
+	defer mb.mu.RUnlock()
+	return mb.state
+}
+
+// SetOnStateChange 设置状态变更回调
+func (mb *MessageBus) SetOnStateChange(fn func(RoleState)) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.onStateChange = fn
 }
 
 // SetEnabled 启用/禁用
