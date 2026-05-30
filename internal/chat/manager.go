@@ -6152,3 +6152,7 @@ func (m *Manager) getResetGeneration() int64 {
 func (m *Manager) isGhostCall(oldGeneration int64) bool {
 	return oldGeneration != m.getResetGeneration()
 }
+
+func (m *Manager) GetAIClient() *ai.Client {
+	return m.aiClient
+}

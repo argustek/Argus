@@ -218,8 +218,9 @@ type App struct {
 	// 改动历史
 	changeHistory []ChangeRecord
 
-	// Chat Manager（新的对话管理器）
+	// Chat Manager（V2: Bridge → ArgusCore）
 	chatManager *chat.Manager
+	bridge      *chat.Bridge
 
 	// HTTP 服务器（支持优雅停止）
 	httpServer *http.Server
@@ -557,15 +558,13 @@ func (a *App) initChatManager() {
 	// 设置PM/SE的终端写入器（用于QA验证时显示执行过程到终端）
 	a.chatManager.SetTerminalWriter(a.WriteToTerminal)
 	a.chatManager.SetOnFileWritten(func(path string) {
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "se-file-written", path)
-		}
+		a.emitToFrontend("se-file-written", path, "SE:FileWritten", chat.PathSEExec)
 	})
 	// 设置项目状态变更回调
 	a.chatManager.SetOnProjectStateChanged(func(state string) {
 		a.addLog(fmt.Sprintf("[OnProjectStateChanged] 状态变更: %s", state))
 		a.status.ProjectState = state
-		runtime.EventsEmit(a.ctx, "project-state-changed", state)
+		a.emitToFrontend("project-state-changed", state, "Project:StateChange", chat.PathSystem)
 	})
 	// 设置消息回调，将消息推送到前端
 	a.chatManager.SetOnMessageAdded(func(msg chat.Message) {
@@ -586,7 +585,7 @@ func (a *App) initChatManager() {
 			if msg.Source == "pm_to_user" || msg.Source == "pm_to_se" {
 				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SILENT #%d role=%s source=%s (PM流式已显示)", msgID, msg.Role, msg.Source))
 			} else {
-				runtime.EventsEmit(a.ctx, "new-message", chatMsg)
+				a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("V1OnMsg:%s", msg.Source), chat.PathSEToUser)
 				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s source=%s", msgID, msg.Role, msg.Source))
 			}
 		} else {
@@ -616,6 +615,46 @@ func (a *App) initChatManager() {
 
 	a.addLog("【ChatManager】初始化完成")
 
+	if a.chatManager != nil && a.chatManager.GetExecutor() != nil {
+		aiClient := a.chatManager.GetAIClient()
+		if aiClient != nil {
+			a.bridge = chat.NewBridge(aiClient, a.chatManager.GetExecutor(), projectDir)
+			a.bridge.SetContext(a.ctx)
+			a.bridge.SetOnMessage(func(msg *chat.Message) {
+			if msg == nil || msg.Content == "" {
+				return
+			}
+
+			if msg.Role == "status" {
+				fmt.Printf("[Bridge-Status] %s\n", msg.Content)
+				if strings.Contains(msg.Content, "status:busy") {
+					a.aiThinking = true
+				} else {
+					a.aiThinking = false
+				}
+				a.emitToFrontend("role-status", msg.Content, "Bridge:Status", chat.PathStatus)
+				return
+			}
+
+			a.msgIDCounter++
+			chatMsg := a.newChatMessage(msg.Role, msg.Content)
+			chatMsg.ID = a.msgIDCounter
+			a.messages = append(a.messages, chatMsg)
+			a.saveMessages()
+
+			a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+		})
+
+		a.bridge.SetOnChunk(func(delta string) {
+			if delta != "" {
+				a.emitToFrontend("ai-chunk", delta, "Bridge:Chunk", chat.PathPMStream)
+			}
+		})
+
+		a.addLog("【V2 Bridge】✅ ArgusCore 已初始化 (全链路走MessageBus+校验)")
+		}
+	}
+
 	// ⚠️ G点36修复：启动时如果任务已完成，清空旧消息防止显示历史任务
 	if a.chatManager != nil {
 		state := a.chatManager.GetProjectState()
@@ -627,6 +666,7 @@ func (a *App) initChatManager() {
 				a.saveMessages()
 				if a.ctx != nil {
 					runtime.EventsEmit(a.ctx, "messages-cleared", nil)
+					a.emitToFrontend("messages-cleared", nil, "G36Fix", chat.PathSystem)
 				}
 			} else {
 				a.addLog(fmt.Sprintf("[G36-FIX] ℹ️ 状态=%s，但无旧消息需要清空", state))
@@ -711,6 +751,43 @@ func (a *App) initChatManagerCLI() {
 	close(a.readyChan)
 
 	fmt.Println("[CLI] ChatManager初始化完成")
+}
+
+// ==================== V2 统一消息总线 (LabVIEW模式) ====================
+// 所有前后端通讯必须经过此函数，自动走MessageBus+校验码+ACK追踪
+
+func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc string, msgPath chat.MessagePath) {
+	if a.ctx == nil {
+		fmt.Printf("[emitToFrontend] ⚠️ ctx=nil, 跳过 %s from %s\n", eventType, sourceLoc)
+		return
+	}
+
+	payloadJSON, _ := json.Marshal(payload)
+	payloadStr := string(payloadJSON)
+
+	msgBus := a.chatManager.GetMessageBus()
+	if msgBus != nil {
+		checksum := fmt.Sprintf("%d:%s:%s", len(payloadStr),
+			func() string {
+				if len(payloadStr) > 0 { return string(payloadStr[0]) }
+				return ""
+			}(),
+			func() string {
+				if len(payloadStr) > 1 { return string(payloadStr[len(payloadStr)-1]) }
+				return ""
+			}())
+
+		msgBus.Send(eventType, payloadStr, sourceLoc, msgPath, "App:emitToFrontend", map[string]interface{}{
+			"event":    eventType,
+			"checksum": checksum,
+			"source":   sourceLoc,
+		})
+	}
+
+	runtime.EventsEmit(a.ctx, eventType, payload)
+
+	fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
+		eventType, msgPath, sourceLoc, len(payloadStr))
 }
 
 // ==================== 日志相关 ====================
@@ -1403,12 +1480,14 @@ func (a *App) ClearMessages() {
 	}
 
 	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
+	a.emitToFrontend("messages-cleared", nil, "ClearMessages", chat.PathSystem)
 }
 
 func (a *App) ResetRoleStatus() {
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()
 	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
+	a.emitToFrontend("messages-cleared", nil, "ResetRoleStatus", chat.PathSystem)
 
 	if a.chatManager != nil {
 		a.chatManager.ResetRoleStatus()
@@ -1431,7 +1510,8 @@ func (a *App) ExecuteReset(reason string) error {
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()
 	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
-	runtime.EventsEmit(a.ctx, "reset-completed", map[string]string{"reason": reason})
+	a.emitToFrontend("messages-cleared", nil, "ExecuteReset", chat.PathSystem)
+	a.emitToFrontend("reset-completed", map[string]string{"reason": reason}, "ExecuteReset", chat.PathSystem)
 	a.addLog("✅ 已执行复位: " + reason)
 	return nil
 }
@@ -2007,7 +2087,7 @@ func (a *App) InstallEnv(tool string) (map[string]interface{}, error) {
 			"tool":   tool,
 			"status": "failed",
 			"error":  errMsg,
-		}, fmt.Errorf(errMsg)
+		}, fmt.Errorf("%s", errMsg)
 	}
 
 	verifyResult := a.checkEnv(tool)
@@ -2810,7 +2890,7 @@ func (a *App) GetGlobalTasks() string {
 // EmitTaskClarify 发送需求澄清请求到前端（触发 TaskClarify 组件）
 func (a *App) EmitTaskClarify(questionsJSON string) {
 	a.addLog(fmt.Sprintf("[EmitTaskClarify] 发送澄清请求: %s", questionsJSON))
-	runtime.EventsEmit(a.ctx, "task-clarify", questionsJSON)
+	a.emitToFrontend("task-clarify", questionsJSON, "EmitTaskClarify", chat.PathPMToUser)
 }
 
 // CheckUnfinishedTask 检查是否有未完成任务（前端启动时调用）
@@ -2876,7 +2956,7 @@ func (a *App) StopCurrentTask() error {
 		return fmt.Errorf("ChatManager 未初始化")
 	}
 	a.aiThinking = false
-	runtime.EventsEmit(a.ctx, "ai-thinking", false)
+	a.emitToFrontend("ai-thinking", false, "StopCurrentTask", chat.PathSystem)
 	a.chatManager.StopCurrentTask()
 	a.chatManager.SetUserStopped(true)
 	a.addLog("🛑 用户手动停止当前任务")
@@ -2941,11 +3021,9 @@ func (a *App) SendMessage(content string) error {
 			a.addLog(errMsg)
 			a.messages = append(a.messages, a.newChatMessage("error", errMsg))
 			a.saveMessages()
-			if a.ctx != nil {
-				lastMsg := a.messages[len(a.messages)-1]
-				runtime.EventsEmit(a.ctx, "new-message", lastMsg)
-			}
-			return fmt.Errorf(errMsg)
+			lastMsg := a.messages[len(a.messages)-1]
+			a.emitToFrontend("new-message", lastMsg, "SendMessage:NoAPIKey", chat.PathSystem)
+			return fmt.Errorf("%s", errMsg)
 		}
 	}
 
@@ -2967,7 +3045,7 @@ func (a *App) SendMessage(content string) error {
 		if strings.TrimSpace(content) == "" {
 			fmt.Printf("[SendMessage] Step 5: 空消息，停止AI\n")
 			a.aiThinking = false
-			runtime.EventsEmit(a.ctx, "ai-thinking", false)
+			a.emitToFrontend("ai-thinking", false, "SendMessage:Stop", chat.PathSystem)
 
 			if a.chatManager != nil {
 				a.chatManager.SetUserStopped(true)
@@ -2982,51 +3060,52 @@ func (a *App) SendMessage(content string) error {
 			a.sendToDingTalk(fmt.Sprintf("[USR] %s", content))
 		}
 
-		a.addLog("【SendMessage】准备处理消息（同步方式）")
+		a.addLog("【SendMessage】准备处理消息（V2 ArgusCore）")
 		a.aiThinking = true
-		runtime.EventsEmit(a.ctx, "ai-thinking", true)
+		a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathUserInput)
 
-		fmt.Printf("[SendMessage] 同步调用 ProcessMessage: %s\n", content)
-		response, err := a.chatManager.ProcessMessage(content)
-		fmt.Printf("[SendMessage] ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
-		a.addLog(fmt.Sprintf("【SendMessage】ProcessMessage 返回: err=%v, response_len=%d", err, len(response)))
+		a.msgIDCounter++
+		userMsg := a.newChatMessage("user", content)
+		userMsg.ID = a.msgIDCounter
+		a.messages = append(a.messages, userMsg)
+		a.saveMessages()
+		a.emitToFrontend("new-message", userMsg, "SendMessage:UserInput", chat.PathUserInput)
 
-		if err != nil {
-			a.addLog(fmt.Sprintf("【SendMessage】处理失败: %v", err))
-			errorMsg := a.newChatMessage("error", fmt.Sprintf("错误: %v", err))
-			errorMsg.Summary = "System"
-			a.messages = append(a.messages, errorMsg)
-			a.saveMessages()
-			a.writeDebugLog(fmt.Sprintf("[SendMessage] ERROR_EMIT err=%v", err))
-			runtime.EventsEmit(a.ctx, "new-message", errorMsg)
+		if a.bridge != nil {
+			fmt.Printf("[SendMessage] 🚀 V2 Bridge.Process: %s\n", content)
+			result, err := a.bridge.Process(content)
+			fmt.Printf("[SendMessage] V2 返回: success=%v err=%v phases=%d\n",
+				result.Success, err, len(result.Phases))
 
-			// 发送错误消息到钉钉
-			a.sendToDingTalk(fmt.Sprintf("[ERR] %v", err))
+			if err != nil {
+				a.addLog(fmt.Sprintf("【V2-Error】%v", err))
+				errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v", err))
+				errorMsg.Summary = "System"
+				a.messages = append(a.messages, errorMsg)
+				a.saveMessages()
+				a.emitToFrontend("new-message", errorMsg, "SendMessage:V2Error", chat.PathSystem)
+			} else {
+				a.addLog(fmt.Sprintf("【V2-Done】success=%v actions=%d duration=%v",
+					result.Success, len(result.Actions), result.Duration))
+			}
 		} else {
-			// 注意：不在这里添加消息！
-			// 消息已通过 chatManager.onMessageAdded callback 添加到 app.messages
-			// 这里只负责发送钉钉通知
+			fmt.Printf("[SendMessage] ⚠️ Bridge未初始化，fallback到V1\n")
+			response, err := a.chatManager.ProcessMessage(content)
+			fmt.Printf("[SendMessage] V1 ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
 
-			// 发送AI回复到钉钉，带着角色
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("[DingTalk-Notify] 💥 panic recovered: %v\n", r)
-					}
-				}()
-				role := a.chatManager.GetCurrentRole()
-				roleLabel := "PM"
-				if role == "se" {
-					roleLabel = "SE"
-				} else if role == "mc" {
-					roleLabel = "MC"
-				}
-				a.sendToDingTalk(fmt.Sprintf("[%s] %s", roleLabel, response))
-			}()
+			if err != nil {
+				a.addLog(fmt.Sprintf("【V1-Error】处理失败: %v", err))
+				errorMsg := a.newChatMessage("error", fmt.Sprintf("错误: %v", err))
+				errorMsg.Summary = "System"
+				a.messages = append(a.messages, errorMsg)
+				a.saveMessages()
+				a.emitToFrontend("new-message", errorMsg, "SendMessage:V1Error", chat.PathSystem)
+				a.sendToDingTalk(fmt.Sprintf("[ERR] %v", err))
+			}
 		}
 
 		a.aiThinking = false
-		runtime.EventsEmit(a.ctx, "ai-thinking", false)
+		a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
 
 		return nil
 	}
@@ -3045,17 +3124,19 @@ func (a *App) sendMessageLegacy(content string) error {
 	userMsg := a.newChatMessage("user", content)
 	a.messages = append(a.messages, userMsg)
 	a.saveMessages()
-
-	runtime.EventsEmit(a.ctx, "new-message", userMsg)
+	a.emitToFrontend("new-message", userMsg, "Legacy:UserMsg", chat.PathUserInput)
 
 	a.aiThinking = true
+	a.emitToFrontend("ai-thinking", true, "Legacy:Start", chat.PathUserInput)
 	if a.chatManager != nil {
 		go func() {
 			a.chatManager.ProcessMessage(content)
 			a.aiThinking = false
+			a.emitToFrontend("ai-thinking", false, "Legacy:Done", chat.PathSystem)
 		}()
 	} else {
 		a.aiThinking = false
+		a.emitToFrontend("ai-thinking", false, "Legacy:NoMgr", chat.PathSystem)
 		a.addErrorMessage("ChatManager未初始化，无法处理消息")
 	}
 
@@ -3068,11 +3149,8 @@ func (a *App) addPMMessage(content string) {
 	aiMsg.Summary = "PM"
 	a.messages = append(a.messages, aiMsg)
 	a.saveMessages()
+	a.emitToFrontend("new-message", aiMsg, "addPMMsg", chat.PathPMToUser)
 
-	// 主动推送消息到前端
-	runtime.EventsEmit(a.ctx, "new-message", aiMsg)
-
-	// 发送AI回复到钉钉
 	a.sendToDingTalk(fmt.Sprintf("[PM] %s", content))
 }
 
@@ -3082,11 +3160,8 @@ func (a *App) addSEMessage(content string) {
 	aiMsg.Summary = "SE"
 	a.messages = append(a.messages, aiMsg)
 	a.saveMessages()
+	a.emitToFrontend("new-message", aiMsg, "addSEMsg", chat.PathSEToUser)
 
-	// 主动推送消息到前端
-	runtime.EventsEmit(a.ctx, "new-message", aiMsg)
-
-	// 发送SE回复到钉钉
 	a.sendToDingTalk(fmt.Sprintf("[SE] %s", content))
 }
 
@@ -3236,10 +3311,7 @@ func (a *App) addErrorMessage(errorMsg string) {
 	errMsg.Error = errorMsg
 	a.messages = append(a.messages, errMsg)
 	a.saveMessages()
-	if a.ctx != nil {
-		runtime.EventsEmit(a.ctx, "new-message", errMsg)
-	}
-	// 发送错误消息到钉钉
+	a.emitToFrontend("new-message", errMsg, "addError", chat.PathSystem)
 	a.sendToDingTalk(fmt.Sprintf("[ERR] %s", errorMsg))
 }
 
@@ -3538,5 +3610,5 @@ func (a *App) SetTerminalEncoding(enc string) error {
 }
 
 func (a *App) emitTerminalOutput(output string) {
-	runtime.EventsEmit(a.ctx, "terminal:output", output)
+	a.emitToFrontend("terminal:output", output, "Terminal", chat.PathSEExec)
 }

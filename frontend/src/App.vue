@@ -309,7 +309,7 @@ onMounted(async () => {
     id: Date.now(),
     role: 'system',
     content: '🧪 **前端渲染测试** - 如果您看到此消息，说明Vue渲染系统正常工作！\n\n时间: ' + new Date().toLocaleString(),
-    timestamp: new Date().toISOString()
+    timestamp: Math.floor(Date.now() / 1000)
   })
   console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
 
@@ -606,7 +606,7 @@ onMounted(async () => {
       id: Date.now(),
       role: 'system',
       content: errorMsg,
-      timestamp: new Date().toISOString(),
+      timestamp: Math.floor(Date.now() / 1000),
       _isError: true
     })
 
@@ -630,7 +630,7 @@ onMounted(async () => {
       id: Date.now(),
       role: 'system',
       content: `⚠️ **SE正在执行任务中，请等待完成后再发送新指令。**\n\n当前任务: ${warningMsg}\n来源: ${from}`,
-      timestamp: new Date().toISOString(),
+      timestamp: Math.floor(Date.now() / 1000),
       _isWarning: true
     })
     
@@ -645,6 +645,35 @@ onMounted(async () => {
     aiThinking.value = true
   })
 
+  // [V2] 角色状态同步 - 戴帽子→亮灯
+  EventsOn('role-status', (data: { _msgId?: string; [key: string]: any }) => {
+    ackMessage(data._msgId || '')
+    const statusStr = typeof data === 'string' ? data : (data.delta || data.content || '')
+    console.log('[V2-Status]', statusStr)
+
+    if (typeof statusStr === 'string' && statusStr.includes('role:')) {
+      const roleMatch = statusStr.match(/role:(\w+)/)
+      const statusMatch = statusStr.match(/status:(\w+)/)
+      if (roleMatch && statusMatch) {
+        const role = roleMatch[1]
+        const status = statusMatch[1]
+        if (role === 'pm') {
+          aiStatus.pmStatus = status === 'busy' ? 'busy' : 'idle'
+        } else if (role === 'se') {
+          aiStatus.seStatus = status === 'busy' ? 'busy' : 'idle'
+        } else if (role === 'ap') {
+          aiStatus.apStatus = status === 'busy' ? 'busy' : 'idle'
+        }
+        if (role !== 'none') {
+          aiThinking.value = status === 'busy'
+        } else {
+          aiThinking.value = false
+        }
+        console.log(`[V2-Status] ${role} → ${status}`)
+      }
+    }
+  })
+
   EventsOn('se_task_assigned', (data: { task?: string; steps?: number; _msgId?: string }) => {
     ackMessage(data._msgId || '')
   })
@@ -656,7 +685,7 @@ onMounted(async () => {
       id: Date.now(),
       role: 'system',
       content: `❌ **错误** (${data.stage || 'unknown'})\n${data.error || '未知错误'}`,
-      timestamp: new Date().toISOString(),
+      timestamp: Math.floor(Date.now() / 1000),
       _isError: true
     })
   })
@@ -1130,7 +1159,7 @@ async function handleOpenFileInEditor(data: { path: string }) {
     EventsEmit('editor:open-file', {
       path: data.path,
       content: content,
-      timestamp: new Date().toISOString()
+      timestamp: Math.floor(Date.now() / 1000)
     })
   } catch (error) {
     console.error('[App] 读取文件失败:', error)
@@ -1145,7 +1174,7 @@ function handleRunInTerminal(data: { command: string }) {
   
   EventsEmit('terminal:execute', {
     command: data.command,
-    timestamp: new Date().toISOString()
+    timestamp: Math.floor(Date.now() / 1000)
   })
 }
 

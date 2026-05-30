@@ -21,6 +21,8 @@ const (
 	PathAPToUser    MessagePath = "ap_to_user"      // AP→用户（AP审批结果）
 	PathUserInput   MessagePath = "user_input"      // 用户输入（new-message）
 	PathSystem      MessagePath = "system"          // 系统消息（错误/状态）
+	PathCoreOutput  MessagePath = "core_output"     // V2 ArgusCore输出（Bridge统一推送）
+	PathStatus      MessagePath = "status"          // V2 状态同步（PM/SE/AP灯 + 阶段切换）
 )
 
 // MessageTag 消息标签（包含路径+校验信息）
@@ -116,24 +118,28 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 
 	msgId := mb.generateMsgId(role, eventName, tag)
 
-	pending := &PendingMessage{
-		MsgId:      msgId,
-		Role:       role,
-		Content:    content,
-		EventName:  eventName,
-		Tag:        tag,
-		SentAt:     now,
-		RetryCount: 0,
-	}
+	needTracking := mb.shouldTrack(path)
 
-	mb.mu.Lock()
-	mb.pendingQueue[msgId] = pending
-	mb.mu.Unlock()
+	if needTracking {
+		pending := &PendingMessage{
+			MsgId:      msgId,
+			Role:       role,
+			Content:    content,
+			EventName:  eventName,
+			Tag:        tag,
+			SentAt:     now,
+			RetryCount: 0,
+		}
+
+		mb.mu.Lock()
+		mb.pendingQueue[msgId] = pending
+		mb.mu.Unlock()
+	}
 
 	if mb.ctx == nil {
 		return msgId
 	}
-	
+
 	enrichedData := map[string]interface{}{
 		"_msgId":    msgId,
 		"_role":     role,
@@ -142,8 +148,9 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 		"_seqNum":   tag.SeqNum,
 		"_sentAt":   tag.Timestamp,
 		"_source":   sourceLoc,
+		"_tracked":  needTracking,
 	}
-	
+
 	if m, ok := data.(map[string]interface{}); ok {
 		for k, v := range m {
 			enrichedData[k] = v
@@ -151,13 +158,30 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	} else if data != nil {
 		enrichedData["data"] = data
 	}
-	
+
 	runtime.EventsEmit(mb.ctx, eventName, enrichedData)
-	
-	fmt.Printf("[💧MSG] 送出 id=%s role=%s event=%s path=%s checksum=%s len=%d source=%s\n",
-		msgId, role, eventName, path, tag.Checksum, len(content), sourceLoc)
-	
+
+	trackingMark := ""
+	if needTracking {
+		trackingMark = "⏳"
+	} else {
+		trackingMark = "📢(no-track)"
+	}
+	fmt.Printf("[💧MSG%s] id=%s role=%s event=%s path=%s len=%d source=%s\n",
+		trackingMark, msgId, role, eventName, path, len(content), sourceLoc)
+
 	return msgId
+}
+
+// shouldTrack 判断该消息是否需要ACK追踪
+// 只有通过Bridge发出的聊天回复需要追踪，UI事件不需要
+func (mb *MessageBus) shouldTrack(path MessagePath) bool {
+	switch path {
+	case PathCoreOutput:
+		return true
+	default:
+		return false
+	}
 }
 
 // Ack 前端确认收到
