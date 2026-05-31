@@ -117,6 +117,7 @@ func (mb *MessageBus) generateMsgId(role, eventName string, tag MessageTag) stri
 // Send 强制发送消息（替代所有runtime.EventsEmit）
 func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, sourceLoc string, data interface{}) string {
 	if !mb.enabled {
+		fmt.Printf("[💧MSG] ❌ MessageBus disabled! event=%s\n", eventName)
 		return ""
 	}
 
@@ -150,8 +151,11 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	}
 
 	if mb.ctx == nil {
+		fmt.Printf("[💧MSG] ❌ Context is NULL! event=%s msgId=%s (NOT SENT!)\n", eventName, msgId)
 		return msgId
 	}
+
+	fmt.Printf("[💧MSG] 📡 Emitting to frontend: event=%s msgId=%s path=%s tracked=%v\n", eventName, msgId, path, needTracking)
 
 	enrichedData := map[string]interface{}{
 		"_msgId":    msgId,
@@ -187,13 +191,40 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 }
 
 // shouldTrack 判断该消息是否需要ACK追踪
-// 只有通过Bridge发出的聊天回复需要追踪，UI事件不需要
+// 🎯 核心原则：后端→前端的跨进程通讯必须追踪，确保可靠投递
+// 分类策略：
+//   ✅ MUST_TRACK (后端产生): PathSystem, PathStatus, PathPM/SE/APToUser, PathSEExec
+//   ❌ NO_TRACK (本地/调试): PathCoreOutput (内部日志)
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	switch path {
 	case PathCoreOutput:
+		// 内部调试信息，不需要追踪
 		return false
+
+	case PathSystem:
+		// 🔴 后端系统事件（todo/state/clear）→ 必须追踪！
+		// 这些是后端产生的关键状态更新，前端必须确认收到
+		return true
+
+	case PathStatus:
+		// 🔴 角色状态灯（role-state/role-status）→ 必须追踪！
+		// 高频但重要，前后状态同步的关键
+		return true
+
+	case PathPMToUser, PathSEToUser, PathAPToUser:
+		// 🔴 AI聊天消息 → 必须追踪！
+		// 核心业务数据，不能丢失
+		return true
+
+	case PathSEExec:
+		// 🔴 SE执行结果 → 必须追踪！
+		// 用户需要看到执行输出
+		return true
+
 	default:
-		return false
+		// 未知路径 → 安全起见，追踪
+		fmt.Printf("[⚠️MSG] Unknown path %s, tracking for safety\n", path)
+		return true
 	}
 }
 

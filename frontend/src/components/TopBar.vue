@@ -340,32 +340,41 @@ function handleClickOutside(e: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
-  // 📋 监听TODO更新事件（Message Bus驱动）
+  // 📋 监听TODO更新事件（Message Bus驱动）- 双重监听确保收到
+  const handleTodoUpdate = (data: any) => {
+    console.log('[TopBar📋TODO] Received update:', data)
+    
+    // 兼容多种数据格式
+    let items: TodoItem[] = []
+    if (Array.isArray(data)) {
+      items = data
+    } else if (data && data.items && Array.isArray(data.items)) {
+      items = data.items
+    } else if (data && data.data && data.data.items) {
+      items = data.data.items
+    }
+    
+    console.log('[TopBar📋TODO] Parsed items:', items.length, items)
+    todoList.value = items
+    
+    // 动态更新badge计数
+    const pendingCount = items.filter((t: TodoItem) => t.status === 'pending').length
+    if (pendingCount > 0) {
+      console.log(`[TopBar📋TODO] Updated: ${items.length} tasks, ${pendingCount} pending`)
+    }
+  }
+
+  // 方式1: 直接监听Wails事件
   try {
-    window.runtime.EventsOn('todo_update', (data: any) => {
-      console.log('[📋TODO] Received update:', data)
-      
-      // 兼容多种数据格式
-      let items: TodoItem[] = []
-      if (Array.isArray(data)) {
-        items = data
-      } else if (data && data.items && Array.isArray(data.items)) {
-        items = data.items
-      } else if (data && data.data && data.data.items) {
-        items = data.data.items
-      }
-      
-      todoList.value = items
-      
-      // 动态更新badge计数
-      const pendingCount = items.filter((t: TodoItem) => t.status === 'pending').length
-      if (pendingCount > 0) {
-        console.log(`[📋TODO] Updated: ${items.length} tasks, ${pendingCount} pending`)
-      }
-    })
+    window.runtime.EventsOn('todo_update', handleTodoUpdate)
+    console.log('[TopBar📋TODO] ✅ Registered EventsOn listener')
   } catch (e) {
     console.log('[TopBar] runtime.EventsOn not available (SSR or dev)')
   }
+
+  // 方式2: 注册全局回调（App.vue转发用）
+  ;(window as any).__argusTodoUpdate = handleTodoUpdate
+  console.log('[TopBar📋TODO] ✅ Registered global callback')
 })
 onUnmounted(() => document.removeEventListener('click', handleClickOutside))
 

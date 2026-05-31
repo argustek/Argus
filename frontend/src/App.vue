@@ -313,8 +313,12 @@ onMounted(async () => {
   })
   console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
 
-  // 监听项目状态变更事件
-  EventsOn('project-state-changed', (state: string) => {
+  // 监听项目状态变更事件（后端产生 → 必须ACK）
+  EventsOn('project-state-changed', (data: { state?: string; _msgId?: string }) => {
+    // [🔴追踪] 确认收到后端状态更新
+    ackMessage(data._msgId || '')
+
+    const state = data.state || data as any
     projectState.value = state
     if (state === 'done') {
       aiThinking.value = false
@@ -495,11 +499,28 @@ onMounted(async () => {
     recordReceive('ap', data._msgId || 'ap_' + Date.now(), data.delta, 'ap_message')
   })
 
-  // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）
-  EventsOn('messages-cleared', () => {
+  // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）- 后端产生 → 必须ACK
+  EventsOn('messages-cleared', (data?: { _msgId?: string }) => {
+    // [🔴追踪] 确认收到清空指令
+    ackMessage(data?._msgId || '')
+
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
+  })
+
+  // 📋 [TODO-SYNC] 监听Todo更新事件（Message Bus驱动）- 后端产生 → 必须ACK
+  EventsOn('todo_update', (data: any) => {
+    // [🔴追踪] 确认收到Todo更新
+    ackMessage(data._msgId || '')
+
+    console.log('[App.vue📋TODO] Received raw data:', data)
+    console.log('[App.vue📋TODO] Data type:', typeof data, Array.isArray(data))
+
+    // 转发给TopBar（通过全局事件或直接操作）
+    if (window.__argusTodoUpdate) {
+      window.__argusTodoUpdate(data)
+    }
   })
 
   // 监听SE执行事件（Trae风格：步骤列表+终端输出）
