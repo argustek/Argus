@@ -139,4 +139,4 @@ Date: 2026-05-31
 ---
 
 *Built with ❤️ by the Argus Team*
-*Following the principle: "癞蛤蟆日青蛙——长得丑玩得花" (One actor, multiple roles, brilliant performance)*
+*Following the principle: One actor, multiple roles, brilliant performance*
