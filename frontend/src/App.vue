@@ -314,11 +314,12 @@ onMounted(async () => {
   console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
 
   // 监听项目状态变更事件（后端产生 → 必须ACK）
-  EventsOn('project-state-changed', (data: { state?: string; _msgId?: string }) => {
+  EventsOn('project-state-changed', (data: { state?: string; _msgId?: string; data?: any }) => {
     // [🔴追踪] 确认收到后端状态更新
     ackMessage(data._msgId || '')
 
-    const state = data.state || data as any
+    // 兼容后端发送的两种格式：对象 {state:"done"} 或原始值被包装为 {data:"done"}
+    const state = data.state || data.data || (typeof data === 'string' ? data : null)
     projectState.value = state
     if (state === 'done') {
       aiThinking.value = false
@@ -462,6 +463,7 @@ onMounted(async () => {
   // [G57] 监听PM消息事件 - 统一为AP模式（单一通道，直接push）
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string; _msgId?: string }) => {
+    console.log('[PROBE] 📨 pm_message received:', data.delta?.substring(0, 50), 'msgId:', data._msgId)
     if (!data.delta) return
 
     // [G63] 自动ACK
@@ -474,6 +476,7 @@ onMounted(async () => {
       timestamp: Date.now()
     } as any
     messages.value.push(pmMsg)
+    console.log('[PROBE] ✅ PM pushed! total msgs:', messages.value.length)
     // [G60] 记录收水
     recordReceive('pm', data._msgId || 'pm_' + Date.now(), data.delta, 'pm_message')
   })
@@ -501,12 +504,14 @@ onMounted(async () => {
 
   // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）- 后端产生 → 必须ACK
   EventsOn('messages-cleared', (data?: { _msgId?: string }) => {
+    console.log('[PROBE] 🗑️ messages-cleared! before:', messages.value.length, 'msgId:', data?._msgId)
     // [🔴追踪] 确认收到清空指令
     ackMessage(data?._msgId || '')
 
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
+    console.log('[PROBE] 🗑️ cleared done! after: 0')
   })
 
   // 📋 [TODO-SYNC] 监听Todo更新事件（Message Bus驱动）- 后端产生 → 必须ACK

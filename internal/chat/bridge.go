@@ -24,6 +24,7 @@ type Bridge struct {
 	cancel    context.CancelFunc
 
 	isProcessing bool
+	writeDebugLog func(content string)
 }
 
 func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Bridge {
@@ -75,6 +76,12 @@ func (b *Bridge) SetOnChunk(fn func(delta string)) {
 	b.onChunk = fn
 }
 
+func (b *Bridge) SetDebugLogWriter(fn func(content string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.writeDebugLog = fn
+}
+
 func (b *Bridge) emitStatus(status string) {
 	if b.onMessage != nil {
 		msg := &Message{
@@ -89,6 +96,10 @@ func (b *Bridge) emitStatus(status string) {
 }
 
 func (b *Bridge) onCoreMessage(source, content string) {
+	if b.writeDebugLog != nil && content != "" {
+		role := b.roleFromSource(source)
+		b.writeDebugLog(fmt.Sprintf("%s: %s", strings.ToUpper(role), content))
+	}
 	if b.onMessage != nil && content != "" {
 		parts := strings.Split(source, "_to_")
 		from := parts[0]
@@ -146,7 +157,19 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 
 	b.emitStatus("phase:pm|role:pm|status:busy")
 
+	if b.writeDebugLog != nil {
+		b.writeDebugLog(fmt.Sprintf("USER: %s", userMsg))
+	}
+
 	result := b.argus.Process(userMsg)
+
+	if b.writeDebugLog != nil {
+		if result.Success {
+			b.writeDebugLog(fmt.Sprintf("SYS_C: V2-Done success=%v actions=%d", result.Success, len(result.Actions)))
+		} else if result.Error != nil {
+			b.writeDebugLog(fmt.Sprintf("SYS_C: V2-Error %v", result.Error))
+		}
+	}
 
 	if result.Success {
 		b.emitStatus("phase:done|role:none|status:idle")

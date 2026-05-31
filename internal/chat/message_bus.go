@@ -198,31 +198,27 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	switch path {
 	case PathCoreOutput:
-		// 内部调试信息，不需要追踪
-		return false
+		return true
+
+	case PathPMStream, PathSEStream:
+		return true
+
+	case PathUserInput:
+		return true
 
 	case PathSystem:
-		// 🔴 后端系统事件（todo/state/clear）→ 必须追踪！
-		// 这些是后端产生的关键状态更新，前端必须确认收到
 		return true
 
 	case PathStatus:
-		// 🔴 角色状态灯（role-state/role-status）→ 必须追踪！
-		// 高频但重要，前后状态同步的关键
-		return true
+		return false
 
 	case PathPMToUser, PathSEToUser, PathAPToUser:
-		// 🔴 AI聊天消息 → 必须追踪！
-		// 核心业务数据，不能丢失
 		return true
 
 	case PathSEExec:
-		// 🔴 SE执行结果 → 必须追踪！
-		// 用户需要看到执行输出
 		return true
 
 	default:
-		// 未知路径 → 安全起见，追踪
 		fmt.Printf("[⚠️MSG] Unknown path %s, tracking for safety\n", path)
 		return true
 	}

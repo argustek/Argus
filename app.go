@@ -630,6 +630,7 @@ func (a *App) initChatManager() {
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
 				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
+				a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
 				a.chatManager.GetMessageBus().SetOnStateChange(func(state core.RoleState) {
 					a.emitToFrontend("role-state", state, "MessageBus:State", chat.PathStatus)
 				})
