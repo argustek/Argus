@@ -59,42 +59,49 @@ Argus V2 features a **unified core architecture** with shared memory and role-ba
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Complete Pipeline:** PM Analysis → SE Execution → **PM Code Review** → **AP Final Approval (OA)**
+**Complete Pipeline:** USR Input → PM Analysis → SE Execution → **PM Code Review** → **AP Final Approval (OA)**
+```
 
-### 🎯 Core Advantage: Four-Role AI Collaboration Architecture
-
-Argus employs a **PM (Project Manager) + SE (Software Engineer) + AP (Approver) + C (Monitor)** four-role design that simulates real-world software team workflows:
+**5-Phase Workflow:**
 
 ```
 ┌─────────────────────────────────────────────┐
-│                    👤 User                   │
+│                    👤 USR                    │
 │              (You - Provide Requirements)    │
 └──────────────┬──────────────────────────────┘
                │ Natural Language Input
                ▼
 ┌─────────────────────────────────────────────┐
 │                    🎯 PM                     │
-│         (AI Project Manager)                │
+│         Phase 1: Analyze Requirements       │
 │  • Understands your requirements            │
-│  • Breaks down tasks & delegates to SE       │
-│  • Reviews SE output (Code Review + tools)  │
-│  • Communicates progress with you            │
+│  • Breaks down tasks & plans execution      │
+│  • Communicates plan with you               │
 └──────────────┬──────────────────────────────┘
-               │ Task Assignment + Quality Control
+               │ Task Assignment
                ▼
 ┌─────────────────────────────────────────────┐
 │                    💻 SE                     │
-│        (AI Software Engineer)               │
+│         Phase 2: Execute Code               │
 │  • Generates code                           │
 │  • Writes/edits files                       │
 │  • Executes commands                        │
 │  • Self-testing verification                │
 └──────────────┬──────────────────────────────┘
-               │ Task Complete → PM Review Passed
+               │ SE Complete → Handover to PM
+               ▼
+┌─────────────────────────────────────────────┐
+│                    🎯 PM                     │
+│     Phase 3: Code Review (Second PM Pass)   │
+│  • Reviews SE's work output                 │
+│  • Uses tools to verify correctness         │
+│  • Approves or requests fixes               │
+└──────────────┬──────────────────────────────┘
+               │ PM Review Passed
                ▼
 ┌─────────────────────────────────────────────┐
 │                    🔍 AP                     │
-│         (AI Approver)                       │
+│   Phase 4: Final Approval (OA)              │
 │  • Independent Code Review (uninfluenced)   │
 │  • QA Verification (runs compile/test)      │
 │  • Veto Power (AP says no → task not done)  │
@@ -131,7 +138,7 @@ Argus employs a **PM (Project Manager) + SE (Software Engineer) + AP (Approver) 
 | **Architecture** | 5 independent structs + MessageBus | 1 unified ArgusCore | **80% code reduction** |
 | **Memory** | Independent per role | Shared memory (full context) | **No context loss** |
 | **State Sync** | Polling + message passing | LabVIEW-style push via MessageBus | **Real-time consistency** |
-| **Pipeline** | PM → SE → AP | PM → SE → **PM Review** → **AP OA** | **4-phase quality control** |
+| **Pipeline** | USR→PM→SE→AP | USR→**PM**→SE→**PM Review**→**AP OA** | **5-phase quality control** |
 | **Error Recovery** | Basic retry | 3-layer JSON fallback + panic recovery | **99% parsing success** |
 
 ### ✅ Implemented Capabilities
@@ -482,7 +489,7 @@ argus/
 ### ✅ Version 0.1.0 (Completed)
 - [x] PM/SE/AP/C four-role collaboration architecture
 - [x] AP independent approval + veto power
-- [x] PM→SE→PM Review→AP Approval complete pipeline
+- [x] **USR→PM→SE→PM Review→AP Approval** complete pipeline (5-phase workflow)
 - [x] SSE streaming output
 - [x] Complete state machine management
 - [x] Anti-infinite-loop mechanism
