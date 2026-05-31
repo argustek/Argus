@@ -77,6 +77,7 @@ type ArgusCore struct {
 	executor *executor.Executor
 	memory   *SharedMemory
 	prompts  *PromptKit
+	todo     *TodoManager  // 动态任务列表管理器
 
 	workDir  string
 	language string
@@ -96,11 +97,12 @@ type ArgusCore struct {
 
 func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *ArgusCore {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ArgusCore{
+	core := &ArgusCore{
 		client:     client,
 		executor:   exec,
 		memory:     NewSharedMemory(100),
 		prompts:     NewPromptKit(workDir),
+		todo:       NewTodoManager(),
 		workDir:    workDir,
 		language:   "zh",
 		ctx:        ctx,
@@ -108,6 +110,8 @@ func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *Arg
 		maxRetries: 3,
 		timeout:    120 * time.Second,
 	}
+
+	return core
 }
 
 func (c *ArgusCore) SetLanguage(lang string) {
@@ -174,6 +178,14 @@ func (c *ArgusCore) SetOnStateChange(fn func(RoleState)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onStateChange = fn
+}
+
+func (c *ArgusCore) SetOnTodoUpdate(fn func(TodoEvent)) {
+	c.todo.SetOnUpdate(fn)
+}
+
+func (c *ArgusCore) GetTodoManager() *TodoManager {
+	return c.todo
 }
 
 func (c *ArgusCore) emitChunk(delta string) {
@@ -285,6 +297,17 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		return result
 	}
 
+	// 📋 TODO: PM分析完成，设置初始任务列表
+	c.todo.Clear()
+	c.todo.SetTasks([]string{
+		"PM Analysis: Analyze user requirements",
+		"SE Execution: Write code and run verification",
+		"PM Code Review: Quality check and verification",
+		"AP Final Approval: Security and compliance check",
+	}, "pipeline")
+	c.todo.UpdateByPhase("pipeline", TodoDone) // PM已完成
+	c.todo.MarkCurrentDoing() // 标记SE为doing
+
 	c.emit("pm_to_se", taskDesc)
 	c.emitStatus("execute", "se", "busy")
 
@@ -371,6 +394,10 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.emit("se_to_user", "✅ SE execution completed, submitting for PM review...")
 	c.memory.Add(RoleSE, fmt.Sprintf("SE completed. Actions: %d, Results: %v", len(actions), execResults))
 
+	// 📋 TODO: SE执行完成，标记Review为doing
+	c.todo.CompleteCurrent() // SE done
+	c.todo.MarkCurrentDoing() // Review start
+
 	// --- Phase 2-3 Loop: SE Execution + PM Review with Retry ---
 	maxReviewRetries := 3
 	var reviewResult ReviewResult
@@ -379,6 +406,10 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		if reviewAttempt > 0 {
 			c.emitStatus("se", "se", "busy")
 			c.emit("se_to_user", fmt.Sprintf("🔄 SE Retry #%d (PM Feedback): %s", reviewAttempt, reviewResult.Reason))
+
+			// 📋 TODO: 添加重试任务
+			c.todo.AddTask(fmt.Sprintf("SE Retry #%d: Fix PM feedback", reviewAttempt+1), "se_retry", 1)
+			c.todo.MarkCurrentDoing()
 
 			retryPrompt := fmt.Sprintf(`PM rejected your previous work with this reason:
 %s
@@ -454,6 +485,11 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 
 		if !reviewResult.Rejected {
 			c.emit("pm_review", "✅ PM Review passed!")
+
+			// 📋 TODO: PM Review通过，标记AP为doing
+			c.todo.CompleteCurrent() // Review done
+			c.todo.MarkCurrentDoing() // AP start
+
 			break
 		}
 
@@ -504,6 +540,10 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 
 	c.emit("ap_result", "✅ 交付完成！PM Review + AP Approval 全部通过")
 	c.emitStatus("done", "none", "idle")
+
+	// 📋 TODO: 全部完成
+	c.todo.CompleteCurrent() // AP done - all tasks completed
+
 	result.Success = true
 	return result
 }

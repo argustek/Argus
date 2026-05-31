@@ -54,6 +54,13 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 			bus.EmitState(state)
 		}
 	})
+
+	// 📋 TODO: 连接TodoManager到MessageBus
+	b.argus.SetOnTodoUpdate(func(event core.TodoEvent) {
+		if bus != nil && b.ctx != nil {
+			bus.Send("system", "todo_update", "todo_update", PathSystem, "Bridge:todo", event)
+		}
+	})
 }
 
 func (b *Bridge) SetOnMessage(fn func(msg *Message)) {

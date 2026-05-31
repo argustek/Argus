@@ -340,10 +340,28 @@ function handleClickOutside(e: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
-  // 监听TODO更新事件
+  // 📋 监听TODO更新事件（Message Bus驱动）
   try {
-    window.runtime.EventsOn('todo_update', (data: TodoItem[]) => {
-      todoList.value = data || []
+    window.runtime.EventsOn('todo_update', (data: any) => {
+      console.log('[📋TODO] Received update:', data)
+      
+      // 兼容多种数据格式
+      let items: TodoItem[] = []
+      if (Array.isArray(data)) {
+        items = data
+      } else if (data && data.items && Array.isArray(data.items)) {
+        items = data.items
+      } else if (data && data.data && data.data.items) {
+        items = data.data.items
+      }
+      
+      todoList.value = items
+      
+      // 动态更新badge计数
+      const pendingCount = items.filter((t: TodoItem) => t.status === 'pending').length
+      if (pendingCount > 0) {
+        console.log(`[📋TODO] Updated: ${items.length} tasks, ${pendingCount} pending`)
+      }
     })
   } catch (e) {
     console.log('[TopBar] runtime.EventsOn not available (SSR or dev)')
