@@ -371,41 +371,100 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.emit("se_to_user", "✅ SE execution completed, submitting for PM review...")
 	c.memory.Add(RoleSE, fmt.Sprintf("SE completed. Actions: %d, Results: %v", len(actions), execResults))
 
-	// --- Phase 3: PM Code Review ---
-	c.emitStatus("review", "pm", "busy")
-	c.emit("review_start", "📋 PM reviewing SE's work...")
+	// --- Phase 2-3 Loop: SE Execution + PM Review with Retry ---
+	maxReviewRetries := 3
+	var reviewResult ReviewResult
 
-	reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s",
-		userMsg, actions, execResults, seResponse)
+	for reviewAttempt := 0; reviewAttempt < maxReviewRetries; reviewAttempt++ {
+		if reviewAttempt > 0 {
+			c.emitStatus("se", "se", "busy")
+			c.emit("se_to_user", fmt.Sprintf("🔄 SE Retry #%d (PM Feedback): %s", reviewAttempt, reviewResult.Reason))
 
-	reviewPrompt := fmt.Sprintf("Review the SE's work above. Check code quality, correctness, and completeness.\n\nFiles changed: %v\nExecution results: %v\n\nDecide: approve or reject with specific reasons.",
-		getFilePaths(actions), execResults)
+			retryPrompt := fmt.Sprintf(`PM rejected your previous work with this reason:
+%s
 
-	pmReviewResponse, reviewErr := c.callAIWithPrompt(c.prompts.PMReview, "pm_review", reviewPrompt, reviewCtx)
-	phaseReview := PhaseResult{
-		Phase:  PhaseReview,
-		Role:   RolePM,
-		Input:  reviewPrompt,
-		Output: pmReviewResponse,
-		Raw:    pmReviewResponse,
-	}
-	result.Phases = append(result.Phases, phaseReview)
+Please fix ALL the issues mentioned above and re-execute the task from scratch.
+Make sure to:
+1. Use correct filenames as specified in the original request
+2. Include complete file content (not truncated)
+3. Actually execute verification commands (run, test, etc.)
+4. Verify the output matches expectations
 
-	if reviewErr != nil {
-		c.emit("pm_review", fmt.Sprintf("@USR PM review error: %v (auto-approve)", reviewErr))
-		pmReviewResponse = "auto-approved"
-	} else {
-		c.memory.Add(RolePM, pmReviewResponse)
-	}
+Original user request: %s`, reviewResult.Reason, userMsg)
 
-	reviewResult := c.parseReviewResponse(pmReviewResponse)
-	c.emit("pm_review", reviewResult.DisplayText)
+			seResponse, seErr = c.callAI(RoleSE, retryPrompt, c.memory.FormatForPrompt())
+			if seErr != nil {
+				c.emit("se_to_user", fmt.Sprintf("@USR SE retry failed: %v", seErr))
+				break
+			}
+			c.memory.Add(RoleSE, fmt.Sprintf("SE retry #%d response", reviewAttempt+1))
 
-	if reviewResult.Rejected {
-		c.emit("pm_review", fmt.Sprintf("@SE ❌ PM rejected: %s", reviewResult.Reason))
-		c.emitStatus("error", "pm", "idle")
-		result.Error = fmt.Errorf("PM review rejected: %s", reviewResult.Reason)
-		return result
+			actions, _ = c.parseSEResponse(seResponse)
+			if len(actions) == 0 {
+				c.emit("se_to_user", "@USR SE returned no actions on retry")
+				continue
+			}
+
+			c.emit("se_to_user", fmt.Sprintf("🔧 Re-executing %d operations...", len(actions)))
+			execResults, execErr = c.executeActions(actions)
+			if execErr != nil {
+				c.emit("se_to_user", fmt.Sprintf("⚠️ Retry execution error: %v", execErr))
+				continue
+			}
+			result.Outputs = execResults
+			result.Actions = actions
+			c.emit("se_to_user", "✅ SE retry execution completed")
+		}
+
+		// --- Phase 3: PM Code Review ---
+		c.emitStatus("review", "pm", "busy")
+		if reviewAttempt == 0 {
+			c.emit("review_start", "📋 PM reviewing SE's work...")
+		} else {
+			c.emit("review_start", fmt.Sprintf("📋 PM reviewing SE's retry #%d work...", reviewAttempt+1))
+		}
+
+		reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s\n[Retry Attempt] %d/%d",
+			userMsg, actions, execResults, seResponse, reviewAttempt+1, maxReviewRetries)
+
+		reviewPrompt := fmt.Sprintf("Review the SE's work above. Check code quality, correctness, and completeness.\n\nFiles changed: %v\nExecution results: %v\n\nDecide: approve or reject with specific reasons.",
+			getFilePaths(actions), execResults)
+
+		pmReviewResponse, reviewErr := c.callAIWithPrompt(c.prompts.PMReview, "pm_review", reviewPrompt, reviewCtx)
+		phaseReview := PhaseResult{
+			Phase:  PhaseReview,
+			Role:   RolePM,
+			Input:  reviewPrompt,
+			Output: pmReviewResponse,
+			Raw:    pmReviewResponse,
+		}
+		result.Phases = append(result.Phases, phaseReview)
+
+		if reviewErr != nil {
+			c.emit("pm_review", fmt.Sprintf("@USR PM review error: %v (auto-approve)", reviewErr))
+			pmReviewResponse = "auto-approved"
+			reviewResult = ReviewResult{Approved: true, DisplayText: "@USR 📋 PM Code Review ✅ AUTO-APPROVED (error)"}
+			break
+		} else {
+			c.memory.Add(RolePM, pmReviewResponse)
+		}
+
+		reviewResult = c.parseReviewResponse(pmReviewResponse)
+		c.emit("pm_review", reviewResult.DisplayText)
+
+		if !reviewResult.Rejected {
+			c.emit("pm_review", "✅ PM Review passed!")
+			break
+		}
+
+		c.emit("pm_review", fmt.Sprintf("@SE ❌ PM rejected (attempt %d/%d): %s", reviewAttempt+1, maxReviewRetries, reviewResult.Reason))
+
+		if reviewAttempt == maxReviewRetries-1 {
+			c.emit("error", fmt.Sprintf("V2 Error: PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason))
+			result.Error = fmt.Errorf("PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason)
+			c.emitStatus("error", "pm", "idle")
+			return result
+		}
 	}
 
 	// --- Phase 4: AP Approval (OA) ---
