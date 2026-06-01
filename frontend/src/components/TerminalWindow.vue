@@ -150,8 +150,25 @@ function addLine(text: string) {
   })
 }
 
-function handleOutput(data: string) {
-  outputBuffer += data
+function handleOutput(data: any) {
+  let output = ''
+  if (typeof data === 'string') {
+    output = data
+  } else if (data?.data || data?.delta) {
+    output = data.data || data.delta
+  } else {
+    const clean: Record<string, any> = {}
+    for (const [k, v] of Object.entries(data)) {
+      if (!k.startsWith('_') && k !== 'event' && k !== 'checksum' && k !== 'source' && k !== 'path') {
+        clean[k] = v
+      }
+    }
+    output = Object.keys(clean).length > 0 ? JSON.stringify(clean) : ''
+  }
+  if (data?._msgId) {
+    window.__argusAck?.(data._msgId)
+  }
+  outputBuffer += output
   if (bufferTimer) clearTimeout(bufferTimer)
   bufferTimer = setTimeout(flushBuffer, 30)
 }

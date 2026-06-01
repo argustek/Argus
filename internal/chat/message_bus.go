@@ -68,11 +68,15 @@ type MessageBus struct {
 	lostMessages  []*PendingMessage         // 丢失消息记录
 	mu            sync.RWMutex
 	seqNum        int64                    // 全局序列号生成器
+	lastMsgId     string                   // 最后发送的消息ID
+	frontendReady bool                     // 前端是否就绪（OnDomReady之前不追踪）
 	checkInterval time.Duration            // 检查间隔
 	timeout       time.Duration            // 确认超时
 	enabled       bool                     // 是否启用
 	state         RoleState                // 当前角色状态（后面板控件）
 	onStateChange func(RoleState)          // 状态变更回调
+	streamCounter int64                    // 流式消息计数器（用于分段采样追踪）
+	streamSampleN int                      // 每隔N个chunk追踪一次（默认10）
 }
 
 // NewMessageBus 创建消息总线
@@ -85,6 +89,7 @@ func NewMessageBus(ctx context.Context) *MessageBus {
 		checkInterval: 2 * time.Second,  // 每2秒检查一次
 		timeout:       5 * time.Second,   // 5秒超时
 		enabled:       true,
+		streamSampleN: 10,                // 每10个chunk采样追踪1次
 	}
 	
 	go mb.backgroundChecker()
@@ -190,18 +195,37 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	return msgId
 }
 
+// GetLastMsgId returns the last sent message ID
+func (mb *MessageBus) GetLastMsgId() string {
+	mb.mu.RLock()
+	defer mb.mu.RUnlock()
+	return mb.lastMsgId
+}
+
 // shouldTrack 判断该消息是否需要ACK追踪
 // 🎯 核心原则：后端→前端的跨进程通讯必须追踪，确保可靠投递
+// ⚠️ OnDomReady之前前端未就绪，暂不追踪（等前端就绪后再追踪）
 // 分类策略：
 //   ✅ MUST_TRACK (后端产生): PathSystem, PathStatus, PathPM/SE/APToUser, PathSEExec
 //   ❌ NO_TRACK (本地/调试): PathCoreOutput (内部日志)
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
+	mb.mu.RLock()
+	ready := mb.frontendReady
+	mb.mu.RUnlock()
+	if !ready {
+		return false
+	}
+
 	switch path {
 	case PathCoreOutput:
 		return true
 
 	case PathPMStream, PathSEStream:
-		return true
+		mb.mu.Lock()
+		mb.streamCounter++
+		count := mb.streamCounter
+		mb.mu.Unlock()
+		return count % int64(mb.streamSampleN) == 0
 
 	case PathUserInput:
 		return true
@@ -222,6 +246,14 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 		fmt.Printf("[⚠️MSG] Unknown path %s, tracking for safety\n", path)
 		return true
 	}
+}
+
+// SetFrontendReady marks the frontend as ready, enabling message ACK tracking
+func (mb *MessageBus) SetFrontendReady() {
+	mb.mu.Lock()
+	mb.frontendReady = true
+	mb.mu.Unlock()
+	fmt.Println("[💧MSG] 🟢 Frontend ready, ACK tracking enabled")
 }
 
 // Ack 前端确认收到
@@ -368,13 +400,13 @@ func (mb *MessageBus) Clear() {
 // EmitState 推送角色状态变更（后面板→前面板）
 func (mb *MessageBus) EmitState(state RoleState) {
 	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
 	state.UpdatedAt = time.Now().UnixMilli()
 	mb.state = state
+	onStateChange := mb.onStateChange
+	mb.mu.Unlock()
 
-	if mb.onStateChange != nil {
-		mb.onStateChange(state)
+	if onStateChange != nil {
+		onStateChange(state)
 	}
 
 	fmt.Printf("[📊STATE] phase=%s pm=%s se=%s ap=%s mc=%v task=%q\n",

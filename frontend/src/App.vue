@@ -269,6 +269,7 @@ function ackMessage(msgId: string) {
     ;(window as any).go.main.App.AckMessage(msgId)
   } catch(e) { /* 静默失败 */ }
 }
+;(window as any).__argusAck = ackMessage
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
 const showSettings = ref(false)
 
@@ -602,7 +603,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('pm_review_completed', (data: { taskId: string; status: string; result: string }) => {
+  EventsOn('pm_review_completed', (data: { taskId: string; status: string; result: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const pmMsgs = messages.value.filter(m => m.role === 'pm')
     for (const msg of pmMsgs) {
       if ((msg as any)._streaming) {
@@ -740,8 +742,15 @@ onMounted(async () => {
     streamingRole.value = ''
   })
 
+  EventsOn('ai-thinking', (data: boolean | { _msgId?: string }) => {
+    const msgId = (data as any)?._msgId
+    if (msgId) ackMessage(msgId)
+    aiThinking = typeof data === 'boolean' ? data : !!data
+  })
+
   // 监听 AP approved 事件，清空消息防止旧任务显示
-  EventsOn('project_approved', (data: { timestamp: number; action: string }) => {
+  EventsOn('project_approved', (data: { timestamp: number; action: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
@@ -754,7 +763,10 @@ onMounted(async () => {
     })
   })
 
-  EventsOn('se-file-written', async (relPath: string) => {
+  EventsOn('se-file-written', async (data: string | { _msgId?: string; path?: string }) => {
+    const msgId = (data as any)?._msgId
+    if (msgId) ackMessage(msgId)
+    const relPath = typeof data === 'string' ? data : data?.path || ''
     try {
       const { OpenFileLocation } = await import('../wailsjs/go/main/App')
       await OpenFileLocation(relPath)
@@ -764,7 +776,8 @@ onMounted(async () => {
   })
 
   // 监听任务恢复事件（记忆持久化功能）
-  EventsOn('task-recovered', async (data: { userRequest: string; taskDescription: string; messageCount: number }) => {
+  EventsOn('task-recovered', async (data: { userRequest: string; taskDescription: string; messageCount: number; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     if (config.value.pmDecisionAlert) {
       showSystemTrayNotification(
         '🔄 发现未完成任务',
@@ -788,7 +801,8 @@ onMounted(async () => {
   })
 
   // === 三层模型事件监听 ===
-  EventsOn('tasklist_start', (data: { roleId: string; taskId: string; title: string; tasks: Array<{id:string;text:string;status:string}> }) => {
+  EventsOn('tasklist_start', (data: { roleId: string; taskId: string; title: string; tasks: Array<{id:string;text:string;status:string}>; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     console.log('[RichMessage] tasklist_start:', data)
     window.__richMessages = window.__richMessages || {}
     window.__richMessages[data.taskId] = {
@@ -802,7 +816,8 @@ onMounted(async () => {
     EventsEmit('rich-message-update', data.taskId)
   })
   
-  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string; detail?: string }) => {
+  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string; detail?: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const rm = window.__richMessages?.[data.taskId]
     if (rm?.taskList) {
       const t = rm.taskList.tasks[data.taskIndex]
@@ -817,7 +832,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('tasklist_replace', (data: { taskId: string; tasks: Array<{id:string;text:string;status:string}> }) => {
+  EventsOn('tasklist_replace', (data: { taskId: string; tasks: Array<{id:string;text:string;status:string}>; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const rm = window.__richMessages?.[data.taskId]
     if (rm?.taskList) {
       rm.taskList.tasks = data.tasks.map(t => ({ ...t }))
@@ -825,7 +841,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('tasklist_complete', (data: { taskId: string; status: string; result?: { text?: string } }) => {
+  EventsOn('tasklist_complete', (data: { taskId: string; status: string; result?: { text?: string }; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const rm = window.__richMessages?.[data.taskId]
     if (rm) {
       rm.taskList.status = data.status
@@ -837,7 +854,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('shell_start', (data: { roleId: string; taskId: string; taskIndex: number; type: string; command: string; extra?: Record<string,string> }) => {
+  EventsOn('shell_start', (data: { roleId: string; taskId: string; taskIndex: number; type: string; command: string; extra?: Record<string,string>; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const rm = window.__richMessages?.[data.taskId]
     if (rm) {
       rm.shells.push({
@@ -849,7 +867,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('shell_output', (data: { taskId: string; output: string }) => {
+  EventsOn('shell_output', (data: { taskId: string; output: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     const rm = window.__richMessages?.[data.taskId]
     if (rm && rm.shells.length > 0) {
       const lastShell = rm.shells[rm.shells.length - 1]
@@ -858,7 +877,8 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('shell_done', (data: { roleId: string; taskId: string; exitCode: number; duration: string; status: string }) => {
+  EventsOn('shell_done', (data: { roleId: string; taskId: string; exitCode: number; duration: string; status: string; _msgId?: string }) => {
+    ackMessage(data._msgId || '')
     console.log('[shell_done] 收到事件:', JSON.stringify(data))
     const rm = window.__richMessages?.[data.taskId]
     console.log('[shell_done] rm存在:', !!rm, 'shells数量:', rm?.shells?.length)

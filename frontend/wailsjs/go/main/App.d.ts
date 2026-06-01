@@ -169,6 +169,8 @@ export function ParseTestResult(arg1:string):Promise<main.TestResult>;
 
 export function ReadFile(arg1:string):Promise<string>;
 
+export function Ready():Promise<void>;
+
 export function RecordReceive(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function RecoverTask():Promise<Array<main.ChatMessage>>;

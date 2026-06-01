@@ -666,12 +666,6 @@ func (a *App) initChatManager() {
 			}
 		})
 
-		a.bridge.SetOnChunk(func(delta string) {
-			if delta != "" {
-				a.emitToFrontend("ai-chunk", delta, "Bridge:Chunk", chat.PathPMStream)
-			}
-		})
-
 		a.addLog("【V2 Bridge】✅ ArgusCore 已初始化 (全链路走MessageBus+校验)")
 		}
 	}
@@ -798,7 +792,7 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 				return ""
 			}())
 
-		msgBus.Send(eventType, payloadStr, sourceLoc, msgPath, "App:emitToFrontend", func() map[string]interface{} {
+		msgBus.Send(eventType, payloadStr, eventType, msgPath, "App:emitToFrontend", func() map[string]interface{} {
 			merged := map[string]interface{}{
 				"event":    eventType,
 				"checksum": checksum,
@@ -812,14 +806,14 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 			}
 			return merged
 		}())
+	} else {
+		var finalPayload interface{}
+		json.Unmarshal([]byte(payloadStr), &finalPayload)
+		if finalPayload == nil {
+			finalPayload = payload
+		}
+		runtime.EventsEmit(a.ctx, eventType, finalPayload)
 	}
-
-	var finalPayload interface{}
-	json.Unmarshal([]byte(payloadStr), &finalPayload)
-	if finalPayload == nil {
-		finalPayload = payload
-	}
-	runtime.EventsEmit(a.ctx, eventType, finalPayload)
 
 	fmt.Printf("[emit→Frontend] ✅ %s | path=%s | src=%s | size=%d\n",
 		eventType, msgPath, sourceLoc, len(payloadStr))
@@ -840,7 +834,8 @@ func (a *App) addLog(message string) {
 	fmt.Println(logEntry)
 
 	// 同时写入文件，方便调试
-	logFile := filepath.Join(a.getConfigDir(), "..", "argus.log")
+	logFile := filepath.Join(a.getConfigDir(), "..", "logs", "argus.log")
+	os.MkdirAll(filepath.Dir(logFile), 0755)
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("[addLog Error] 无法打开日志文件: %v\n", err)
@@ -885,6 +880,13 @@ func (a *App) GetConfig() Config {
 func (a *App) RecordReceive(role, messageID, content, source string) {
 	if a.chatManager != nil {
 		a.chatManager.RecordReceive(role, messageID, content, source)
+	}
+}
+
+// Ready marks the app as frontend-ready, enabling message ACK tracking
+func (a *App) Ready() {
+	if a.chatManager != nil && a.chatManager.GetMessageBus() != nil {
+		a.chatManager.GetMessageBus().SetFrontendReady()
 	}
 }
 
@@ -3128,7 +3130,14 @@ func (a *App) SendMessage(content string) error {
 
 			if err != nil {
 				a.addLog(fmt.Sprintf("【V2-Error】%v", err))
-				errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v", err))
+				detail := ""
+				if len(result.Outputs) > 0 { detail = strings.Join(result.Outputs, "\n") }
+				if len(result.Phases) > 0 {
+					for _, p := range result.Phases {
+						if p.Output != "" { detail += "\n---\n" + p.Output }
+					}
+				}
+				errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v\n\n%s", err, detail))
 				errorMsg.Summary = "System"
 				a.messages = append(a.messages, errorMsg)
 				a.saveMessages()

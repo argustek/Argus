@@ -330,6 +330,10 @@ export function ReadFile(arg1) {
   return window['go']['main']['App']['ReadFile'](arg1);
 }
 
+export function Ready() {
+  return window['go']['main']['App']['Ready']();
+}
+
 export function RecordReceive(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['RecordReceive'](arg1, arg2, arg3, arg4);
 }

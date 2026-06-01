@@ -111,6 +111,11 @@ func main() {
 			fmt.Println("🌐 [1] OnDomReady CALLBACK - WebView2 已就绪")
 			writeExitLog(fmt.Sprintf("[%s] [WEBVIEW] WebView2 加载完成\n", time.Now().Format("2006-01-02 15:04:05")))
 
+			go func() {
+				time.Sleep(1500 * time.Millisecond)
+				app.Ready()
+			}()
+
 			if len(os.Args) > 1 && os.Args[1] == "--send" && len(os.Args) > 2 {
 				msg := strings.Join(os.Args[2:], " ")
 				fmt.Printf("[FirstInstance] OnDomReady 发送消息: %s\n", msg)
