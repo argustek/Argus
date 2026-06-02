@@ -622,13 +622,19 @@ onMounted(async () => {
   const seenLostMsgIds = new Set<string>()
 
   // [G63] MessageBus: 监听消息丢失事件（后端检测到超时未ACK）
-  EventsOn('message_lost', (data: { msgId: string; role: string; event: string; path: string; source: string; elapsedSec: number; isNewLoss?: boolean }) => {
+  EventsOn('message_lost', (data: { msgId: string; role: string; event: string; path: string; source: string; elapsedSec: number; isNewLoss?: boolean; direction?: string; contentPreview?: string; contentLen?: number }) => {
     console.error(`[🚨MSG] 消息丢失! id=${data.msgId} role=${data.role} path=${data.path} source=${data.source} 等待${data.elapsedSec?.toFixed(1)}s`)
 
     if (seenLostMsgIds.has(data.msgId)) return
     seenLostMsgIds.add(data.msgId)
 
-    const errorMsg = `🚨 **消息丢失** (${data.role?.toUpperCase()}/${data.event})\n路径: ${data.path} | 来源: ${data.source} | 等待: ${data.elapsedSec?.toFixed(1)}s`
+    const errorMsg = `🚨 **消息丢失** (${data.event?.toUpperCase()}/${data.event})
+方向: ${data.direction || '未知'}
+发送者: ${data.source}
+路径: ${data.path}
+等待: ${data.elapsedSec?.toFixed(1)}s
+大小: ${data.contentLen || 0} bytes
+预览: ${data.contentPreview?.substring(0, 60) || '(无)'}`
 
     messages.value.push({
       id: Date.now(),

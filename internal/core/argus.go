@@ -85,6 +85,7 @@ type ArgusCore struct {
 	onMessage      func(source, content string)
 	onChunk        func(delta string)
 	onStateChange  func(RoleState)
+	onActionEvent  func(eventName string, data interface{})
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -142,6 +143,10 @@ func (c *ArgusCore) Cancel() {
 	if c.cancel != nil {
 		c.cancel()
 	}
+}
+
+func (c *ArgusCore) SetOnActionEvent(fn func(eventName string, data interface{})) {
+	c.onActionEvent = fn
 }
 
 func (c *ArgusCore) emit(source, content string) {
@@ -367,15 +372,29 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	if execErr != nil {
 		result.Error = fmt.Errorf("execution failed: %w", execErr)
 
-		fixPrompt := c.prompts.GetFix(execErr.Error(), seResponse)
-		fixResponse, fixErr := c.callAI(RoleSE, fixPrompt, c.memory.FormatForPrompt())
-		if fixErr == nil {
+		maxFixRetries := 3
+		for fixAttempt := 0; fixAttempt < maxFixRetries; fixAttempt++ {
+			c.emit("se_to_user", fmt.Sprintf("🔧 自动修复 #%d/%d: %v", fixAttempt+1, maxFixRetries, execErr))
+
+			fixPrompt := strings.Replace(c.prompts.GetFix(execErr.Error(), seResponse), "%%USER_REQUEST%%", userMsg, 1)
+			fixResponse, fixErr := c.callAI(RoleSE, fixPrompt, c.memory.FormatForPrompt())
+			if fixErr != nil {
+				c.emit("se_to_user", fmt.Sprintf("⚠️ 修复调用失败: %v", fixErr))
+				continue
+			}
+
 			fixActions, _ := c.parseSEResponse(fixResponse)
-			if len(fixActions) > 0 {
-				execResults, execErr = c.executeActions(fixActions)
-				if execErr == nil {
-					result.Error = nil
-				}
+			if len(fixActions) == 0 {
+				c.emit("se_to_user", "⚠️ AI 未返回修复操作")
+				continue
+			}
+
+			c.emit("se_to_user", fmt.Sprintf("🔧 执行修复操作 %d 个...", len(fixActions)))
+			execResults, execErr = c.executeActions(fixActions)
+			if execErr == nil {
+				c.emit("se_to_user", "✅ 自动修复成功！")
+				result.Error = nil
+				break
 			}
 		}
 	}
@@ -438,12 +457,12 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 
 			c.emit("se_to_user", fmt.Sprintf("🔧 Re-executing %d operations...", len(actions)))
 			execResults, execErr = c.executeActions(actions)
+			result.Outputs = execResults
+			result.Actions = actions
 			if execErr != nil {
 				c.emit("se_to_user", fmt.Sprintf("⚠️ Retry execution error: %v", execErr))
 				continue
 			}
-			result.Outputs = execResults
-			result.Actions = actions
 			c.emit("se_to_user", "✅ SE retry execution completed")
 		}
 
@@ -458,8 +477,26 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 		reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s\n[Retry Attempt] %d/%d",
 			userMsg, actions, execResults, seResponse, reviewAttempt+1, maxReviewRetries)
 
-		reviewPrompt := fmt.Sprintf("Review the SE's work above. Check code quality, correctness, and completeness.\n\nFiles changed: %v\nExecution results: %v\n\nDecide: approve or reject with specific reasons.",
-			getFilePaths(actions), execResults)
+		reviewPrompt := fmt.Sprintf(`Review the SE's work above. Check code quality, correctness, and completeness.
+
+Files changed: %v
+
+=== EXECUTION RESULTS ===
+%s
+
+=== REVIEW RULES ===
+1. If user asked to RUN/EXECUTE a program, SE MUST include exec action with actual run command
+2. If any execution shows error/failed, you MUST REJECT
+3. Check that outputs match expectations (e.g., "Hello World" should appear)
+4. Incomplete work (write only without run) must be REJECTED when user requested execution
+
+Decide: approve or reject with specific reasons.`,
+			getFilePaths(actions), func() string {
+				if execErr != nil {
+					return fmt.Sprintf("❌ EXECUTION FAILED: %v\nOutputs:\n%v", execErr, execResults)
+				}
+				return fmt.Sprintf("✅ Outputs:\n%v", execResults)
+			}())
 
 		pmReviewResponse, reviewErr := c.callAIWithPrompt(c.prompts.PMReview, "pm_review", reviewPrompt, reviewCtx)
 		phaseReview := PhaseResult{
@@ -504,12 +541,35 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 	}
 
 	// --- Phase 4: AP Approval (OA) ---
+	execSummary := strings.Join(execResults, "\n")
+	if execErr != nil {
+		execSummary += fmt.Sprintf("\n❌ EXECUTION ERROR: %v", execErr)
+	} else {
+		execSummary += "\n✅ All actions executed successfully"
+	}
+
 	c.emitStatus("approve", "ap", "busy")
 	c.emit("ap_start", "🔒 AP final approval...")
 
 	apCtx := c.memory.FormatForPrompt()
-	apPrompt := fmt.Sprintf("Final approval for task: %s\nSE executed %d actions successfully.\nPM review approved.\n\nPerform final quality and security check. Approve or reject.",
-		userMsg, len(actions))
+	apPrompt := fmt.Sprintf(`Final approval for task: %s
+
+SE executed %d actions.
+PM review approved.
+
+=== REAL EXECUTION RESULTS ===
+%s
+
+=== ACTION DETAILS ===
+%v
+
+IMPORTANT: Check the execution results above carefully!
+- If any action shows "error" or "failed", you MUST REJECT
+- If execution output shows errors (syntax error, command not found, etc.), you MUST REJECT
+- Only approve if ALL actions succeeded AND outputs are correct
+
+Perform final quality and security check. Approve or reject with reasons.`,
+		userMsg, len(actions), execSummary, actions)
 
 	apResponse, apErr := c.callAI(RoleAP, apPrompt, apCtx)
 	phaseAP := PhaseResult{
@@ -863,8 +923,29 @@ func findMatchingBracket(s string) int {
 func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 	outputs := make([]string, 0, len(actions))
 
+	c.emitAction("exec_start", map[string]interface{}{
+		"executor": "se",
+		"total":    len(actions),
+	})
+
 	for i, action := range actions {
 		fmt.Printf("[Core:Exec] Action %d/%d: type=%s\n", i+1, len(actions), action.Type)
+
+		label := action.Command
+		if label == "" {
+			label = action.Path
+		}
+		if label == "" {
+			label = action.Type
+		}
+
+		c.emitAction("exec_start", map[string]interface{}{
+			"executor": "se",
+			"index":    i + 1,
+			"total":    len(actions),
+			"type":     action.Type,
+			"label":    label,
+		})
 
 		var output string
 		var err error
@@ -884,6 +965,12 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 			} else {
 				output = fmt.Sprintf("✅ exec '%s'\n%s", action.Command, output)
 			}
+			c.emitAction("exec_output", map[string]interface{}{
+				"executor": "se",
+				"command":  action.Command,
+				"output":   output,
+				"exit_code": 0,
+			})
 		case "edit_file":
 			_, err = c.executor.EditFile(action.Path, action.OldStr, action.NewStr)
 			if err == nil {
@@ -906,6 +993,21 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 			output = fmt.Sprintf("❌ unknown action: %s", action.Type)
 		}
 
+		status := "done"
+		if err != nil {
+			status = "error"
+		}
+
+		c.emitAction("exec_done", map[string]interface{}{
+			"executor": "se",
+			"index":    i + 1,
+			"total":    len(actions),
+			"type":     action.Type,
+			"label":    label,
+			"status":   status,
+			"error":    func() string { if err != nil { return err.Error() }; return "" }(),
+		})
+
 		outputs = append(outputs, output)
 		c.emit("se_to_user", output)
 
@@ -914,7 +1016,15 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		}
 	}
 
+	c.emitAction("exec_completed", map[string]interface{}{})
+
 	return outputs, nil
+}
+
+func (c *ArgusCore) emitAction(eventName string, data interface{}) {
+	if c.onActionEvent != nil {
+		c.onActionEvent(eventName, data)
+	}
 }
 
 func (c *ArgusCore) extractDisplayText(response string) string {

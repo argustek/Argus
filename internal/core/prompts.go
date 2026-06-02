@@ -69,13 +69,34 @@ APPROVAL FORMAT:
 
 MAX 3 tool calls per review. Keep it efficient.`
 
-	FixPrompt = `Previous execution failed. Fix the issue and retry.
+	FixPrompt = `⚠️ EXECUTION FAILED - AUTO-REPAIR MODE
 
-Error: %s
-Last action that failed: %s
+=== ERROR DETAILS ===
+%s
 
-Generate corrected actions JSON. Focus on fixing the specific error.
-Output only: {"actions":[...]}`
+=== YOUR LAST ACTION (that failed) ===
+%s
+
+=== ORIGINAL USER REQUEST ===
+%%USER_REQUEST%%
+
+=== REPAIR INSTRUCTIONS ===
+You are in AUTO-REPAIR mode. The execution failed and you MUST fix it yourself.
+
+Analyze the error carefully:
+1. If it's a syntax error → fix the code (missing import, wrong syntax, etc.)
+2. If it's a "command not found" → check the command spelling
+3. If it's a compilation error → fix the source code
+4. If it's a runtime error → adjust the approach
+
+CRITICAL RULES:
+- You MUST include ALL necessary imports (fmt, os, etc.)
+- You MUST write COMPLETE file content (not truncated)
+- You MUST include an exec action to RUN/TEST your code
+- Verify the output matches user expectations
+
+Generate corrected actions JSON:
+{"actions":[{"type":"write_file","path":"...","content":"..."},{"type":"exec","command":"..."}]}`
 
 	PMReviewPrompt = `You are Argus Project Manager performing Code Review. Evaluate SE's work output STRICTLY.
 

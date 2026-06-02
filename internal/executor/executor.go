@@ -17,6 +17,7 @@ import (
 
 	"argus/internal/board"
 	"argus/internal/types"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type Executor struct {
@@ -179,7 +180,7 @@ func (e *Executor) checkPythonSyntax(filePath string) string {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		lines := strings.Split(string(output), "\n")
+		lines := strings.Split(toUTF8(output), "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
 			if line != "" && !strings.HasPrefix(line, "py_compile") {
@@ -617,7 +618,7 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 	}
 
 	output, err := cmd.CombinedOutput()
-	outputStr := string(output)
+	outputStr := toUTF8(output)
 	fmt.Printf("[Executor] Output length: %d, err: %v\n", len(outputStr), err)
 
 	if e.terminalOutput != nil {
@@ -666,7 +667,7 @@ func (e *Executor) execServerCommand(command string) (string, error) {
 	output, _ := checkCmd.CombinedOutput()
 
 	if len(output) > 0 {
-		return fmt.Sprintf("Server started successfully on port 8080\n%s", string(output)), nil
+		return fmt.Sprintf("Server started successfully on port 8080\n%s", toUTF8(output)), nil
 	}
 
 	return "Server started (verification pending)", nil
@@ -856,7 +857,7 @@ func (e *Executor) GitOperation(action, message string, args []string) (*GitResu
 
 	cmd.Dir = workDir
 	output, err := cmd.CombinedOutput()
-	result.Output = strings.TrimSpace(string(output))
+	result.Output = strings.TrimSpace(toUTF8(output))
 
 	if err != nil {
 		result.ExitCode = 1
@@ -1025,7 +1026,7 @@ func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = e.workDir
 	output, err := cmd.CombinedOutput()
-	report.Output = strings.TrimSpace(string(output))
+	report.Output = strings.TrimSpace(toUTF8(output))
 
 	if err != nil {
 		fmt.Printf("[Executor] RunTests ❌ exit=%d\n", 1)
@@ -1219,7 +1220,7 @@ func (e *Executor) ExecuteWithRetry(name string, args []string, config *RetryCon
 		cmd := exec.Command(name, args...)
 		cmd.Dir = e.workDir
 		output, err := cmd.CombinedOutput()
-		outputStr := strings.TrimSpace(string(output))
+		outputStr := strings.TrimSpace(toUTF8(output))
 
 		attemptRecord := RetryAttempt{
 			Attempt: attempt,
@@ -2061,4 +2062,62 @@ func containsStr(slice []string, s string) bool {
 		if item == s { return true }
 	}
 	return false
+}
+
+func toUTF8(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if isValidUTF8(raw) {
+		return string(raw)
+	}
+	decoder := simplifiedchinese.GBK.NewDecoder()
+	result, err := decoder.Bytes(raw)
+	if err != nil {
+		return string(raw)
+	}
+	return string(result)
+}
+
+func isValidUTF8(b []byte) bool {
+	for i := 0; i < len(b); {
+		if b[i] < 0x80 {
+			i++
+			continue
+		}
+		_, size := decodeUTF8Rune(b[i:])
+		if size == 0 {
+			return false
+		}
+		i += size
+	}
+	return true
+}
+
+func decodeUTF8Rune(b []byte) (rune, int) {
+	if len(b) == 0 {
+		return 0, 0
+	}
+	lead := b[0]
+	switch {
+	case lead < 0x80:
+		return rune(lead), 1
+	case lead < 0xC0:
+		return 0, 0
+	case lead < 0xE0:
+		if len(b) < 2 || b[1]&0xC0 != 0x80 {
+			return 0, 0
+		}
+		return rune(b[0]&0x1F)<<6 | rune(b[1]&0x3F), 2
+	case lead < 0xF0:
+		if len(b) < 3 || b[1]&0xC0 != 0x80 || b[2]&0xC0 != 0x80 {
+			return 0, 0
+		}
+		return rune(b[0]&0x0F)<<12 | rune(b[1]&0x3F)<<6 | rune(b[2]&0x3F), 3
+	default:
+		if len(b) < 4 || b[1]&0xC0 != 0x80 || b[2]&0xC0 != 0x80 || b[3]&0xC0 != 0x80 {
+			return 0, 0
+		}
+		return rune(b[0]&0x07)<<18 | rune(b[1]&0x3F)<<12 | rune(b[2]&0x3F)<<6 | rune(b[3]&0x3F), 4
+	}
 }

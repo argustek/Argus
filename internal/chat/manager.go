@@ -2704,44 +2704,112 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		if err := m.executeSEActions(resp.Actions); err != nil {
 			fmt.Printf("[PROBE-startSETask] ❌ executeSEActions失败: %v (耗时:%s)\n",
 				err, time.Now().Format("15:04:05.000"))
-			// 执行失败，通知SE，让SE决定如何处理
-			failMsg := fmt.Sprintf("执行失败: %v", err)
-			m.seProcessor.AddResult(failMsg)
 
-			// ⚠️ [FIX] 恢复API调用前必须设置新context（原context已被seCancel()取消）
-			retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
-			m.seProcessor.SetContext(retryCtx)
+			maxFixRetries := 3
+			var fixErr error = err
+			for fixAttempt := 0; fixAttempt < maxFixRetries; fixAttempt++ {
+				fmt.Printf("[AUTO-FIX] 🔧 自动修复 #%d/%d: %v\n", fixAttempt+1, maxFixRetries, fixErr)
+				m.emitStreamChunk("se", fmt.Sprintf("🔧 **自动修复 #%d/%d**: %v\n", fixAttempt+1, maxFixRetries, fixErr))
 
-			// SE处理失败情况，可能需要问PM
-			resp2, err2 := m.seProcessor.ProcessTaskStream("上述执行失败，请分析原因并决定下一步", func(delta string) {
-				m.cMonitor.UpdateSeChunkTime()
-				m.emitStreamChunk("se", delta)
-			})
-			retryCancel()
-			if err2 != nil {
-				m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+				fixPrompt := fmt.Sprintf(`⚠️ EXECUTION FAILED - AUTO-REPAIR MODE (attempt %d/%d)
 
-				m.boardManager.UpdateTask(i18n.T("msg.task_se_recover_failed"), 0)
+=== ERROR DETAILS ===
+%v
 
-				errMsg := fmt.Sprintf(i18n.T("err.se_recover_failed"), err2, err)
-				m.addSEToPMMsg(errMsg)
-				if m.onProjectStateChanged != nil {
-					m.onProjectStateChanged("error")
+=== YOUR LAST ACTIONS THAT FAILED ===
+%v
+
+=== REPAIR INSTRUCTIONS ===
+The execution failed. You MUST fix it yourself and retry.
+
+Analyze the error carefully:
+1. If syntax error (undefined, missing import) → fix the code completely
+2. If command not found → check spelling  
+3. If compilation error → rewrite the source file correctly
+
+CRITICAL RULES:
+- You MUST include ALL necessary imports (fmt, os, strings, etc.)
+- You MUST write COMPLETE file content (not truncated)
+- You MUST include an exec action to RUN and VERIFY your code
+- Do NOT just analyze - you must FIX and RETRY
+
+Generate corrected actions JSON:
+{"actions":[{"type":"write_file","path":"...","content":"..."},{"type":"exec","command":"..."}]}`, fixAttempt+1, maxFixRetries, fixErr, resp.Actions)
+
+				retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
+				m.seProcessor.SetContext(retryCtx)
+
+				respFix, fixProcErr := m.seProcessor.ProcessTaskStream(fixPrompt, func(delta string) {
+					m.cMonitor.UpdateSeChunkTime()
+					m.emitStreamChunk("se", delta)
+				})
+				retryCancel()
+
+				if fixProcErr != nil {
+					fmt.Printf("[AUTO-FIX] ⚠️ 修复调用失败: %v\n", fixProcErr)
+					m.emitStreamChunk("se", fmt.Sprintf("⚠️ 修复调用失败: %v\n", fixProcErr))
+					continue
 				}
-				return fmt.Errorf("SE process failed after action error: %w", err2)
+
+				if len(respFix.Actions) == 0 {
+					fmt.Println("[AUTO-FIX] ⚠️ AI 未返回修复操作")
+					m.emitStreamChunk("se", "⚠️ AI 未返回修复操作，尝试让SE自行处理...\n")
+					break
+				}
+
+				fmt.Printf("[AUTO-FIX] 🔧 执行修复操作 %d 个...\n", len(respFix.Actions))
+				m.emitStreamChunk("se", fmt.Sprintf("🔧 执行修复操作 %d 个...\n", len(respFix.Actions)))
+
+				if fixErr = m.executeSEActions(respFix.Actions); fixErr == nil {
+					fmt.Println("[AUTO-FIX] ✅ 自动修复成功！")
+					m.emitStreamChunk("se", "**✅ 自动修复成功！**\n")
+
+					resp.Actions = append(resp.Actions, respFix.Actions...)
+					if respFix.Content != "" {
+						resp.Content += "\n" + respFix.Content
+					}
+					err = nil
+					break
+				}
 			}
 
-			// 添加SE回复到历史（自动加@PM）
-			m.addSEToPMMsg(resp2.Content)
+			if err != nil {
+				failMsg := fmt.Sprintf("执行失败(已尝试%d次自动修复): %v", maxFixRetries, err)
+				m.seProcessor.AddResult(failMsg)
 
-			// 检查SE是否需要PM帮助
-			if resp2.NeedHelp {
-				fmt.Println("[System] SE needs help after failure, asking PM...")
-				return m.handleSEAskPM(resp2.Content)
+				retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
+				m.seProcessor.SetContext(retryCtx)
+
+				resp2, err2 := m.seProcessor.ProcessTaskStream(failMsg+"\\n请分析原因并决定下一步", func(delta string) {
+					m.cMonitor.UpdateSeChunkTime()
+					m.emitStreamChunk("se", delta)
+				})
+				retryCancel()
+				if err2 != nil {
+					m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
+
+					m.boardManager.UpdateTask(i18n.T("msg.task_se_recover_failed"), 0)
+
+					errMsg := fmt.Sprintf(i18n.T("err.se_recover_failed"), err2, err)
+					m.addSEToPMMsg(errMsg)
+					if m.onProjectStateChanged != nil {
+						m.onProjectStateChanged("error")
+					}
+					return fmt.Errorf("SE process failed after action error: %w", err2)
+				}
+
+				// 添加SE回复到历史（自动加@PM）
+				m.addSEToPMMsg(resp2.Content)
+
+				// 检查SE是否需要PM帮助
+				if resp2.NeedHelp {
+					fmt.Println("[System] SE needs help after failure, asking PM...")
+					return m.handleSEAskPM(resp2.Content)
+				}
+
+				// SE自己继续处理
+				return m.continueSETask()
 			}
-
-			// SE自己继续处理
-			return m.continueSETask()
 		}
 
 		// 如果执行成功但没有completed

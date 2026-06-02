@@ -206,8 +206,9 @@ func (mb *MessageBus) GetLastMsgId() string {
 // 🎯 核心原则：后端→前端的跨进程通讯必须追踪，确保可靠投递
 // ⚠️ OnDomReady之前前端未就绪，暂不追踪（等前端就绪后再追踪）
 // 分类策略：
-//   ✅ MUST_TRACK (后端产生): PathSystem, PathStatus, PathPM/SE/APToUser, PathSEExec
-//   ❌ NO_TRACK (本地/调试): PathCoreOutput (内部日志)
+//   ✅ MUST_TRACK: PathSystem, PathUserInput, PathPM/SE/APToUser, PathSEExec
+//   ❌ NO_TRACK: PathCoreOutput (高频内部通道), PathStatus (状态同步)
+//   📊 SAMPLE: PathPMStream, PathSEStream (流式消息采样追踪)
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	mb.mu.RLock()
 	ready := mb.frontendReady
@@ -218,7 +219,7 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 
 	switch path {
 	case PathCoreOutput:
-		return true
+		return false
 
 	case PathPMStream, PathSEStream:
 		mb.mu.Lock()
@@ -309,17 +310,24 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 		isTimeout := elapsed > mb.timeout
 		isNewLoss := isTimeout && pending.RetryCount == 0
 
+		contentPreview := pending.Content
+		if len(contentPreview) > 80 {
+			contentPreview = contentPreview[:80] + "..."
+		}
+
 		item := map[string]interface{}{
-			"msgId":      msgId,
-			"role":       pending.Role,
-			"event":      pending.EventName,
-			"path":       pending.Tag.Path,
-			"source":     pending.Tag.SourceLoc,
-			"sendedAt":   pending.SentAt.Format("15:04:05.000"),
-			"elapsedSec": elapsed.Seconds(),
-			"contentLen": len(pending.Content),
-			"isTimeout":  isTimeout,
-			"isNewLoss":  isNewLoss,
+			"msgId":          msgId,
+			"role":           pending.Role,
+			"event":          pending.EventName,
+			"path":           pending.Tag.Path,
+			"source":         pending.Tag.SourceLoc,
+			"direction":      "后端→前端",
+			"sendedAt":       pending.SentAt.Format("15:04:05.000"),
+			"elapsedSec":     elapsed.Seconds(),
+			"contentLen":     len(pending.Content),
+			"contentPreview": contentPreview,
+			"isTimeout":      isTimeout,
+			"isNewLoss":      isNewLoss,
 		}
 		pendingList = append(pendingList, item)
 
