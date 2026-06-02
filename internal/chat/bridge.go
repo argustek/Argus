@@ -62,6 +62,13 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 			bus.Send("system", "todo_update", "todo_update", PathSystem, "Bridge:todo", event)
 		}
 	})
+
+	// Action events (exec_start/done/output/completed) → MessageBus
+	b.argus.SetOnActionEvent(func(eventName string, data interface{}) {
+		if bus != nil && b.ctx != nil {
+			bus.Send("se", eventName, eventName, PathSEExec, "Bridge:action:"+eventName, data)
+		}
+	})
 }
 
 func (b *Bridge) SetOnMessage(fn func(msg *Message)) {

@@ -799,10 +799,12 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 				"source":   sourceLoc,
 			}
 			var parsed map[string]interface{}
-			if json.Unmarshal([]byte(payloadStr), &parsed) == nil {
+			if json.Unmarshal([]byte(payloadStr), &parsed) == nil && len(parsed) > 0 {
 				for k, v := range parsed {
 					merged[k] = v
 				}
+			} else {
+				merged["data"] = payload
 			}
 			return merged
 		}())
