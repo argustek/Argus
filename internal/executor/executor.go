@@ -605,6 +605,12 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 		return e.execServerCommand(command)
 	}
 
+	if e.workDir == "" {
+		e.workDir = "."
+	}
+
+	command = e.sanitizeCommandPath(command)
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -633,6 +639,79 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 	}
 
 	return outputStr, nil
+}
+
+// Pre-compiled regexes for sanitizeCommandPath (avoid recompiling on every call)
+var (
+	reCDPath      = regexp.MustCompile(`(?i)^cd\s+["']?([^"'\s]+)["']?`)
+	reGoTestFile  = regexp.MustCompile(`(?i)go\s+test\s+(?:-v\s+)?(?:-run\s+\S+\s+)?(\S+\.go)`)
+	reGoRun       = regexp.MustCompile(`(?i)(go run|python|node)\s+(.+)$`)
+	reBadPath     = regexp.MustCompile(`(?i)["']?(F:\\\\GithubArgus|F:/GithubArgus|C:\\\\GithubArgus|C:/GithubArgus)`)
+
+	// Known file extensions for run commands
+	runExts = map[string]bool{".go": true, ".py": true, ".js": true, ".ts": true}
+)
+
+func (e *Executor) sanitizeCommandPath(command string) string {
+	originalCmd := command
+
+	// Fix "cd:" → "cd "
+	command = strings.ReplaceAll(command, "cd:", "cd ")
+	command = strings.ReplaceAll(command, "CD:", "CD ")
+
+	// Fix cd to non-existent path
+	if m := reCDPath.FindStringSubmatch(command); len(m) >= 2 {
+		target := strings.ReplaceAll(m[1], "/", "\\")
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(e.workDir, target)
+		}
+		if abs, err := filepath.Abs(target); err == nil {
+			if _, statErr := os.Stat(abs); os.IsNotExist(statErr) {
+				fmt.Printf("[Executor] cd path not found: %s -> using workDir\n", target)
+				command = "cd " + e.workDir
+			}
+		}
+	}
+
+	// Fix "go test file.go" → "go run file.go"
+	if m := reGoTestFile.FindStringSubmatch(command); len(m) >= 2 {
+		if !strings.HasSuffix(m[1], "_test.go") {
+			fmt.Printf("[Executor] go test on non-test file %s -> go run\n", m[1])
+			command = strings.Replace(command, "go test", "go run", 1)
+		}
+	}
+
+	// Fix absolute paths in run commands → relative
+	if m := reGoRun.FindStringSubmatch(command); len(m) >= 3 {
+		args := m[2]
+		fields := strings.Fields(args)
+		for i, f := range fields {
+			ext := filepath.Ext(f)
+			if runExts[ext] && filepath.IsAbs(f) {
+				base := filepath.Base(f)
+				correct := filepath.Join(e.workDir, base)
+				if f != correct {
+					fmt.Printf("[Executor] Absolute path corrected: %s -> %s\n", f, correct)
+					fields[i] = correct
+				}
+			}
+		}
+		if m[1]+" "+strings.Join(fields, " ") != command {
+			command = m[1] + " " + strings.Join(fields, " ")
+		}
+	}
+
+	// Fix hallucinated paths like F:/GithubArgus
+	if reBadPath.MatchString(command) {
+		fmt.Printf("[Executor] Hallucinated path detected! Replacing with workDir\n")
+		command = reBadPath.ReplaceAllString(command, e.workDir)
+	}
+
+	if command != originalCmd {
+		fmt.Printf("[Executor] Command sanitized:\n  BEFORE: %s\n  AFTER:  %s\n", originalCmd, command)
+	}
+
+	return command
 }
 
 func isServerCommand(command string) bool {

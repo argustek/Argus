@@ -296,7 +296,6 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.emit("pm_to_user", displayText)
 
 	if !isProgramming {
-		c.emit("pm_to_user", displayText)
 		c.emitStatus("done", "none", "idle")
 		result.Success = true
 		return result
@@ -337,6 +336,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.memory.Add(RoleSE, seResponse)
 
 	actions, completed := c.parseSEResponse(seResponse)
+	actions = c.ensureExecAction(actions)
 
 	if completed {
 		c.emit("se_to_user", fmt.Sprintf("@PM ✅ %s", c.extractCompletedSummary(seResponse)))
@@ -354,6 +354,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 				continue
 			}
 			actions, completed = c.parseSEResponse(seResponse)
+			actions = c.ensureExecAction(actions)
 			if len(actions) > 0 || completed {
 				break
 			}
@@ -369,34 +370,124 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.emit("se_to_user", fmt.Sprintf("🔧 执行 %d 个操作...", len(actions)))
 
 	execResults, execErr := c.executeActions(actions)
-	if execErr != nil {
-		result.Error = fmt.Errorf("execution failed: %w", execErr)
 
-		maxFixRetries := 3
-		for fixAttempt := 0; fixAttempt < maxFixRetries; fixAttempt++ {
-			c.emit("se_to_user", fmt.Sprintf("🔧 自动修复 #%d/%d: %v", fixAttempt+1, maxFixRetries, execErr))
-
-			fixPrompt := strings.Replace(c.prompts.GetFix(execErr.Error(), seResponse), "%%USER_REQUEST%%", userMsg, 1)
-			fixResponse, fixErr := c.callAI(RoleSE, fixPrompt, c.memory.FormatForPrompt())
-			if fixErr != nil {
-				c.emit("se_to_user", fmt.Sprintf("⚠️ 修复调用失败: %v", fixErr))
-				continue
+	maxSelfFix := 5
+	for selfAttempt := 0; selfAttempt <= maxSelfFix; selfAttempt++ {
+		if execErr == nil && c.seExecutionSatisfied(execResults) {
+			if selfAttempt > 0 {
+				c.emit("se_to_user", fmt.Sprintf("✅ SE 自我修正成功！(第%d次尝试)", selfAttempt))
 			}
-
-			fixActions, _ := c.parseSEResponse(fixResponse)
-			if len(fixActions) == 0 {
-				c.emit("se_to_user", "⚠️ AI 未返回修复操作")
-				continue
-			}
-
-			c.emit("se_to_user", fmt.Sprintf("🔧 执行修复操作 %d 个...", len(fixActions)))
-			execResults, execErr = c.executeActions(fixActions)
-			if execErr == nil {
-				c.emit("se_to_user", "✅ 自动修复成功！")
-				result.Error = nil
-				break
-			}
+			break
 		}
+
+		if selfAttempt >= maxSelfFix {
+			if execErr != nil {
+				result.Error = fmt.Errorf("execution failed after %d attempts: %w", maxSelfFix, execErr)
+			} else {
+				result.Error = fmt.Errorf("SE execution incomplete after %d attempts: missing verification output", maxSelfFix)
+			}
+			break
+		}
+
+		feedbackErr := "<no error>"
+		if execErr != nil {
+			feedbackErr = execErr.Error()
+		}
+		c.emit("se_to_user", fmt.Sprintf("🔄 SE Self-Fix #%d/%d: %s", selfAttempt+1, maxSelfFix, feedbackErr))
+
+		var feedbackPrompt string
+		switch selfAttempt {
+		case 0:
+			feedbackPrompt = fmt.Sprintf(`⚠️ EXECUTION FAILED - FIX REQUIRED
+
+Error: %s
+
+Your Actions:
+%v
+
+Results:
+%v
+
+Task: %s
+
+COMMON FIXES:
+- Syntax error? Rewrite the COMPLETE file with correct Go syntax
+- Missing exec? Add {"type":"exec","command":"go run filename.go"}
+- Wrong path? Use relative path only (just filename, not full path)
+
+Output corrected JSON:
+{"actions":[...]}`, feedbackErr, actions, execResults, userMsg)
+		case 1:
+			feedbackPrompt = fmt.Sprintf(`❌ STILL FAILING - LOOK CAREFULLY AT THE ERROR
+
+Error: %s
+
+Your LAST attempt FAILED with same/similar error.
+Read the error message carefully and fix EXACTLY what it says.
+
+Actions you tried:
+%v
+
+Execution output:
+%v
+
+Task: %s
+
+SPECIFIC GUIDANCE:
+- "cd:" error → Use "cd " (with space) or just use "go run file.go" directly
+- "go test x.go" on non-_test.go file → Use "go run x.go" instead
+- "path not found" → Use ONLY filename, no directory path
+- "syntax error" → Your code has a bug. Write COMPLETE correct code.
+
+Working directory is already set. Just use: go run filename.go
+
+Output CORRECTED JSON:
+{"actions":[{"type":"write_file","path":"FILENAME.go","content":"package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello World\")\n}"},{"type":"exec","command":"go run FILENAME.go"}]}`,
+				feedbackErr, actions, execResults, userMsg)
+		default:
+			errorAnalysis := c.analyzeExecError(feedbackErr)
+			feedbackPrompt = fmt.Sprintf(`🔴 REPEATED FAILURE #%d - FOLLOW THE EXACT FIX BELOW
+
+Error: %s
+
+Analysis: %s
+
+You have tried %d times and KEEP MAKING THE SAME MISTAKE.
+Stop guessing. Follow these EXACT instructions:
+
+1. For write_file: ALWAYS include complete valid code
+   package main
+   import "fmt"
+   func main() { fmt.Println("Hello World") }
+
+2. For exec: ALWAYS use format: go run filename.go
+   NEVER use: cd anything, F:\GithubArgus, go test on non-test files
+
+3. Working dir is already set. Use RELATIVE filenames only.
+
+Task: %s
+
+Output ONLY this exact JSON structure:
+{"actions":[{"type":"write_file","path":"FILENAME.go","content":"COMPLETE VALID GO CODE"},{"type":"exec","command":"go run FILENAME.go"}]}`,
+				selfAttempt+1, feedbackErr, errorAnalysis, selfAttempt+1, userMsg)
+		}
+
+		seResponse, seErr = c.callAI(RoleSE, feedbackPrompt, c.memory.FormatForPrompt())
+		if seErr != nil {
+			c.emit("se_to_user", fmt.Sprintf("⚠️ Self-fix call failed: %v", seErr))
+			continue
+		}
+		c.memory.Add(RoleSE, fmt.Sprintf("SE self-fix #%d", selfAttempt+1))
+
+		actions, _ = c.parseSEResponse(seResponse)
+		actions = c.ensureExecAction(actions)
+		if len(actions) == 0 {
+			c.emit("se_to_user", "⚠️ SE returned no actions on self-fix")
+			continue
+		}
+
+		c.emit("se_to_user", fmt.Sprintf("🔧 重新执行 %d 个操作...", len(actions)))
+		execResults, execErr = c.executeActions(actions)
 	}
 
 	result.Outputs = execResults
@@ -418,7 +509,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.todo.MarkCurrentDoing() // Review start
 
 	// --- Phase 2-3 Loop: SE Execution + PM Review with Retry ---
-	maxReviewRetries := 3
+	maxReviewRetries := 2
 	var reviewResult ReviewResult
 
 	for reviewAttempt := 0; reviewAttempt < maxReviewRetries; reviewAttempt++ {
@@ -450,9 +541,12 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 			c.memory.Add(RoleSE, fmt.Sprintf("SE retry #%d response", reviewAttempt+1))
 
 			actions, _ = c.parseSEResponse(seResponse)
+			actions = c.ensureExecAction(actions)
 			if len(actions) == 0 {
-				c.emit("se_to_user", "@USR SE returned no actions on retry")
-				continue
+				c.emit("se_to_user", "@USR ⚠️ SE returned no actions on retry - marking as failed")
+				reviewResult.Rejected = true
+				reviewResult.Reason = "SE returned empty actions - unable to fix"
+				break
 			}
 
 			c.emit("se_to_user", fmt.Sprintf("🔧 Re-executing %d operations...", len(actions)))
@@ -591,10 +685,135 @@ Perform final quality and security check. Approve or reject with reasons.`,
 	apResult := c.parseAPResponse(apResponse)
 	c.emit("ap_result", apResult.DisplayText)
 
+	maxAPRetries := 1
+	for apAttempt := 0; apAttempt <= maxAPRetries; apAttempt++ {
+		if apResult.Rejected {
+			if apAttempt >= maxAPRetries {
+				c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected (final): %s", apResult.Reason))
+				c.emitStatus("error", "ap", "idle")
+				result.Error = fmt.Errorf("AP rejected: %s", apResult.Reason)
+				return result
+			}
+
+			c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected #%d/%d: %s", apAttempt+1, maxAPRetries, apResult.Reason))
+			c.emitStatus("se", "se", "busy")
+			c.emit("se_to_user", fmt.Sprintf("🔄 SE AP-Fix #%d: %s", apAttempt+1, apResult.Reason))
+
+			apFixPrompt := fmt.Sprintf(`AP FINAL APPROVAL REJECTED - CRITICAL FIX REQUIRED
+
+Rejection Reason:
+%s
+
+Your previous work was reviewed by PM (approved) but rejected by AP.
+This means your code has security, quality, or compliance issues.
+
+Previous Actions:
+%v
+
+Execution Results:
+%v
+
+Original User Request: %s
+
+FIX THE SPECIFIC ISSUE MENTIONED IN REJECTION:
+- If syntax/compile error: rewrite file completely with correct code
+- If missing verification: add exec action and verify output
+- If quality issue: improve code structure and completeness
+
+CRITICAL RULES:
+1. Complete file content with ALL imports (package main, import "fmt")
+2. Correct filename from original request
+3. Include exec action to RUN and VERIFY
+4. Output must show expected result
+
+Generate corrected actions JSON:
+{"actions":[{"type":"write_file","path":"CORRECT_FILENAME","content":"COMPLETE CORRECT CODE"},{"type":"exec","command":"run verification"}]}`, apResult.Reason, actions, execResults, userMsg)
+
+			seResponse, seErr = c.callAI(RoleSE, apFixPrompt, c.memory.FormatForPrompt())
+			if seErr != nil {
+				c.emit("se_to_user", fmt.Sprintf("@USR SE AP-fix failed: %v", seErr))
+				continue
+			}
+			c.memory.Add(RoleSE, fmt.Sprintf("SE AP-fix #%d response", apAttempt+1))
+
+			actions, _ = c.parseSEResponse(seResponse)
+			actions = c.ensureExecAction(actions)
+			if len(actions) == 0 {
+				c.emit("se_to_user", "@USR ⚠️ SE returned no actions on AP-fix - marking as failed")
+				apResult.Rejected = true
+				apResult.Reason = "SE returned empty actions - unable to fix AP feedback"
+				break
+			}
+
+			c.emit("se_to_user", fmt.Sprintf("🔧 执行AP修复 %d 个操作...", len(actions)))
+			execResults, execErr = c.executeActions(actions)
+			result.Outputs = execResults
+			result.Actions = actions
+			if execErr != nil {
+				c.emit("se_to_user", fmt.Sprintf("⚠️ AP-fix execution error: %v", execErr))
+				continue
+			}
+			c.emit("se_to_user", "✅ SE AP-fix execution completed")
+
+			c.emitStatus("review", "pm", "busy")
+			c.emit("review_start", "📋 PM re-reviewing after AP fix...")
+
+			reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s\n[AP Rejection] %s\n[Retry Attempt] AP-fix #%d/%d",
+				userMsg, actions, execResults, seResponse, apResult.Reason, apAttempt+1, maxAPRetries)
+			pmReviewResponse, pmReviewErr := c.callAIWithPrompt(c.prompts.PMReview, "pm_review", reviewCtx, c.memory.FormatForPrompt())
+			if pmReviewErr != nil {
+				c.emit("pm_review", fmt.Sprintf("@USR PM re-review failed: %v", pmReviewErr))
+				continue
+			}
+			reviewResult = c.parseReviewResponse(pmReviewResponse)
+			c.emit("pm_review", reviewResult.DisplayText)
+
+			if !reviewResult.Approved {
+				c.emit("pm_review", fmt.Sprintf("@SE ❌ PM re-rejected (AP-fix #%d): %s", apAttempt+1, reviewResult.Reason))
+				continue
+			}
+			c.emit("pm_review", "✅ PM re-review passed!")
+
+			c.emitStatus("approve", "ap", "busy")
+			c.emit("ap_result", "🔒 AP re-evaluating...")
+			apPrompt := fmt.Sprintf(`Final approval for task: %s
+
+SE executed %d actions (AP-fix re-evaluation #%d).
+PM review approved after AP rejection fix.
+
+=== REAL EXECUTION RESULTS ===
+%s
+
+=== ACTION DETAILS ===
+%v
+
+Previous AP Rejection: %s
+
+IMPORTANT: Check the execution results above carefully!
+- If any action shows "error" or "failed", you MUST REJECT
+- If execution output shows errors (syntax error, command not found, etc.), you MUST REJECT
+- Only approve if ALL actions succeeded AND outputs are correct
+
+Perform final quality and security check. Approve or reject with reasons.`,
+				userMsg, len(actions), apAttempt+1, execSummary, actions, apResult.Reason)
+			apResponse, apErr = c.callAI(RoleAP, apPrompt, c.memory.FormatForPrompt())
+			if apErr != nil {
+				c.emit("ap_result", fmt.Sprintf("@USR AP re-eval error: %v (keeping rejected)", apErr))
+				apResult.Rejected = true
+				apResult.Reason = fmt.Sprintf("AP re-evaluation call failed: %v", apErr)
+				continue
+			} else {
+				c.memory.Add(RoleAP, apResponse)
+			}
+			apResult = c.parseAPResponse(apResponse)
+			c.emit("ap_result", apResult.DisplayText)
+		}
+	}
+
 	if apResult.Rejected {
-		c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected: %s", apResult.Reason))
-		c.emitStatus("error", "ap", "idle")
-		result.Error = fmt.Errorf("AP rejected: %s", apResult.Reason)
+		c.emit("ap_result", fmt.Sprintf("@USR ❌ 任务最终失败: %s", apResult.Reason))
+		c.emitStatus("error", "none", "idle")
+		result.Error = fmt.Errorf("AP final rejection: %s", apResult.Reason)
 		return result
 	}
 
@@ -606,6 +825,81 @@ Perform final quality and security check. Approve or reject with reasons.`,
 
 	result.Success = true
 	return result
+}
+
+func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
+	if len(actions) == 0 {
+		return actions
+	}
+	hasExec := false
+	var lastGoFile string
+	for _, a := range actions {
+		if a.Type == "exec" {
+			hasExec = true
+			break
+		}
+		if a.Type == "write_file" && (strings.HasSuffix(a.Path, ".go") || strings.HasSuffix(a.Path, ".py") || strings.HasSuffix(a.Path, ".js") || strings.HasSuffix(a.Path, ".ts")) {
+			lastGoFile = a.Path
+		}
+	}
+	if hasExec || lastGoFile == "" {
+		return actions
+	}
+	var execCmd string
+	switch {
+	case strings.HasSuffix(lastGoFile, ".go"):
+		execCmd = fmt.Sprintf("go run %s", lastGoFile)
+	case strings.HasSuffix(lastGoFile, ".py"):
+		execCmd = fmt.Sprintf("python %s", lastGoFile)
+	case strings.HasSuffix(lastGoFile, ".js"), strings.HasSuffix(lastGoFile, ".ts"):
+		execCmd = fmt.Sprintf("node %s", lastGoFile)
+	default:
+		return actions
+	}
+	c.emit("se_to_user", fmt.Sprintf("🔧 自动追加 exec: %s (SE遗漏执行命令)", execCmd))
+	actions = append(actions, ai.SEAction{Type: "exec", Command: execCmd})
+	return actions
+}
+
+func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
+	if len(results) == 0 {
+		return false
+	}
+	for _, r := range results {
+		if r != "" && !strings.HasPrefix(r, "[") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *ArgusCore) analyzeExecError(errMsg string) string {
+	errLower := strings.ToLower(errMsg)
+	var analysis []string
+
+	if strings.Contains(errLower, "cd:") || strings.Contains(errLower, "cd\\") {
+		analysis = append(analysis, "❌ 'cd:' syntax error - missing space after cd")
+	}
+	if strings.Contains(errLower, "githubargus") || strings.Contains(errLower, "github") {
+		analysis = append(analysis, "❌ Hallucinated path 'GithubArgus' - use relative filename only")
+	}
+	if strings.Contains(errLower, "go test") && !strings.Contains(errLower, "_test.go") {
+		analysis = append(analysis, "❌ Using 'go test' on non-test file - use 'go run'")
+	}
+	if strings.Contains(errLower, "syntax error") || strings.Contains(errLower, "unexpected") {
+		analysis = append(analysis, "❌ Code syntax error - rewrite with valid Go code")
+	}
+	if strings.Contains(errLower, "path not found") || strings.Contains(errLower, "找不到") {
+		analysis = append(analysis, "❌ Path does not exist - use relative filename in working directory")
+	}
+	if strings.Contains(errLower, "unknown action") || strings.Contains(errLower, "invalid action") {
+		analysis = append(analysis, "❌ Invalid JSON action format - check your actions structure")
+	}
+
+	if len(analysis) == 0 {
+		return fmt.Sprintf("Generic execution error: %s", errMsg)
+	}
+	return strings.Join(analysis, "\n")
 }
 
 func (c *ArgusCore) parsePMResponse(response string) (bool, string) {
@@ -1035,10 +1329,13 @@ func (c *ArgusCore) extractDisplayText(response string) string {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+		if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "```json") || strings.Contains(line, `"is_programming"`) || strings.Contains(line, `"task":`) {
 			continue
 		}
 		if strings.HasPrefix(line, "@") {
+			continue
+		}
+		if strings.HasPrefix(line, "```") {
 			continue
 		}
 		displayLines = append(displayLines, line)

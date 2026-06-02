@@ -70,7 +70,7 @@ func main() {
 				fmt.Println("[系统] 启动SE执行任务...")
 				boardManager.UpdateTask(resp.Tasks.CurrentTask, 1)
 
-				seResp, err := seProcessor.ProcessTask(resp.Tasks.CurrentTask)
+				seResp, err := seProcessor.ProcessTaskWithTools(resp.Tasks.CurrentTask, nil)
 				if err != nil {
 					fmt.Printf("SE处理失败: %v\n", err)
 				} else {
