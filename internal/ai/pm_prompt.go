@@ -415,14 +415,15 @@ func (p *PMProcessor) Process(userInput string, history []ChatMessage) (*PMRespo
 
 	// 检查是否有状态更新JSON
 	p.extractAndUpdateState(response)
-
-	// 尝试解析任务JSON
 	tasks := p.extractTasks(response)
+	reviewResult, reviewReason := p.extractReviewResult(response)
 
 	return &PMResponse{
-		Content:  response,
-		Tasks:    tasks,
-		HasTasks: tasks != nil,
+		Content:      response,
+		Tasks:        tasks,
+		HasTasks:     tasks != nil,
+		ReviewResult: reviewResult,
+		ReviewReason: reviewReason,
 	}, nil
 }
 
@@ -448,11 +449,14 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 
 	p.extractAndUpdateState(response)
 	tasks := p.extractTasks(response)
+	reviewResult, reviewReason := p.extractReviewResult(response)
 
 	return &PMResponse{
-		Content:  response,
-		Tasks:    tasks,
-		HasTasks: tasks != nil,
+		Content:      response,
+		Tasks:        tasks,
+		HasTasks:     tasks != nil,
+		ReviewResult: reviewResult,
+		ReviewReason: reviewReason,
 	}, nil
 }
 
@@ -586,11 +590,14 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 
 	p.extractAndUpdateState(finalContent)
 	tasks := p.extractTasks(finalContent)
+	reviewResult, reviewReason := p.extractReviewResult(finalContent)
 
 	return &PMResponse{
-		Content:  finalContent,
-		Tasks:    tasks,
-		HasTasks: tasks != nil,
+		Content:      finalContent,
+		Tasks:        tasks,
+		HasTasks:     tasks != nil,
+		ReviewResult: reviewResult,
+		ReviewReason: reviewReason,
 	}, nil
 }
 
@@ -957,9 +964,64 @@ func (p *PMProcessor) extractAndUpdateState(response string) {
 
 // PMResponse PM响应
 type PMResponse struct {
-	Content  string
-	Tasks    *types.Board
-	HasTasks bool
+	Content      string
+	Tasks        *types.Board
+	HasTasks     bool
+	ReviewResult string // AI结构化判断结果: "approve" 或 "reject"
+	ReviewReason string // AI判断的理由
+}
+
+// extractReviewResult 从AI回复中提取审核结果
+// 主路：AI输出JSON格式 {"review_result":"reject","reason":"..."}
+// 兜底：AI没输出JSON时，靠关键词匹配
+func (p *PMProcessor) extractReviewResult(content string) (result string, reason string) {
+	// 主路：AI结构化JSON
+	jsonIdx := strings.Index(content, `{"review_result"`)
+	if jsonIdx != -1 {
+		// 找到完整的JSON块（可能跨多行）
+		braceCount := 0
+		endIdx := -1
+		for i := jsonIdx; i < len(content); i++ {
+			if content[i] == '{' {
+				braceCount++
+			} else if content[i] == '}' {
+				braceCount--
+				if braceCount == 0 {
+					endIdx = i + 1
+					break
+				}
+			}
+		}
+		if endIdx > jsonIdx {
+			jsonStr := content[jsonIdx:endIdx]
+			var jsonResult struct {
+				Result string `json:"review_result"`
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(jsonStr), &jsonResult); err == nil {
+				result = strings.ToLower(strings.TrimSpace(jsonResult.Result))
+				reason = jsonResult.Reason
+				return result, reason
+			}
+		}
+	}
+
+	// 兜底：关键词匹配
+	contentLower := strings.ToLower(content)
+	rejectKeywords := []string{"不通过", "未通过", "❌", "返工", "驳回", "拒绝", "rejected", "reject", "失败", "failed", "错误", "error", "有bug", "bug", "修改", "重写", "need fix", "need to change", "rework"}
+	for _, kw := range rejectKeywords {
+		if strings.Contains(contentLower, kw) {
+			return "reject", content
+		}
+	}
+	approveKeywords := []string{"审核通过", "验证通过", "✅", "批准", "通过", "approved", "pass", "ok", "任务完成"}
+	for _, kw := range approveKeywords {
+		if strings.Contains(contentLower, kw) {
+			return "approve", ""
+		}
+	}
+
+	return "", ""
 }
 
 // extractTasks 从响应中提取任务JSON

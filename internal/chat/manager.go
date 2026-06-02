@@ -4932,11 +4932,26 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 	// 添加PM回复到历史（自动加@USR）
 	m.addPMToUserMsg(resp.Content)
 
-	// 检查PM回复中是否有@SE/@AP标记
-	// 使用单人路由：优先路由到目标角色
+	// === 主路：AI结构化审核结果 ===
+	// AI输出JSON {"review_result":"reject"/"approve","reason":"..."}
+	// 这是AI的直接判断，优先级最高
+	if resp.ReviewResult == "reject" {
+		fmt.Printf("[System] PM审核拒绝(AI结构化): %s\n", resp.ReviewReason[:min(80, len(resp.ReviewReason))])
+		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+		return m.startSETaskWithFrom(fmt.Sprintf("PM审核不通过: %s", resp.ReviewReason), "pm")
+	}
+
+	if resp.ReviewResult == "approve" {
+		fmt.Println("[System] PM审核通过(AI结构化)，触发AP审批...")
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverPMToAP)
+		return m.handleAPReview("请AP进行最终质量审批")
+	}
+
+	// === 兜底：文本解析（AI没输出JSON时） ===
 	parsedMsg := m.router.Parse("pm", resp.Content)
 
-	// 🆕 @AP 路由：PM 审核通过后直接 @AP
 	if parsedMsg.To == "ap" {
 		fmt.Println("[System] handlePMReview PM @AP detected, 路由到AP审批...")
 		m.currentRole = ""
@@ -4949,21 +4964,16 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		return nil
 	}
 
-	// 限制审核轮次，防止死循环
-	// 注意：项目状态仍由PM通过Function Call更新，这里只是强制结束审核流程
 	if m.reviewCount >= 3 {
 		fmt.Printf("[System] 审核轮次已达%d，强制结束审核流程\n", m.reviewCount)
 		m.addPMToUserMsg(i18n.T("msg.review_timeout"))
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-
-		// ✅ [FIX#3] 审核超限时设置明确的错误状态
 		m.cMonitor.UpdateProjectState(types.ProjectStateError)
 		m.boardManager.UpdateTask(i18n.T("msg.review_timeout"), 0)
 		if m.onProjectStateChanged != nil {
 			m.onProjectStateChanged("error")
 		}
-
 		return nil
 	}
 
@@ -4977,10 +4987,13 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 			strings.Contains(lowerContent, "失败") ||
 			strings.Contains(lowerContent, "重写") ||
 			strings.Contains(lowerContent, "有bug") ||
-			strings.Contains(lowerContent, "bug")
+			strings.Contains(lowerContent, "bug") ||
+			strings.Contains(lowerContent, "rejected") ||
+			strings.Contains(lowerContent, "reject") ||
+			strings.Contains(lowerContent, "failed")
 
 		if isRework {
-			fmt.Printf("[System] PM审核要求返工，生成新任务给SE\n")
+			fmt.Printf("[System] PM审核要求返工(文本解析)，生成新任务给SE\n")
 			m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 			return m.startSETaskWithFrom(parsedMsg.Content, "pm")
 		}
@@ -4995,19 +5008,14 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 		parsedMsg.To = "usr"
 	}
 
-	// PM决定是否完成项目
 	if resp.HasTasks {
-		// PM认为还有任务，继续执行
 		fmt.Println("[System] PM has more tasks, continuing...")
 		return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
-	// ✅ PM审核通过 → 触发 AP 审批（第二道关卡）
-	fmt.Println("[System] PM审核通过，触发AP审批...")
+	fmt.Println("[System] PM审核通过(兜底)，触发AP审批...")
 	m.currentRole = ""
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-
-	// ✅ 设HandoverPending（第三层C监控才能兜底）
 	m.SetHandoverPending(HandoverPMToAP)
 
 	return m.handleAPReview("请AP进行最终质量审批")
@@ -5126,6 +5134,30 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.addPMToUserMsg(resp.Content)
 	m.resetPMHealth()
 
+	// === 主路：AI结构化审核结果 ===
+	if resp.ReviewResult == "reject" {
+		fmt.Println("[RichPM] PM审核拒绝(AI结构化) → 返工 [EXIT-REJECT]")
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		return m.startSETaskWithFrom(fmt.Sprintf("PM审核不通过: %s", resp.ReviewReason), "pm")
+	}
+
+	if resp.ReviewResult == "approve" {
+		fmt.Println("[RichPM] PM审核通过(AI结构化) → 路由到AP审批 [EXIT-APPROVE]")
+		m.currentRole = ""
+		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+		m.SetHandoverPending(HandoverPMToAP)
+		if m.taskManager != nil {
+			m.taskManager.CompleteLastTaskByRole("PM")
+		}
+		if m.apProcessor != nil {
+			return m.handleAPReview("请AP进行最终质量审批")
+		}
+		m.forceProjectApproved()
+		return nil
+	}
+
+	// === 兜底：文本解析 ===
 	parsedMsg := m.router.Parse("pm", resp.Content)
 	fmt.Printf("[DEBUG-G57] 🔀 Router解析: To=%q | Content_head=%q\n", parsedMsg.To, parsedMsg.Content[:min(80, len(parsedMsg.Content))])
 	if parsedMsg.To == "ap" {
@@ -5133,7 +5165,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 		m.currentRole = ""
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.SetHandoverPending(HandoverPMToAP)
-		// 标记PM审核任务为完成
 		if m.taskManager != nil {
 			m.taskManager.CompleteLastTaskByRole("PM")
 		}
@@ -5411,11 +5442,40 @@ func (m *Manager) handleAPReview(reviewMsg string) error {
 	}
 
 	// ✅ AP审批通过 → 项目正式结束！
-	fmt.Println("[TRACE-AP] ✅✅ AP审批通过 → forceProjectApproved (done_approved)!")
-	m.SetHandoverPending(HandoverAPToDone)
-	m.forceProjectApproved()
+	if resp.Approved {
+		fmt.Println("[TRACE-AP] ✅✅ AP审批通过 → forceProjectApproved (done_approved)!")
+		m.SetHandoverPending(HandoverAPToDone)
+		m.forceProjectApproved()
+		return nil
+	}
 
-	return nil
+	// ⚠️ AP未给出明确的approve/reject判断，走兜底：检查文本中的拒绝关键词
+	lowerContent := strings.ToLower(resp.Content)
+	maybeReject := strings.Contains(lowerContent, "不通过") ||
+		strings.Contains(lowerContent, "未通过") ||
+		strings.Contains(lowerContent, "拒绝") ||
+		strings.Contains(lowerContent, "驳") ||
+		strings.Contains(lowerContent, "reject") ||
+		strings.Contains(lowerContent, "fail")
+	if maybeReject {
+		fmt.Println("[TRACE-AP] ⚠️ AP输出含拒绝关键词但未解析到结构化判断，强制返工")
+		return m.handleToPM(fmt.Sprintf("[❌ AP疑似拒绝]\n%s\n请根据AP意见决定下一步", resp.Content))
+	}
+
+	lowerContent = strings.ToLower(resp.Content)
+	maybeApprove := strings.Contains(lowerContent, "通过") ||
+		strings.Contains(lowerContent, "approved") ||
+		strings.Contains(lowerContent, "✅") ||
+		strings.Contains(lowerContent, "pass")
+	if maybeApprove {
+		fmt.Println("[TRACE-AP] ⚠️ AP输出含通过关键词但未解析到结构化判断，视为通过")
+		m.SetHandoverPending(HandoverAPToDone)
+		m.forceProjectApproved()
+		return nil
+	}
+
+	fmt.Printf("[TRACE-AP] ⚠️ AP未给出明确判断(Approved=false, NeedRework=false)，兜底拒绝\n")
+	return m.handleToPM(fmt.Sprintf("[❌ AP审批结果不明确]\n%s\n\n请PM确认是否通过", resp.Content))
 }
 
 // forceProjectApproved AP批准后项目正式完成（状态=done_approved）
