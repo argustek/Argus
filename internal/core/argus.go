@@ -634,6 +634,14 @@ Decide: approve or reject with specific reasons.`,
 		}
 	}
 
+	// GUARD: PM rejected all attempts → must NOT proceed to AP
+	if reviewResult.Rejected {
+		c.emit("error", fmt.Sprintf("V2 Error: PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason))
+		result.Error = fmt.Errorf("PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason)
+		c.emitStatus("error", "pm", "idle")
+		return result
+	}
+
 	// --- Phase 4: AP Approval (OA) ---
 	execSummary := strings.Join(execResults, "\n")
 	if execErr != nil {
@@ -646,10 +654,15 @@ Decide: approve or reject with specific reasons.`,
 	c.emit("ap_start", "🔒 AP final approval...")
 
 	apCtx := c.memory.FormatForPrompt()
+	pmStatus := "approved"
+	if reviewResult.Rejected {
+		pmStatus = "REJECTED - " + reviewResult.Reason
+	}
+
 	apPrompt := fmt.Sprintf(`Final approval for task: %s
 
 SE executed %d actions.
-PM review approved.
+PM review: %s
 
 === REAL EXECUTION RESULTS ===
 %s
@@ -658,12 +671,13 @@ PM review approved.
 %v
 
 IMPORTANT: Check the execution results above carefully!
+- If PM review was REJECTED above, you MUST ALSO REJECT unless SE has clearly fixed the issues
 - If any action shows "error" or "failed", you MUST REJECT
 - If execution output shows errors (syntax error, command not found, etc.), you MUST REJECT
-- Only approve if ALL actions succeeded AND outputs are correct
+- Only approve if ALL actions succeeded AND outputs are correct AND PM approved
 
 Perform final quality and security check. Approve or reject with reasons.`,
-		userMsg, len(actions), execSummary, actions)
+		userMsg, len(actions), pmStatus, execSummary, actions)
 
 	apResponse, apErr := c.callAI(RoleAP, apPrompt, apCtx)
 	phaseAP := PhaseResult{
@@ -831,6 +845,39 @@ func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
 	if len(actions) == 0 {
 		return actions
 	}
+
+	// Validate and fix garbage paths (e.g., "content", "", absolute paths, no extension)
+	validExts := map[string]bool{".go": true, ".py": true, ".js": true, ".ts": true, ".html": true, ".css": true, ".json": true, ".md": true, ".txt": true, ".yaml": true, ".yml": true}
+	for i := range actions {
+		a := &actions[i]
+		if a.Type == "write_file" || a.Type == "edit_file" {
+			// Reject obviously invalid paths
+			if a.Path == "" || a.Path == "content" || strings.ToLower(a.Path) == "content" ||
+				filepath.IsAbs(a.Path) || !strings.Contains(a.Path, ".") {
+				fmt.Printf("[Core] ⚠️ Invalid path detected: %q → dropping action\n", a.Path)
+				a.Type = "_invalid_" // mark for removal
+				continue
+			}
+			ext := filepath.Ext(a.Path)
+			if ext != "" && !validExts[ext] && a.Type == "write_file" {
+				fmt.Printf("[Core] ⚠️ Unusual extension %q on path %q - keeping but noting\n", ext, a.Path)
+			}
+		}
+	}
+
+	// Remove marked-invalid actions
+	validActions := make([]ai.SEAction, 0, len(actions))
+	for _, a := range actions {
+		if a.Type != "_invalid_" {
+			validActions = append(validActions, a)
+		}
+	}
+	actions = validActions
+
+	if len(actions) == 0 {
+		return actions
+	}
+
 	hasExec := false
 	var lastGoFile string
 	for _, a := range actions {
@@ -865,12 +912,25 @@ func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
 	if len(results) == 0 {
 		return false
 	}
+	// Must have at least one successful exec result
+	hasExecSuccess := false
 	for _, r := range results {
-		if r != "" && !strings.HasPrefix(r, "[") {
-			return true
+		if strings.HasPrefix(r, "✅ exec") {
+			hasExecSuccess = true
+			break
 		}
 	}
-	return false
+	if !hasExecSuccess {
+		return false
+	}
+	// Also must not have any exec failures
+	for _, r := range results {
+		if strings.Contains(r, "❌ exec") || strings.Contains(r, "syntax error") ||
+			strings.Contains(r, "exit status") || strings.Contains(r, "command failed") {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *ArgusCore) analyzeExecError(errMsg string) string {
