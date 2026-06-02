@@ -622,7 +622,7 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 	fmt.Printf("[Executor] Output length: %d, err: %v\n", len(outputStr), err)
 
 	if e.terminalOutput != nil {
-		e.terminalOutput(fmt.Sprintf("> %s\n%s", command, outputStr))
+		e.terminalOutput(fmt.Sprintf("[%s] > %s\n%s", e.workDir, command, outputStr))
 	}
 
 	if err != nil {

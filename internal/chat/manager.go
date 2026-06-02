@@ -5292,9 +5292,13 @@ func (m *Manager) handleAPReview(reviewMsg string) error {
 	fmt.Printf("[handleAPReview] 开始AP审批(第%d轮): %s\n", m.apReviewCount, reviewMsg[:min(100, len(reviewMsg))])
 
 	if m.apReviewCount > 10 {
-		fmt.Printf("[handleAPReview] AP审核轮次超限(%d)，强制结束\n", m.apReviewCount)
-		m.addAPToUserMsg(i18n.T("msg.review_timeout"))
-		m.forceProjectApproved()
+		fmt.Printf("[handleAPReview] AP审核轮次超限(%d)，标记错误\n", m.apReviewCount)
+		m.addAPToUserMsg("⚠️ AP审核轮次过多，已暂停自动审批。请人工确认项目状态。")
+		m.cMonitor.UpdateProjectState(types.ProjectStateError)
+		m.currentRole = ""
+		if m.onProjectStateChanged != nil {
+			m.onProjectStateChanged("error")
+		}
 		return nil
 	}
 
@@ -5381,15 +5385,23 @@ func (m *Manager) handleAPReview(reviewMsg string) error {
 				})
 				if retryErr != nil {
 					fmt.Printf("[handleAPReview] 无工具模式也失败: %v\n", retryErr)
-					m.addAPToUserMsg(fmt.Sprintf("❌ AP审批失败: %v\n\n项目将强制完成。", retryErr))
-					m.forceProjectApproved()
+					m.addAPToUserMsg(fmt.Sprintf("❌ AP审批API调用失败: %v\n\n请联系PM人工审核或检查API配置后重试。", retryErr))
+					m.cMonitor.UpdateProjectState(types.ProjectStateError)
+					m.currentRole = ""
+					if m.onProjectStateChanged != nil {
+						m.onProjectStateChanged("error")
+					}
 					return fmt.Errorf("AP review failed (no-tools fallback also failed): %w", retryErr)
 				}
 				resp = retryResp
 			} else {
-				errMsg := fmt.Sprintf("❌ AP审批失败: %v\n\n项目将强制完成。", err)
+				errMsg := fmt.Sprintf("❌ AP审批API调用失败: %v\n\n请联系PM人工审核或检查API配置后重试。", err)
 				m.addAPToUserMsg(errMsg)
-				m.forceProjectApproved()
+				m.cMonitor.UpdateProjectState(types.ProjectStateError)
+				m.currentRole = ""
+				if m.onProjectStateChanged != nil {
+					m.onProjectStateChanged("error")
+				}
 				return fmt.Errorf("AP review failed: %w", err)
 			}
 		}
