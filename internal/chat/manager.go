@@ -2444,7 +2444,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	const seTimeout = 120 * time.Second
 	const maxRetries = 2
 
-	fmt.Printf("[PROBE-startSETask] 即将调用ProcessTaskStream: task=%q timeout=%v (时间:%s)\n",
+	fmt.Printf("[PROBE-startSETask] 即将调用ProcessTaskWithTools: task=%q timeout=%v (时间:%s)\n",
 		taskDesc[:min(60, len(taskDesc))], seTimeout, time.Now().Format("15:04:05.000"))
 
 	var resp *ai.SEResponse
@@ -2491,7 +2491,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			}()
 		}
 
-		fmt.Printf("[PROBE-CALL] 🚀 即将调用ProcessTaskStream (时间:%s)\n", time.Now().Format("15:04:05.000"))
+		fmt.Printf("[PROBE-CALL] 🚀 即将调用ProcessTaskWithTools (时间:%s)\n", time.Now().Format("15:04:05.000"))
 
 		if attempt == 0 {
 			func() {
@@ -2514,11 +2514,11 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			}
 		}
 
-		resp, err = m.seProcessor.ProcessTaskStream(taskDesc, func(delta string) {
+		resp, err = m.seProcessor.ProcessTaskWithTools(taskDesc, func(delta string) {
 			m.cMonitor.UpdateSeChunkTime()
 			m.emitStreamChunk("se", delta)
 		})
-		fmt.Printf("[PROBE-CALL] ✅ ProcessTaskStream已返回 (时间:%s)\n", time.Now().Format("15:04:05.000"))
+		fmt.Printf("[PROBE-CALL] ✅ ProcessTaskWithTools已返回 (时间:%s)\n", time.Now().Format("15:04:05.000"))
 
 		if attempt == 0 {
 			state, _ := m.cMonitor.ReadState()
@@ -2538,7 +2538,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		if resp != nil {
 			respActions = len(resp.Actions)
 		}
-		fmt.Printf("[PROBE-SE] 📡 ProcessTaskStream返回: err=%v actions=%d content_len=%d (时间:%s)\n",
+		fmt.Printf("[PROBE-SE] 📡 ProcessTaskWithTools返回: err=%v actions=%d content_len=%d (时间:%s)\n",
 			err, respActions, func() int { if resp != nil { return len(resp.Content) }; return 0 }(), time.Now().Format("15:04:05.000"))
 		m.writeRouteLog(fmt.Sprintf("[SE-API-CALL] from=%s attempt=%d/%d err=%v actions=%d time=%s",
 			from, attempt, maxRetries, err, respActions, time.Now().Format("15:04:05")))
@@ -2562,7 +2562,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		break
 	}
 
-	fmt.Printf("[PROBE-startSETask] ⏹️ ProcessTaskStream循环结束: err=%v actions=%d (时间:%s)\n",
+	fmt.Printf("[PROBE-startSETask] ⏹️ ProcessTaskWithTools循环结束: err=%v actions=%d (时间:%s)\n",
 		err, func() int { if resp != nil { return len(resp.Actions) }; return -1 }(), time.Now().Format("15:04:05.000"))
 
 	if m.isGhostCall(aiGen) {
@@ -2644,7 +2644,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			)
 			retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
 			m.seProcessor.SetContext(retryCtx)
-			retryResp, retryErr := m.seProcessor.ProcessTaskStream(retryPrompt, func(delta string) {
+			retryResp, retryErr := m.seProcessor.ProcessTaskWithTools(retryPrompt, func(delta string) {
 				m.cMonitor.UpdateSeChunkTime()
 				m.emitStreamChunk("se", delta)
 			})
@@ -2744,7 +2744,7 @@ Generate corrected actions JSON (use ONLY relative filenames):
 				retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
 				m.seProcessor.SetContext(retryCtx)
 
-				respFix, fixProcErr := m.seProcessor.ProcessTaskStream(fixPrompt, func(delta string) {
+				respFix, fixProcErr := m.seProcessor.ProcessTaskWithTools(fixPrompt, func(delta string) {
 					m.cMonitor.UpdateSeChunkTime()
 					m.emitStreamChunk("se", delta)
 				})
@@ -2785,7 +2785,7 @@ Generate corrected actions JSON (use ONLY relative filenames):
 				retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
 				m.seProcessor.SetContext(retryCtx)
 
-				resp2, err2 := m.seProcessor.ProcessTaskStream(failMsg+"\\n请分析原因并决定下一步", func(delta string) {
+				resp2, err2 := m.seProcessor.ProcessTaskWithTools(failMsg+"\\n请分析原因并决定下一步", func(delta string) {
 					m.cMonitor.UpdateSeChunkTime()
 					m.emitStreamChunk("se", delta)
 				})
@@ -3005,13 +3005,13 @@ func (m *Manager) continueSETask() (err error) {
 		fmt.Println("[continueSETask] 🔧 关闭空闲连接，避免复用死连接")
 	}
 
-	fmt.Printf("[PROBE-continueSETask] ⏳ 即将调用ProcessTaskStream(继续) (时间:%s)\n",
+	fmt.Printf("[PROBE-continueSETask] ⏳ 即将调用ProcessTaskWithTools(继续) (时间:%s)\n",
 		time.Now().Format("15:04:05.000"))
-	resp, err := m.seProcessor.ProcessTaskStream("继续", func(delta string) {
+	resp, err := m.seProcessor.ProcessTaskWithTools("继续", func(delta string) {
 		m.cMonitor.UpdateSeChunkTime()
 		m.emitStreamChunk("se", delta)
 	})
-	fmt.Printf("[PROBE-continueSETask] ⏹️ ProcessTaskStream返回: err=%v actions=%d content_len=%d (时间:%s)\n",
+	fmt.Printf("[PROBE-continueSETask] ⏹️ ProcessTaskWithTools返回: err=%v actions=%d content_len=%d (时间:%s)\n",
 		err, func() int { if resp != nil { return len(resp.Actions) }; return 0 }(),
 		func() int { if resp != nil { return len(resp.Content) }; return 0 }(),
 		time.Now().Format("15:04:05.000"))
@@ -3028,7 +3028,7 @@ func (m *Manager) continueSETask() (err error) {
 			retryCtx, retryCancel := context.WithTimeout(safeCtx, 90*time.Second)
 			defer retryCancel()
 			m.seProcessor.SetContext(retryCtx)
-			resp, err = m.seProcessor.ProcessTaskStream("继续", func(delta string) {
+			resp, err = m.seProcessor.ProcessTaskWithTools("继续", func(delta string) {
 				m.cMonitor.UpdateSeChunkTime()
 				m.emitStreamChunk("se", delta)
 			})
@@ -3063,7 +3063,7 @@ continueProcess:
 			m.seProcessor.AddResult(failMsg)
 
 			// SE处理失败情况，可能需要问PM
-			resp2, err2 := m.seProcessor.ProcessTaskStream("上述执行失败，请分析原因并决定下一步", func(delta string) {
+			resp2, err2 := m.seProcessor.ProcessTaskWithTools("上述执行失败，请分析原因并决定下一步", func(delta string) {
 				m.cMonitor.UpdateSeChunkTime()
 				m.emitStreamChunk("se", delta)
 			})
