@@ -2720,21 +2720,26 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 %v
 
 === REPAIR INSTRUCTIONS ===
-The execution failed. You MUST fix it yourself and retry.
+Analyze the error and fix it:
 
-Analyze the error carefully:
-1. If syntax error (undefined, missing import) → fix the code completely
-2. If command not found → check spelling  
-3. If compilation error → rewrite the source file correctly
+🔴 COMMON ERRORS AND FIXES:
+1. "path outside work directory" → You used absolute path (E:\...). NEVER use absolute paths!
+   Fix: path field must be ONLY the filename: "main.go", "hello.go", etc.
+2. "unknown command" from go → You forgot the "run" keyword.
+   Fix: "go run hello.go" NOT "go hello.go"
+3. "function main is undeclared" / "undefined" → Missing package main or func main.
+   Fix: Write COMPLETE file: package main + import "fmt" + func main() { fmt.Println("Hello") }
+4. "syntax error" / "string not terminated" → Code has typos.
+   Fix: Rewrite the file with clean, correct code.
 
 CRITICAL RULES:
-- You MUST include ALL necessary imports (fmt, os, strings, etc.)
-- You MUST write COMPLETE file content (not truncated)
-- You MUST include an exec action to RUN and VERIFY your code
-- Do NOT just analyze - you must FIX and RETRY
+- path MUST be a simple filename like "main.go" — NEVER "E:\...\main.go"
+- command MUST include "run": "go run main.go" — NEVER "go main.go"
+- Write COMPLETE file content, not truncated
+- Include an exec action to VERIFY your code
 
-Generate corrected actions JSON:
-{"actions":[{"type":"write_file","path":"...","content":"..."},{"type":"exec","command":"..."}]}`, fixAttempt+1, maxFixRetries, fixErr, resp.Actions)
+Generate corrected actions JSON (use ONLY relative filenames):
+{"actions":[{"type":"write_file","path":"main.go","content":"package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello\")\n}\n"},{"type":"exec","command":"go run main.go"}]}`, fixAttempt+1, maxFixRetries, fixErr, resp.Actions)
 
 				retryCtx, retryCancel := context.WithTimeout(safeCtx, seTimeout)
 				m.seProcessor.SetContext(retryCtx)
