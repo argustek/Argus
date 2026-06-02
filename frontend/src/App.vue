@@ -748,6 +748,10 @@ onMounted(async () => {
     aiThinking = typeof data === 'boolean' ? data : !!data
   })
 
+  EventsOn('reset-completed', (data: { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+  })
+
   // 监听 AP approved 事件，清空消息防止旧任务显示
   EventsOn('project_approved', (data: { timestamp: number; action: string; _msgId?: string }) => {
     ackMessage(data._msgId || '')

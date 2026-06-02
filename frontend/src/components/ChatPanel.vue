@@ -604,6 +604,7 @@ onMounted(() => {
   })
 
   EventsOn('task-clarify', (data: any) => {
+    if (data?._msgId) (window as any).__argusAck?.(data._msgId)
     if (data && data.questions && data.questions.length > 0) {
       clarifyQuestions.value = data.questions
       clarifyFollowUp.value = !!data.isFollowUp
