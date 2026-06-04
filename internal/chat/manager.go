@@ -137,6 +137,7 @@ type Manager struct {
 	pmExecutor      *executor.Executor
 	seExecutor      *executor.Executor
 	fileTracker     *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
+	lspClient       *ai.LSPClient             // [P0-1] LSP 客户端（gopls daemon）
 	boardManager    *board.Manager
 	cMonitor        *monitor.CMonitor
 	memoryManager   *MemoryManager
@@ -275,6 +276,15 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	// 初始化文件变更追踪器
 	fileTracker := executor.NewFileChangeTracker(workDir, 20)
 
+	// [P0-1] 初始化 LSP 客户端（gopls daemon，可选）
+	var lspClient *ai.LSPClient
+	if lc, err := ai.NewLSPClient(workDir); err != nil {
+		fmt.Printf("[Manager] ⚠️ LSP 不可用: %v（gopls 未安装或启动失败，非致命错误）\n", err)
+		lspClient = nil
+	} else {
+		lspClient = lc
+	}
+
 	// 初始化AI处理器
 	pmProcessor := ai.NewPMProcessor(aiClient, workDir, nil)
 	seProcessor := ai.NewSEProcessor(aiClient, workDir)
@@ -289,6 +299,7 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 		pmExecutor:    pmExecutor,
 		seExecutor:    seExecutor,
 		fileTracker:   fileTracker,
+		lspClient:     lspClient,
 		boardManager:  boardManager,
 		memoryManager: NewMemoryManager(workDir),
 		sseBridge:     NewSSEBridge(),
@@ -3395,6 +3406,20 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					}
 				case "run_tests":
 					label = "运行测试"
+				case "undo_file":
+					label = "撤销 " + a.Path
+				case "list_changes":
+					label = "列出变更记录"
+				case "go_to_definition":
+					label = "跳转定义: " + filepath.Base(a.Path)
+				case "find_references":
+					label = "查找引用: " + filepath.Base(a.Path)
+				case "hover_info":
+					label = "悬停信息: " + filepath.Base(a.Path)
+				case "diagnostics":
+					label = "诊断: " + filepath.Base(a.Path)
+				case "rename_symbol":
+					label = "重命名: " + a.Command
 				default:
 					label = a.Type
 				}
@@ -3554,7 +3579,14 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 
 				if syntaxErr := m.validateGoSyntax(absPath); syntaxErr != "" {
 					fmt.Printf("[G-FIX] ⚠️ Go语法错误: %s → %s\n", action.Path, syntaxErr)
-					m.seProcessor.AddResult(fmt.Sprintf("⚠️ 文件 %s 存在Go语法错误: %s\n建议SE修复后重写", action.Path, syntaxErr))
+					m.seProcessor.AddResult(fmt.Sprintf("⚠️ 文件 %s 存在Go语法错误: %s\n建议使用 undo_file 撤销或修复后重写", action.Path, syntaxErr))
+					// [P0-2] 自动回滚：语法错误时恢复到编辑前状态
+					if m.fileTracker != nil {
+						if rolledBack, rbMsg := m.fileTracker.RollbackLast(action.Path); rolledBack {
+							fmt.Printf("[Auto-Rollback] ↩️ 已自动回滚 %s: %s\n", action.Path, rbMsg)
+							m.seProcessor.AddResult(fmt.Sprintf("🔄 已自动回滚 %s 到编辑前状态，SE可重新编写\n", action.Path))
+						}
+					}
 				} else {
 					fmt.Printf("[G-FIX] ✅ Go语法检查通过: %s\n", action.Path)
 				}
@@ -3651,6 +3683,13 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				errMsg := fmt.Sprintf("编辑失败: %s", editResult.Error)
 				fmt.Printf("[Action] ❌ EditFile failed: %s\n", editResult.Error)
 				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				// [P0-2] 编辑失败时自动回滚
+				if m.fileTracker != nil {
+					if rolledBack, rbMsg := m.fileTracker.RollbackLast(action.Path); rolledBack {
+						fmt.Printf("[Auto-Rollback] ↩️ 已自动回滚编辑失败的 %s: %s\n", action.Path, rbMsg)
+						m.seProcessor.AddResult(fmt.Sprintf("🔄 已自动回滚 %s 到编辑前状态\n", action.Path))
+					}
+				}
 
 				m.emitWailsEvent("exec_done", map[string]interface{}{
 					"executor": "se",
@@ -4156,6 +4195,200 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 			fmt.Printf("[Action] Read file: %s (%d bytes)\n", action.Path, len(content))
 			m.seProcessor.AddResult(fmt.Sprintf("文件内容 [%s]:\n%s", action.Path, content))
+
+		case "undo_file":
+			// [P0-2] 撤销文件编辑 — 回滚到最近一次快照
+			if m.fileTracker == nil {
+				m.seProcessor.AddResult("❌ 撤销失败: 文件追踪器未初始化")
+				continue
+			}
+			ok, msg := m.fileTracker.RollbackLast(action.Path)
+			if ok {
+				m.seProcessor.AddResult(fmt.Sprintf("↩️ 已撤销 %s 的最近一次编辑: %s\n", action.Path, msg))
+				fmt.Printf("[Undo] ✅ %s\n", msg)
+			} else {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 撤销 %s 失败: %s\n", action.Path, msg))
+				fmt.Printf("[Undo] ❌ %s\n", msg)
+			}
+
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se",
+				"index":    i + 1,
+				"type":     "undo_file",
+				"label":    "撤销 " + action.Path,
+				"status":   func() string { if ok { return "done" }; return "error" }(),
+			})
+
+		case "list_changes":
+			// [P0-2] 列出所有可撤销的变更记录
+			if m.fileTracker == nil {
+				m.seProcessor.AddResult("❌ 文件追踪器未初始化")
+				continue
+			}
+			changes := m.fileTracker.GetRecentChanges(20)
+			if len(changes) == 0 {
+				m.seProcessor.AddResult("📋 当前没有可撤销的变更记录")
+			} else {
+				result := fmt.Sprintf("📋 变更记录 (共%d条，最多保留%d步):\n", len(changes), m.fileTracker.Stats()["max_stack"])
+				for j, c := range changes {
+					result += fmt.Sprintf("  #%d [%s] %s (%d bytes, %s)\n",
+						j+1, c.Action, c.Path, len(c.Content), c.Timestamp.Format("15:04:05"))
+				}
+				stats := m.fileTracker.Stats()
+				result += fmt.Sprintf("\n统计: %d个文件被追踪\n", stats["files_tracked"])
+				m.seProcessor.AddResult(result)
+			}
+
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se",
+				"index":    i + 1,
+				"type":     "list_changes",
+				"label":    "列出变更",
+				"status":   "done",
+			})
+
+		// ========== [P0-1] LSP 工具执行 ==========
+		case "go_to_definition":
+			if m.lspClient == nil {
+				m.seProcessor.AddResult("❌ LSP 不可用（gopls 未启动），无法使用 go_to_definition")
+				continue
+			}
+			locs, err := m.lspClient.GoToDefinition(action.Path, action.Line, action.Column)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ GoToDefinition 失败: %v\n", err))
+			} else {
+				result := ai.FormatDefResult(locs)
+				m.seProcessor.AddResult(fmt.Sprintf("🔗 GoToDefinition %s:%d:\n%s\n", action.Path, action.Line+1, result))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "go_to_definition",
+				"label": "定义: " + filepath.Base(action.Path),
+				"status": func() string { if err != nil { return "error" }; return "done" }(),
+			})
+
+		case "find_references":
+			if m.lspClient == nil {
+				m.seProcessor.AddResult("❌ LSP 不可用，无法使用 find_references")
+				continue
+			}
+			locs, err := m.lspClient.FindReferences(action.Path, action.Line, action.Column)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ FindReferences 失败: %v\n", err))
+			} else {
+				result := ai.FormatRefResult(locs)
+				m.seProcessor.AddResult(fmt.Sprintf("🔍 FindReferences %s:%d:\n%s\n", action.Path, action.Line+1, result))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "find_references",
+				"label": "引用: " + filepath.Base(action.Path),
+				"status": func() string { if err != nil { return "error" }; return "done" }(),
+			})
+
+		case "hover_info":
+			if m.lspClient == nil {
+				m.seProcessor.AddResult("❌ LSP 不可用，无法使用 hover_info")
+				continue
+			}
+			info, err := m.lspClient.Hover(action.Path, action.Line, action.Column)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ Hover 失败: %v\n", err))
+			} else if info == "" {
+				m.seProcessor.AddResult("💡 无悬停信息\n")
+			} else {
+				m.seProcessor.AddResult(fmt.Sprintf("💡 Hover %s:%d:\n%s\n", action.Path, action.Line+1, info))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "hover_info",
+				"label": "Hover: " + filepath.Base(action.Path),
+				"status": func() string { if err != nil { return "error" }; return "done" }(),
+			})
+
+		case "diagnostics":
+			if m.lspClient == nil {
+				m.seProcessor.AddResult("❌ LSP 不可用，无法使用 diagnostics")
+				continue
+			}
+			diags, err := m.lspClient.Diagnostics(action.Path)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ Diagnostics 失败: %v\n", err))
+			} else {
+				result := ai.FormatDiagResult(diags)
+				m.seProcessor.AddResult(fmt.Sprintf("📋 Diagnostics %s:\n%s\n", action.Path, result))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "diagnostics",
+				"label": "诊断: " + filepath.Base(action.Path),
+				"status": func() string { if err != nil { return "error" }; return "done" }(),
+			})
+
+		case "rename_symbol":
+			if m.lspClient == nil {
+				m.seProcessor.AddResult("❌ LSP 不可用，无法使用 rename_symbol")
+				continue
+			}
+			newName := action.Command // new_name 存在 Command 字段
+			edit, err := m.lspClient.Rename(action.Path, action.Line, action.Column, newName)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ Rename 失败: %v\n", err))
+			} else {
+				changedFiles, applyErr := ai.ApplyWorkspaceEdit(edit, m.workDir)
+				if applyErr != nil {
+					m.seProcessor.AddResult(fmt.Sprintf("❌ Rename 计算成功但应用失败: %v\n", applyErr))
+				} else {
+					result := fmt.Sprintf("✅ 已重命名 → '%s'，修改了 %d 个文件:\n", newName, len(changedFiles))
+					for _, f := range changedFiles {
+						result += fmt.Sprintf("  📄 %s\n", f)
+					}
+					m.seProcessor.AddResult(result)
+				}
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "rename_symbol",
+				"label": "重命名: " + newName,
+				"status": func() string { if err != nil { return "error" }; return "done" }(),
+			})
+
+		case "analyze_image":
+			// [P0-3] 多模态图片分析
+			prompt := action.Command
+			imagePath := action.Path
+
+			if !m.seProcessor.IsVisionModel() {
+				m.seProcessor.AddResult("⚠️ 当前模型不支持 vision 能力，无法分析图片。\n建议切换到 GPT-4o / Claude-3 / Gemini 等支持视觉的模型。")
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "analyze_image",
+					"label": "图片分析 (不支持)",
+					"status":  "error",
+				})
+				continue
+			}
+
+			visionResp, err := m.seProcessor.AnalyzeImage(imagePath, prompt)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 图片分析失败: %v\n", err))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "analyze_image",
+					"label": "图片分析",
+					"status":  "error",
+					"error":   err.Error(),
+				})
+				continue
+			}
+
+			if visionResp.Error != "" {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s\n", visionResp.Error))
+			} else {
+				resultMsg := fmt.Sprintf("🖼️ 图片分析结果 (%s):\n%s\n", filepath.Base(imagePath), visionResp.Description)
+				if visionResp.Code != "" {
+					resultMsg += fmt.Sprintf("\n📝 生成的代码:\n```%s```\n", visionResp.Code)
+				}
+				m.seProcessor.AddResult(resultMsg)
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "analyze_image",
+				"label": "图片分析: " + filepath.Base(imagePath),
+				"status": func() string { if visionResp.Error != "" || err != nil { return "error" }; return "done" }(),
+			})
 
 		default:
 			return fmt.Errorf("unknown action type: %s", action.Type)
@@ -4820,7 +5053,11 @@ func (m *Manager) normalizeActionTypes(actions []ai.SEAction) []ai.SEAction {
 
 func isValidActionType(t string) bool {
 	switch t {
-	case "write_file", "edit_file", "read_file", "exec", "exec_session", "search_files", "git_operation", "run_tests", "semantic_search", "web_search":
+	case "write_file", "edit_file", "read_file", "exec", "exec_session", "search_files",
+		"git_operation", "run_tests", "semantic_search", "web_search",
+		"undo_file", "list_changes",
+		"go_to_definition", "find_references", "hover_info", "diagnostics", "rename_symbol",
+		"analyze_image":
 		return true
 	default:
 		return false

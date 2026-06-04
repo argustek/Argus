@@ -393,6 +393,73 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			action.Command = v
 		}
 		action.Type = "exec_session"
+	case "undo_file":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		action.Type = "undo_file"
+	case "list_changes":
+		action.Type = "list_changes"
+	case "go_to_definition":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["line"].(float64); ok {
+			action.Line = int(v)
+		}
+		if v, ok := args["column"].(float64); ok {
+			action.Column = int(v)
+		}
+		action.Type = "go_to_definition"
+	case "find_references":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["line"].(float64); ok {
+			action.Line = int(v)
+		}
+		if v, ok := args["column"].(float64); ok {
+			action.Column = int(v)
+		}
+		action.Type = "find_references"
+	case "hover_info":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["line"].(float64); ok {
+			action.Line = int(v)
+		}
+		if v, ok := args["column"].(float64); ok {
+			action.Column = int(v)
+		}
+		action.Type = "hover_info"
+	case "diagnostics":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		action.Type = "diagnostics"
+	case "rename_symbol":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["line"].(float64); ok {
+			action.Line = int(v)
+		}
+		if v, ok := args["column"].(float64); ok {
+			action.Column = int(v)
+		}
+		if v, ok := args["new_name"].(string); ok {
+			action.Command = v // 复用 Command 存 new_name
+		}
+		action.Type = "rename_symbol"
+	case "analyze_image":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["prompt"].(string); ok {
+			action.Command = v // 复用 Command 存 prompt
+		}
+		action.Type = "analyze_image"
 	}
 
 	return action
@@ -1039,6 +1106,10 @@ type SEAction struct {
 	Offset int `json:"offset,omitempty"`
 	Limit  int `json:"limit,omitempty"`
 
+	// [P0-1] LSP 位置参数（行号和列号，0-based）
+	Line   int `json:"line,omitempty"`
+	Column int `json:"column,omitempty"`
+
 	OldStr          string   `json:"old_str,omitempty"`
 	NewStr          string   `json:"new_str,omitempty"`
 	Pattern         string   `json:"pattern,omitempty"`
@@ -1512,6 +1583,178 @@ var SETools = []Tool{
 					},
 				},
 				"required": []string{"files", "summary"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "undo_file",
+			Description: "撤销对指定文件的最近一次编辑，恢复到编辑前的内容。当编辑导致编译错误或逻辑问题时使用。每次调用撤销一步（类似Ctrl+Z）。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "要撤销编辑的文件路径（相对于工作目录）",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "list_changes",
+			Description: "列出所有可撤销的文件变更记录。显示每个文件的编辑历史（操作类型、时间、大小），帮助判断哪些修改可以回滚。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+	},
+	// ========== [P0-1] LSP 工具（gopls 驱动的精确代码理解） ==========
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "go_to_definition",
+			Description: "跳转到符号的定义位置。传入文件路径和光标位置（行号从0开始，列号从0开始）。返回定义所在的文件、行号。用于理解类型/函数/变量的来源。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "文件路径（相对于工作目录）",
+					},
+					"line": map[string]interface{}{
+						"type":        "integer",
+						"description": "行号（0-based）",
+					},
+					"column": map[string]interface{}{
+						"type":        "integer",
+						"description": "列号（0-based）",
+					},
+				},
+				"required": []string{"path", "line", "column"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "find_references",
+			Description: "查找符号在项目中的所有引用位置。返回每个引用的文件和行号。用于理解函数被调用情况、变量使用范围等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "文件路径（相对于工作目录）",
+					},
+					"line": map[string]interface{}{
+						"type":        "integer",
+						"description": "行号（0-based）",
+					},
+					"column": map[string]interface{}{
+						"type":        "integer",
+						"description": "列号（0-based）",
+					},
+				},
+				"required": []string{"path", "line", "column"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "hover_info",
+			Description: "获取光标位置的类型信息、签名和文档注释。相当于IDE的悬停提示。用于了解变量类型、函数签名、结构体字段等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "文件路径（相对于工作目录）",
+					},
+					"line": map[string]interface{}{
+						"type":        "integer",
+						"description": "行号（0-based）",
+					},
+					"column": map[string]interface{}{
+						"type":        "integer",
+						"description": "列号（0-based）",
+					},
+				},
+				"required": []string{"path", "line", "column"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "diagnostics",
+			Description: "获取文件的编译诊断信息（错误、警告、提示）。包括编译错误、类型不匹配、未使用的导入等问题。用于在编辑后验证代码正确性。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "要检查的文件路径（相对于工作目录）",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "rename_symbol",
+			Description: "安全重命名符号（跨文件）。会自动更新所有引用该符号的位置。比手动搜索替换更安全可靠。适用于重命名函数、变量、类型等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "文件路径（相对于工作目录）",
+					},
+					"line": map[string]interface{}{
+						"type":        "integer",
+						"description": "行号（0-based，指向要重命名的符号）",
+					},
+					"column": map[string]interface{}{
+						"type":        "integer",
+						"description": "列号（0-based，指向要重命名的符号）",
+					},
+					"new_name": map[string]interface{}{
+						"type":        "string",
+						"description": "新的符号名称",
+					},
+				},
+				"required": []string{"path", "line", "column", "new_name"},
+			},
+		},
+	},
+	// ========== [P0-3] 多模态工具 ==========
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "analyze_image",
+			Description: "分析图片/截图/UI设计稿。支持 PNG/JPG/GIF/WebP 格式。可识别UI布局、错误截图、设计稿等，并生成对应代码或分析报告。需要 LLM 支持 vision 能力（如 GPT-4o/Claude-3/Gemini）。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "图片路径（相对于工作目录）或URL（http://开头）",
+					},
+					"prompt": map[string]interface{}{
+						"type":        "string",
+						"description": "分析提示词（如'将这个UI转为React代码'、'分析这个错误截图'）",
+					},
+				},
+				"required": []string{"path", "prompt"},
 			},
 		},
 	},

@@ -107,7 +107,7 @@ func (t *FileChangeTracker) CheckConflict(relPath string) (bool, string) {
 	return false, ""
 }
 
-// RollbackLast 回滚最后一次对指定文件的编辑
+// RollbackLast 回滚最后一次对指定文件的编辑，恢复到编辑前的状态
 // 返回回滚是否成功和原因
 func (t *FileChangeTracker) RollbackLast(relPath string) (bool, string) {
 	t.mu.Lock()
@@ -116,19 +116,28 @@ func (t *FileChangeTracker) RollbackLast(relPath string) (bool, string) {
 	// 从后往前找该文件的最新快照
 	for i := len(t.snapshots) - 1; i >= 0; i-- {
 		if t.snapshots[i].Path == relPath {
-			snap := t.snapshots[i]
+			// [BUGFIX] 回滚到的是"编辑前"的状态，即前一个快照（i-1）
+			// 当前快照(i)存的是编辑后的内容，我们需要恢复到编辑前
+			if i == 0 {
+				// 第一个快照，没有更早的状态可回滚
+				return false, fmt.Sprintf("%s 是初始快照，无法再回滚", relPath)
+			}
+
+			currentSnap := t.snapshots[i]
+			prevSnap := t.snapshots[i-1]
 			absPath := filepath.Join(t.workDir, relPath)
 
-			err := os.WriteFile(absPath, []byte(snap.Content), 0644)
+			err := os.WriteFile(absPath, []byte(prevSnap.Content), 0644)
 			if err != nil {
 				return false, fmt.Sprintf("回滚写入失败: %v", err)
 			}
 
-			// 移除已回滚的快照及之后的所有快照（保持一致性）
-			t.snapshots = t.snapshots[:i]
+			// 只移除当前快照（被撤销的edit），保留前一个作为新的"当前状态"
+			t.snapshots = append(t.snapshots[:i], t.snapshots[i+1:]...)
 
-			fmt.Printf("[FileTracker] ↩️ 回滚 %s 到 #%d (%s)\n", relPath, i+1, snap.Timestamp.Format("15:04:05"))
-			return true, fmt.Sprintf("已回滚 %s 到 %s 的状态", relPath, snap.Timestamp.Format("15:04:05"))
+			fmt.Printf("[FileTracker] ↩️ 回滚 %s — 撤销了 %q 操作\n", relPath, currentSnap.Action)
+			return true, fmt.Sprintf("已撤销 %s 的 %q 操作（恢复到前一个状态）",
+				relPath, currentSnap.Action)
 		}
 	}
 	return false, fmt.Sprintf("没有找到 %s 的快照", relPath)
