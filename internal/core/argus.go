@@ -329,7 +329,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	if seErr != nil {
 		result.Error = fmt.Errorf("SE execution failed: %w", seErr)
-		c.emit("se_to_user", fmt.Sprintf("@USR SE执行失败: %v", seErr))
+		c.emit("se_to_pm", fmt.Sprintf("@USR SE执行失败: %v", seErr))
 		return result
 	}
 
@@ -339,7 +339,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	actions = c.ensureExecAction(actions)
 
 	if completed {
-		c.emit("se_to_user", fmt.Sprintf("@PM ✅ %s", c.extractCompletedSummary(seResponse)))
+		c.emit("se_to_pm", fmt.Sprintf("@PM ✅ %s", c.extractCompletedSummary(seResponse)))
 		c.emitStatus("done", "none", "idle")
 		result.Success = true
 		return result
@@ -363,19 +363,18 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	if len(actions) == 0 && !completed {
 		result.Error = fmt.Errorf("SE returned no valid actions after retries")
-		c.emit("se_to_user", "@USR SE无法生成有效操作")
+		c.emit("se_to_pm", "@USR SE无法生成有效操作")
 		return result
 	}
 
-	c.emit("se_to_user", fmt.Sprintf("🔧 执行 %d 个操作...", len(actions)))
-
+	// 执行操作
 	execResults, execErr := c.executeActions(actions)
 
 	maxSelfFix := 5
 	for selfAttempt := 0; selfAttempt <= maxSelfFix; selfAttempt++ {
 		if execErr == nil && c.seExecutionSatisfied(execResults) {
 			if selfAttempt > 0 {
-				c.emit("se_to_user", fmt.Sprintf("✅ SE 自我修正成功！(第%d次尝试)", selfAttempt))
+				// self-fix 成功，继续执行
 			}
 			break
 		}
@@ -393,7 +392,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		if execErr != nil {
 			feedbackErr = execErr.Error()
 		}
-		c.emit("se_to_user", fmt.Sprintf("🔄 SE Self-Fix #%d/%d: %s", selfAttempt+1, maxSelfFix, feedbackErr))
+		c.emit("se_to_pm", fmt.Sprintf("🔄 SE Self-Fix #%d/%d: %s", selfAttempt+1, maxSelfFix, feedbackErr))
 
 		var feedbackPrompt string
 		switch selfAttempt {
@@ -474,7 +473,7 @@ Output ONLY this exact JSON structure:
 
 		seResponse, seErr = c.callAI(RoleSE, feedbackPrompt, c.memory.FormatForPrompt())
 		if seErr != nil {
-			c.emit("se_to_user", fmt.Sprintf("⚠️ Self-fix call failed: %v", seErr))
+			c.emit("se_to_pm", fmt.Sprintf("⚠️ Self-fix call failed: %v", seErr))
 			continue
 		}
 		c.memory.Add(RoleSE, fmt.Sprintf("SE self-fix #%d", selfAttempt+1))
@@ -482,11 +481,11 @@ Output ONLY this exact JSON structure:
 		actions, _ = c.parseSEResponse(seResponse)
 		actions = c.ensureExecAction(actions)
 		if len(actions) == 0 {
-			c.emit("se_to_user", "⚠️ SE returned no actions on self-fix")
+			c.emit("se_to_pm", "⚠️ SE returned no actions on self-fix")
 			continue
 		}
 
-		c.emit("se_to_user", fmt.Sprintf("🔧 重新执行 %d 个操作...", len(actions)))
+		// self-fix 后重新执行
 		execResults, execErr = c.executeActions(actions)
 	}
 
@@ -494,14 +493,13 @@ Output ONLY this exact JSON structure:
 	result.Actions = actions
 
 	seDisplay := c.extractDisplayText(seResponse)
-	c.emit("se_to_user", seDisplay)
+	c.emit("se_to_pm", seDisplay)
 
 	if result.Error != nil {
 		c.emitStatus("error", "se", "idle")
 		return result
 	}
 
-	c.emit("se_to_user", "✅ SE execution completed, submitting for PM review...")
 	c.memory.Add(RoleSE, fmt.Sprintf("SE completed. Actions: %d, Results: %v", len(actions), execResults))
 
 	// 📋 TODO: SE执行完成，标记Review为doing
@@ -515,7 +513,7 @@ Output ONLY this exact JSON structure:
 	for reviewAttempt := 0; reviewAttempt < maxReviewRetries; reviewAttempt++ {
 		if reviewAttempt > 0 {
 			c.emitStatus("se", "se", "busy")
-			c.emit("se_to_user", fmt.Sprintf("🔄 SE Retry #%d (PM Feedback): %s", reviewAttempt, reviewResult.Reason))
+			c.emit("se_to_pm", fmt.Sprintf("🔄 SE Retry #%d (PM Feedback): %s", reviewAttempt, reviewResult.Reason))
 
 			// 📋 TODO: 添加重试任务
 			c.todo.AddTask(fmt.Sprintf("SE Retry #%d: Fix PM feedback", reviewAttempt+1), "se_retry", 1)
@@ -535,7 +533,7 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 
 			seResponse, seErr = c.callAI(RoleSE, retryPrompt, c.memory.FormatForPrompt())
 			if seErr != nil {
-				c.emit("se_to_user", fmt.Sprintf("@USR SE retry failed: %v", seErr))
+				c.emit("se_to_pm", fmt.Sprintf("@USR SE retry failed: %v", seErr))
 				break
 			}
 			c.memory.Add(RoleSE, fmt.Sprintf("SE retry #%d response", reviewAttempt+1))
@@ -543,30 +541,25 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 			actions, _ = c.parseSEResponse(seResponse)
 			actions = c.ensureExecAction(actions)
 			if len(actions) == 0 {
-				c.emit("se_to_user", "@USR ⚠️ SE returned no actions on retry - marking as failed")
+				c.emit("se_to_pm", "@USR ⚠️ SE returned no actions on retry - marking as failed")
 				reviewResult.Rejected = true
 				reviewResult.Reason = "SE returned empty actions - unable to fix"
 				break
 			}
 
-			c.emit("se_to_user", fmt.Sprintf("🔧 Re-executing %d operations...", len(actions)))
+			// PM feedback retry: 重新执行
 			execResults, execErr = c.executeActions(actions)
 			result.Outputs = execResults
 			result.Actions = actions
 			if execErr != nil {
-				c.emit("se_to_user", fmt.Sprintf("⚠️ Retry execution error: %v", execErr))
+				c.emit("se_to_pm", fmt.Sprintf("⚠️ Retry execution error: %v", execErr))
 				continue
 			}
-			c.emit("se_to_user", "✅ SE retry execution completed")
+			// retry execution done, continue to PM review
 		}
 
 		// --- Phase 3: PM Code Review ---
 		c.emitStatus("review", "pm", "busy")
-		if reviewAttempt == 0 {
-			c.emit("review_start", "📋 PM reviewing SE's work...")
-		} else {
-			c.emit("review_start", fmt.Sprintf("📋 PM reviewing SE's retry #%d work...", reviewAttempt+1))
-		}
 
 		reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s\n[Retry Attempt] %d/%d",
 			userMsg, actions, execResults, seResponse, reviewAttempt+1, maxReviewRetries)
@@ -615,9 +608,7 @@ Decide: approve or reject with specific reasons.`,
 		c.emit("pm_review", reviewResult.DisplayText)
 
 		if !reviewResult.Rejected {
-			c.emit("pm_review", "✅ PM Review passed!")
-
-			// 📋 TODO: PM Review通过，标记AP为doing
+			// PM approved, proceed to AP
 			c.todo.CompleteCurrent() // Review done
 			c.todo.MarkCurrentDoing() // AP start
 
@@ -651,7 +642,6 @@ Decide: approve or reject with specific reasons.`,
 	}
 
 	c.emitStatus("approve", "ap", "busy")
-	c.emit("ap_start", "🔒 AP final approval...")
 
 	apCtx := c.memory.FormatForPrompt()
 	pmStatus := "approved"
@@ -711,7 +701,7 @@ Perform final quality and security check. Approve or reject with reasons.`,
 
 			c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected #%d/%d: %s", apAttempt+1, maxAPRetries, apResult.Reason))
 			c.emitStatus("se", "se", "busy")
-			c.emit("se_to_user", fmt.Sprintf("🔄 SE AP-Fix #%d: %s", apAttempt+1, apResult.Reason))
+			c.emit("se_to_pm", fmt.Sprintf("🔄 SE AP-Fix #%d: %s", apAttempt+1, apResult.Reason))
 
 			apFixPrompt := fmt.Sprintf(`AP FINAL APPROVAL REJECTED - CRITICAL FIX REQUIRED
 
@@ -745,7 +735,7 @@ Generate corrected actions JSON:
 
 			seResponse, seErr = c.callAI(RoleSE, apFixPrompt, c.memory.FormatForPrompt())
 			if seErr != nil {
-				c.emit("se_to_user", fmt.Sprintf("@USR SE AP-fix failed: %v", seErr))
+				c.emit("se_to_pm", fmt.Sprintf("@USR SE AP-fix failed: %v", seErr))
 				continue
 			}
 			c.memory.Add(RoleSE, fmt.Sprintf("SE AP-fix #%d response", apAttempt+1))
@@ -753,24 +743,23 @@ Generate corrected actions JSON:
 			actions, _ = c.parseSEResponse(seResponse)
 			actions = c.ensureExecAction(actions)
 			if len(actions) == 0 {
-				c.emit("se_to_user", "@USR ⚠️ SE returned no actions on AP-fix - marking as failed")
+				c.emit("se_to_pm", "@USR ⚠️ SE returned no actions on AP-fix - marking as failed")
 				apResult.Rejected = true
 				apResult.Reason = "SE returned empty actions - unable to fix AP feedback"
 				break
 			}
 
-			c.emit("se_to_user", fmt.Sprintf("🔧 执行AP修复 %d 个操作...", len(actions)))
+			// AP-fix: 执行修复操作
 			execResults, execErr = c.executeActions(actions)
 			result.Outputs = execResults
 			result.Actions = actions
 			if execErr != nil {
-				c.emit("se_to_user", fmt.Sprintf("⚠️ AP-fix execution error: %v", execErr))
+				c.emit("se_to_pm", fmt.Sprintf("⚠️ AP-fix execution error: %v", execErr))
 				continue
 			}
-			c.emit("se_to_user", "✅ SE AP-fix execution completed")
+			// AP-fix execution done, continue to PM re-review
 
 			c.emitStatus("review", "pm", "busy")
-			c.emit("review_start", "📋 PM re-reviewing after AP fix...")
 
 			reviewCtx := fmt.Sprintf("[User Request] %s\n[SE Actions] %v\n[SE Results] %v\n[SE Response] %s\n[AP Rejection] %s\n[Retry Attempt] AP-fix #%d/%d",
 				userMsg, actions, execResults, seResponse, apResult.Reason, apAttempt+1, maxAPRetries)
@@ -786,10 +775,9 @@ Generate corrected actions JSON:
 				c.emit("pm_review", fmt.Sprintf("@SE ❌ PM re-rejected (AP-fix #%d): %s", apAttempt+1, reviewResult.Reason))
 				continue
 			}
-			c.emit("pm_review", "✅ PM re-review passed!")
+			// PM re-review approved, proceed to AP re-eval
 
 			c.emitStatus("approve", "ap", "busy")
-			c.emit("ap_result", "🔒 AP re-evaluating...")
 			apPrompt := fmt.Sprintf(`Final approval for task: %s
 
 SE executed %d actions (AP-fix re-evaluation #%d).
@@ -831,7 +819,6 @@ Perform final quality and security check. Approve or reject with reasons.`,
 		return result
 	}
 
-	c.emit("ap_result", "✅ 交付完成！PM Review + AP Approval 全部通过")
 	c.emitStatus("done", "none", "idle")
 
 	// 📋 TODO: 全部完成
@@ -903,7 +890,7 @@ func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
 	default:
 		return actions
 	}
-	c.emit("se_to_user", fmt.Sprintf("🔧 自动追加 exec: %s (SE遗漏执行命令)", execCmd))
+	c.emit("se_to_pm", fmt.Sprintf("🔧 自动追加 exec: %s (SE遗漏执行命令)", execCmd))
 	actions = append(actions, ai.SEAction{Type: "exec", Command: execCmd})
 	return actions
 }
@@ -1363,7 +1350,7 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		})
 
 		outputs = append(outputs, output)
-		c.emit("se_to_user", output)
+		c.emit("se_to_pm", output)
 
 		if err != nil {
 			return outputs, fmt.Errorf("action %d (%s) failed: %w", i, action.Type, err)

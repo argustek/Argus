@@ -1,6 +1,7 @@
 package main
 
 import (
+	"argus/internal/executor"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,6 +41,11 @@ func (a *App) StartHTTPServer() {
 	fmt.Printf("[HTTPServer]   POST /exec          执行命令\n")
 	fmt.Printf("[HTTPServer]   POST /write         写文件\n")
 	fmt.Printf("[HTTPServer]   GET  /read          读文件\n")
+	fmt.Printf("[HTTPServer] 直接工具端口 (/api/v1/tool/):\n")
+	fmt.Printf("[HTTPServer]   POST /tool/exec-session   持久化 shell 命令\n")
+	fmt.Printf("[HTTPServer]   POST /tool/semantic-search 语义代码搜索\n")
+	fmt.Printf("[HTTPServer]   POST /tool/search-files   文件内容搜索\n")
+	fmt.Printf("[HTTPServer]   GET  /tool/shell-status   shell 会话状态\n")
 	fmt.Printf("[HTTPServer] SSE 端点 (/api/v1/sse/):\n")
 	fmt.Printf("[HTTPServer]   POST /subscribe     SSE流式推送\n")
 	fmt.Printf("[HTTPServer] Admin 端点 (/admin/):\n")
@@ -66,6 +72,12 @@ func (a *App) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/write", a.authMiddleware(http.HandlerFunc(a.handleWrite)).ServeHTTP)
 	mux.HandleFunc("GET /api/v1/read", a.authMiddleware(http.HandlerFunc(a.handleRead)).ServeHTTP)
 	mux.HandleFunc("POST /api/v1/reset", a.authMiddleware(http.HandlerFunc(a.handleReset)).ServeHTTP)
+
+	// 直接工具端口（不经过 PM/SE 管道，毫秒级响应）
+	mux.HandleFunc("POST /api/v1/tool/exec-session", a.authMiddleware(http.HandlerFunc(a.handleToolExecSession)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tool/semantic-search", a.authMiddleware(http.HandlerFunc(a.handleToolSemanticSearch)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tool/search-files", a.authMiddleware(http.HandlerFunc(a.handleToolSearchFiles)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/tool/shell-status", a.authMiddleware(http.HandlerFunc(a.handleToolShellStatus)).ServeHTTP)
 }
 
 func (a *App) registerSSERoutes(mux *http.ServeMux) {
@@ -380,6 +392,212 @@ func (a *App) handlePing(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"timestamp": time.Now().Format(time.RFC3339),
 		"version":   "0.1.0",
+	})
+}
+
+// ========== 直接工具端口 ==========
+
+// handleToolExecSession POST /api/v1/tool/exec-session
+// 在持久化 shell 中执行命令（保持 cd/env 跨命令）
+func (a *App) handleToolExecSession(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+	var req struct {
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	if req.Timeout <= 0 {
+		req.Timeout = 60
+	}
+
+	executor := a.chatManager.GetExecutor()
+	output, err := executor.ExecWithSession(req.Command, time.Duration(req.Timeout)*time.Second)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"output":  output,
+			"error":   err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"output":  output,
+	})
+}
+
+// handleToolSemanticSearch POST /api/v1/tool/semantic-search
+// 语义搜索代码库（AI 概念提取 + 关键词双通道评分）
+func (a *App) handleToolSemanticSearch(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+	var req struct {
+		Query      string `json:"query"`
+		MaxResults int    `json:"max_results"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query is required"})
+		return
+	}
+	if req.MaxResults <= 0 {
+		req.MaxResults = 10
+	}
+
+	sp := a.chatManager.GetSEProcessor()
+	if sp == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "SEProcessor 未初始化"})
+		return
+	}
+	sp.EnsureIndexer()
+	indexer := sp.GetIndexer()
+	if indexer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "索引未就绪"})
+		return
+	}
+
+	results := indexer.Search(req.Query, req.MaxResults)
+	textResult := indexer.SemSearch(req.Query)
+
+	type jsonResult struct {
+		Score   float64  `json:"score"`
+		Symbol  string   `json:"symbol"`
+		Kind    string   `json:"kind"`
+		Path    string   `json:"path"`
+		Line    int      `json:"line"`
+		MatchOn []string `json:"match_on"`
+	}
+	var jsonResults []jsonResult
+	for _, r := range results {
+		jsonResults = append(jsonResults, jsonResult{
+			Score:   r.Score,
+			Symbol:  r.Entry.Symbol,
+			Kind:    r.Entry.Kind,
+			Path:    r.Entry.FilePath,
+			Line:    r.Entry.Line,
+			MatchOn: r.MatchOn,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"query":   req.Query,
+		"count":   len(jsonResults),
+		"results": jsonResults,
+		"text":    textResult,
+		"stats":   indexer.Stats(),
+	})
+}
+
+// handleToolSearchFiles POST /api/v1/tool/search-files
+// 按模式和正则搜索文件内容
+func (a *App) handleToolSearchFiles(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+	var req struct {
+		Pattern         string `json:"pattern"`
+		FilePattern     string `json:"file_pattern"`
+		IsRegex         bool   `json:"is_regex"`
+		CaseInsensitive bool   `json:"case_insensitive"`
+		MaxResults      int    `json:"max_results"`
+		ContextLines    int    `json:"context_lines"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.Pattern == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pattern is required"})
+		return
+	}
+	if req.MaxResults <= 0 {
+		req.MaxResults = 100
+	}
+
+	var opts []executor.SearchOption
+	if req.IsRegex {
+		opts = append(opts, executor.WithRegex())
+	}
+	if req.CaseInsensitive {
+		opts = append(opts, executor.WithCaseInsensitive())
+	}
+	if req.FilePattern != "" {
+		opts = append(opts, executor.WithFilePattern(req.FilePattern))
+	}
+	if req.ContextLines > 0 {
+		opts = append(opts, executor.WithContextLines(req.ContextLines))
+	}
+	opts = append(opts, executor.WithMaxResults(req.MaxResults))
+
+	exe := a.chatManager.GetExecutor()
+	result, err := exe.SearchFiles(req.Pattern, opts...)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if result.Error != "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"error":   result.Error,
+			"matches": result.Matches,
+		})
+		return
+	}
+
+	type matchResult struct {
+		Path    string   `json:"path"`
+		Line    int      `json:"line"`
+		Content string   `json:"content"`
+		Context []string `json:"context"`
+	}
+	var matches []matchResult
+	for _, m := range result.Matches {
+		ctx := append([]string{}, m.ContextBefore...)
+		ctx = append(ctx, m.ContextAfter...)
+		matches = append(matches, matchResult{
+			Path:    m.File,
+			Line:    m.Line,
+			Content: m.Content,
+			Context: ctx,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":      true,
+		"pattern":      req.Pattern,
+		"count":        len(matches),
+		"total_scanned": result.FilesSearched,
+		"matches":      matches,
+	})
+}
+
+// handleToolShellStatus GET /api/v1/tool/shell-status
+// 查看持久化 shell 会话状态
+func (a *App) handleToolShellStatus(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+	exe := a.chatManager.GetExecutor()
+	ss, err := exe.GetShellSession()
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"active":  false,
+			"error":   err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active": ss.IsRunning(),
+		"cwd":    ss.CWD(),
 	})
 }
 

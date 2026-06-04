@@ -2507,11 +2507,20 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 				}
 			}()
 			if m.seProcessor == nil {
-				errMsg := fmt.Errorf("seProcessor is nil")
-				fmt.Printf("[SE] 🔴 FATAL: %v\n", errMsg)
-				m.writeRouteLog(fmt.Sprintf("[SE-FATAL] %s", errMsg.Error()))
-				return errMsg
-			}
+			errMsg := fmt.Errorf("seProcessor is nil")
+			fmt.Printf("[SE] 🔴 FATAL: %v\n", errMsg)
+			m.writeRouteLog(fmt.Sprintf("[SE-FATAL] %s", errMsg.Error()))
+			return errMsg
+		}
+
+		// 首次启动SE任务时异步构建语义搜索索引
+		if attempt == 0 {
+			go func() {
+				if err := m.seProcessor.EnsureIndexer(); err != nil {
+					fmt.Printf("[SemSearch] 索引构建警告: %v\n", err)
+				}
+			}()
+		}
 		}
 
 		resp, err = m.seProcessor.ProcessTaskWithTools(taskDesc, func(delta string) {
@@ -3226,6 +3235,109 @@ func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, 
 	return msgId
 }
 
+// isReadOnlyAction 判断是否为无副作用只读操作（可并行执行）
+func isReadOnlyAction(actionType string) bool {
+	switch actionType {
+	case "read_file", "search_files":
+		return true
+	}
+	return false
+}
+
+// executeReadOnlyBatch 并行执行一批只读操作（read_file / search_files）
+func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActions int, seTaskId string) error {
+	type batchResult struct {
+		idx     int
+		content string
+		err     error
+	}
+
+	var wg sync.WaitGroup
+	results := make([]batchResult, len(batch))
+
+	for bi, action := range batch {
+		wg.Add(1)
+		go func(bi int, action ai.SEAction) {
+			defer wg.Done()
+
+			m.emitWailsEvent("exec_start", map[string]interface{}{
+				"executor": "se", "index": startIdx + bi + 1, "total": totalActions,
+				"type": action.Type, "label": action.Type + " " + action.Path,
+				"path": action.Path, "status": "running",
+			})
+
+			switch action.Type {
+			case "read_file":
+				result, err := m.seExecutor.ReadFile(action.Path)
+				if err != nil {
+					results[bi] = batchResult{idx: bi, err: err}
+				} else {
+					results[bi] = batchResult{idx: bi, content: result}
+				}
+
+			case "search_files":
+			var opts []executor.SearchOption
+			if action.IsRegex {
+				opts = append(opts, executor.WithRegex())
+			}
+			if action.CaseInsensitive {
+				opts = append(opts, executor.WithCaseInsensitive())
+			}
+			if action.FilePattern != "" {
+				opts = append(opts, executor.WithFilePattern(action.FilePattern))
+			}
+			searchResult, err := m.seExecutor.SearchFiles(action.Pattern, opts...)
+			if err != nil {
+				results[bi] = batchResult{idx: bi, err: err}
+			} else if searchResult.Error != "" {
+				results[bi] = batchResult{idx: bi, err: fmt.Errorf("%s", searchResult.Error)}
+			} else {
+				results[bi] = batchResult{idx: bi, content: formatSearchResult(searchResult)}
+			}
+			}
+		}(bi, action)
+	}
+
+	wg.Wait()
+
+	// 按顺序反馈结果（保持 SE context 一致性）
+	for bi, r := range results {
+		action := batch[bi]
+		if r.err != nil {
+			errMsg := fmt.Sprintf("❌ %s: %v", action.Type, r.err)
+			m.seProcessor.AddResult(errMsg)
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": startIdx + bi + 1, "type": action.Type,
+				"label": action.Type + " " + action.Path, "status": "error", "error": errMsg,
+			})
+		} else {
+			if action.Type == "read_file" {
+				m.seProcessor.AddResult(fmt.Sprintf("文件内容 [%s]:\n%s", action.Path, r.content))
+			} else {
+				m.seProcessor.AddResult(fmt.Sprintf("搜索结果:\n%s", r.content))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": startIdx + bi + 1, "type": action.Type,
+				"label": action.Type + " " + action.Path, "status": "done",
+			})
+		}
+	}
+
+	return nil
+}
+
+func formatSearchResult(r *executor.SearchFilesResult) string {
+	if r == nil || r.TotalMatches == 0 {
+		return "未找到匹配内容"
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("找到 %d 处匹配（搜索 %d 个文件）:\n", r.TotalMatches, r.FilesSearched))
+	for _, m := range r.Matches {
+		sb.WriteString(fmt.Sprintf("  %s:%d: %s\n", m.File, m.Line, m.Content))
+	}
+	return sb.String()
+}
+
 // executeSEActions 执行SE的actions
 func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	fmt.Printf("[PROBE-executeSEActions] 🟢 入口: actions=%d (时间:%s)\n",
@@ -3340,6 +3452,24 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				f.Close()
 			}
 		}()
+
+		// 🆕 并行批处理：连续只读操作（read_file/search_files/list_files/glob/web_search）并发执行
+		if isReadOnlyAction(action.Type) {
+			batchSize := 1
+			for j := i + 1; j < len(actions) && isReadOnlyAction(actions[j].Type) && batchSize < 5; j++ {
+				batchSize++
+			}
+			if batchSize > 1 {
+				fmt.Printf("[PARALLEL] 🚀 批处理 %d 个只读操作: idx %d-%d\n", batchSize, i, i+batchSize-1)
+				batch := actions[i : i+batchSize]
+				if err := m.executeReadOnlyBatch(batch, i, totalActions, seTaskId); err != nil {
+					fmt.Printf("[PARALLEL] ❌ 批处理失败: %v\n", err)
+					return err
+				}
+				i += batchSize - 1 // 跳过已处理项（for 循环会 +1）
+				continue
+			}
+		}
 
 		switch action.Type {
 		case "write_file":
@@ -3881,11 +4011,56 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.richBuilder.PushShellDone("se", seTaskId, 0, "", "done")
 			}
 			m.emitWailsEvent("exec_output", map[string]interface{}{
-				"executor":  "se",
-				"command":   action.Command,
-				"output":    truncateSSEOutput(output, 500),
-				"exit_code": 0,
+			"executor":  "se",
+			"command":   action.Command,
+			"output":    truncateSSEOutput(output, 500),
+			"exit_code": 0,
+		})
+
+	case "exec_session":
+		// 持久化 shell 会话执行（保持 cd/env 状态）
+		if m.configManager != nil {
+			level, desc := m.configManager.CheckCommand(action.Command)
+			if level == types.CmdBlockDeny {
+				errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "exec_session",
+					"label": actionLabel, "status": "blocked", "error": errMsg,
+				})
+				if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "failed") }
+				continue
+			}
+		}
+
+		sessionOutput, sessionErr := m.seExecutor.ExecWithSession(action.Command, 60*time.Second)
+		if sessionErr != nil {
+			errMsg := fmt.Sprintf("执行失败: %v", sessionErr)
+			fmt.Printf("[Action] ❌ exec_session: %s\n", errMsg)
+			m.seProcessor.AddResult(fmt.Sprintf("❌ %s\n输出:\n%s", errMsg, sessionOutput))
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "exec_session",
+				"label": actionLabel, "status": "error", "error": errMsg,
 			})
+			m.emitWailsEvent("exec_output", map[string]interface{}{
+				"executor": "se", "command": action.Command,
+				"output": truncateSSEOutput(sessionOutput, 500), "exit_code": -1,
+			})
+			if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "failed") }
+			continue
+		}
+
+		fmt.Printf("[Action] exec_session: %s → %s\n", action.Command, strings.TrimSpace(sessionOutput)[:min(100, len(strings.TrimSpace(sessionOutput)))])
+		m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", sessionOutput))
+		m.emitWailsEvent("exec_done", map[string]interface{}{
+			"executor": "se", "index": i + 1, "type": "exec_session",
+			"label": actionLabel, "status": "done",
+		})
+		if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "done") }
+		m.emitWailsEvent("exec_output", map[string]interface{}{
+			"executor": "se", "command": action.Command,
+			"output": truncateSSEOutput(sessionOutput, 500), "exit_code": 0,
+		})
 
 		case "check_env":
 			fmt.Printf("[Action] Check env: %s\n", action.Tool)
@@ -6101,6 +6276,10 @@ func (m *Manager) GetMessageBus() *MessageBus {
 
 func (m *Manager) GetExecutor() *executor.Executor {
 	return m.seExecutor
+}
+
+func (m *Manager) GetSEProcessor() *ai.SEProcessor {
+	return m.seProcessor
 }
 
 func (m *Manager) GetSSEBridge() *SSEBridge {

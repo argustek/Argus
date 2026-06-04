@@ -25,6 +25,7 @@ type Executor struct {
 	boardManager   *board.Manager
 	terminalOutput func(string)
 	onFileWritten  func(path string)
+	shellSession   *ShellSession
 }
 
 func NewExecutor(workDir string, boardManager *board.Manager) *Executor {
@@ -44,6 +45,33 @@ func (e *Executor) SetOnFileWritten(callback func(path string)) {
 
 func (e *Executor) SetWorkDir(workDir string) {
 	e.workDir = workDir
+	// 重置 shell session（工作目录变了）
+	if e.shellSession != nil {
+		e.shellSession.Close()
+		e.shellSession = nil
+	}
+}
+
+// GetShellSession 获取或创建持久化 shell 会话
+func (e *Executor) GetShellSession() (*ShellSession, error) {
+	if e.shellSession != nil && e.shellSession.IsRunning() {
+		return e.shellSession, nil
+	}
+	ss, err := NewShellSession(e.workDir)
+	if err != nil {
+		return nil, err
+	}
+	e.shellSession = ss
+	return ss, nil
+}
+
+// ExecWithSession 在持久化 shell 中执行命令（保持 cd/env 状态）
+func (e *Executor) ExecWithSession(command string, timeout time.Duration) (string, error) {
+	ss, err := e.GetShellSession()
+	if err != nil {
+		return "", err
+	}
+	return ss.Exec(command, timeout)
 }
 
 func (e *Executor) WriteFile(path, content string) error {
