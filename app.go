@@ -1316,14 +1316,14 @@ func (a *App) getConfigDir() string {
 		return "."
 	}
 
-	// 尝试多个可能的项目根目录
+	// 尝试多个可能的项目根目录（exe所在目录优先，避免工作目录污染）
 	possibleRoots := []string{
-		// 当前目录（开发时）
-		".",
 		// 可执行文件所在目录的父目录（dev 模式：build/bin/ -> build/ -> 项目根）
 		filepath.Join(filepath.Dir(exePath), "..", ".."),
 		// 可执行文件所在目录（生产模式）
 		filepath.Dir(exePath),
+		// 当前目录（开发时，仅作为 fallback）
+		".",
 	}
 
 	for _, root := range possibleRoots {
@@ -1345,6 +1345,7 @@ func (a *App) getConfigDir() string {
 
 func (a *App) loadConfig() {
 	configPath := filepath.Join(a.getConfigDir(), "config.json")
+	a.addLog(fmt.Sprintf("[loadConfig] ConfigPath: %s", configPath))
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		a.addLog(fmt.Sprintf("读取主配置失败: %v", err))

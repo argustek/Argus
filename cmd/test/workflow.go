@@ -51,41 +51,46 @@ func main() {
 
 	fmt.Println()
 
-	// 测试2: 用户编程需求
-	fmt.Println("=== 测试2: 用户编程需求 ===")
-	userInput = "帮我写一个hello.go，输出Hello World"
-	msg = router.Parse("user", userInput)
-	fmt.Printf("[用户] %s -> 发给: %s\n", msg.Content, msg.To)
+	// 测试2: 用户编程需求 - 回归5遍
+	for round := 1; round <= 5; round++ {
+		fmt.Printf("\n========== Hello World 回归测试 #%d/5 ==========\n", round)
+		userInput := "帮我写一个hello.go，输出Hello World"
+		msg = router.Parse("user", userInput)
+		fmt.Printf("[用户] %s -> 发给: %s\n", msg.Content, msg.To)
 
-	if msg.To == "pm" {
-		resp, err := pmProcessor.Process(msg.Content, nil)
-		if err != nil {
-			fmt.Printf("PM处理失败: %v\n", err)
-		} else {
-			fmt.Printf("[PM] %s\n", resp.Content)
+		if msg.To == "pm" {
+			resp, err := pmProcessor.Process(msg.Content, nil)
+			if err != nil {
+				fmt.Printf("  ❌ PM处理失败: %v\n", err)
+				continue
+			}
+			fmt.Printf("  [PM] %s\n", resp.Content)
 			if resp.HasTasks {
-				fmt.Printf("[系统] PM创建了任务: %s\n", resp.Tasks.CurrentTask)
+				fmt.Printf("  [系统] PM创建任务: %s\n", resp.Tasks.CurrentTask)
 
-				// 启动SE
-				fmt.Println("[系统] 启动SE执行任务...")
+				seProcessor.ResetHistory() // 每轮重置SE历史
 				boardManager.UpdateTask(resp.Tasks.CurrentTask, 1)
 
 				seResp, err := seProcessor.ProcessTaskWithTools(resp.Tasks.CurrentTask, nil)
 				if err != nil {
-					fmt.Printf("SE处理失败: %v\n", err)
+					fmt.Printf("  ❌ SE处理失败: %v\n", err)
 				} else {
-					fmt.Printf("[SE] %s\n", seResp.Content)
+					fmt.Printf("  [SE] 内容: %s\n", seResp.Content)
 					if len(seResp.Actions) > 0 {
-						fmt.Printf("[系统] SE需要执行 %d 个操作\n", len(seResp.Actions))
+						fmt.Printf("  [系统] SE执行了 %d 个操作:\n", len(seResp.Actions))
 						for i, action := range seResp.Actions {
-							fmt.Printf("  [%d] %s: %s\n", i+1, action.Type, action.Path)
+							fmt.Printf("    [%d] %s: %s\n", i+1, action.Type, action.Path)
 						}
+					}
+					if seResp.Completed != nil && seResp.Completed.Status == "completed" {
+						fmt.Printf("  ✅ 第%d遍: 任务完成! summary=%s\n", round, seResp.Completed.TechnicalNotes)
+					} else {
+						fmt.Printf("  ⚠️ 第%d遍: 未标记完成\n", round)
 					}
 				}
 			}
 		}
 	}
 
-	fmt.Println()
-	fmt.Println("=== 流程测试完成 ===")
+	fmt.Println("\n=== 5遍回归测试完成 ===")
 }

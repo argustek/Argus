@@ -331,7 +331,7 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 	}
 
 	c.recordFailure()
-	return "", fmt.Errorf(i18n.T("err.api_retry_failed"), maxRetries, lastErr)
+	return "", fmt.Errorf("%s: %w", i18n.T("err.api_retry_failed", maxRetries), lastErr)
 }
 
 func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
