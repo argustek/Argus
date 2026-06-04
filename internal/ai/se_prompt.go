@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -216,13 +217,70 @@ done:
 	return result, nil
 }
 
+// repairJSONArgs 修复LLM生成的畸形JSON参数
+// 常见损坏模式: "pathfilename"→"path":"filename", importfmt"→import "fmt", 缺失引号等
+func repairJSONArgs(raw string) string {
+	repaired := raw
+
+	// 模式1: 键值之间缺失 ": "  如 "pathfilename.go"→ 找到已知键名后修复
+	keyPatterns := []string{"path", "content", "command", "old_str", "new_str", "pattern"}
+	for _, key := range keyPatterns {
+		// "keyvalue" → "key": "value" (键后直接跟值)
+		re := regexp.MustCompile(`"` + regexp.QuoteMeta(key) + `([a-zA-Z_./\\])`)
+		repaired = re.ReplaceAllString(repaired, `"`+key+`": "$1`)
+	}
+
+	// 模式2: Go代码中常见修复 - importfmt" → import "fmt"
+	repaired = strings.ReplaceAll(repaired, `importfmt"`, `import "fmt"`)
+	repaired = strings.ReplaceAll(repaired, `import"`, `import "`)
+	repaired = strings.ReplaceAll(repaired, `package"fmt"`, `package main"\n\nimport "fmt"`)
+	repaired = strings.ReplaceAll(repaired, `package "fmt"`, `package main\n\nimport "fmt"`)
+
+	// 模式3: 缺失闭引号 - import "fmt  后面直接换行或(
+	// "import \"fmt\n → "import \"fmt\"\n
+	repaired = regexp.MustCompile(`import\s*"([^"]*?)\n`).ReplaceAllString(repaired, `import "$1"`+"\n")
+	repaired = regexp.MustCompile(`import\s*"([^"]*?)$`).ReplaceAllString(repaired, `import "$1"`)
+
+	// 模式4: func main() { ... "Beta"n} → "Beta\"\n}"
+	// 反斜杠+字母n 在Go字符串末尾应该是 \n
+	repaired = regexp.MustCompile(`"(\w)"n}`).ReplaceAllString(repaired, `$1\"\\n}"`)
+	repaired = regexp.MustCompile(`"(\w)"n$`).ReplaceAllString(repaired, `$1\"\\n"`)
+
+	// 模式5: fmt"n → fmt"\n
+	repaired = strings.ReplaceAll(repaired, `fmt"n`, `fmt"\n`)
+	repaired = strings.ReplaceAll(repaired, `"fmt"n`, `"fmt"\n`)
+
+	// 模式6: command中 go run_xxx → go run xxx (下划线变空格)
+	repaired = regexp.MustCompile(`go run_([a-z])`).ReplaceAllString(repaired, `go run $1`)
+
+	if repaired != raw {
+		fmt.Printf("[SE Tools] JSON repaired: %d → %d chars\n", len(raw), len(repaired))
+	}
+	return repaired
+}
+
 func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 	action := SEAction{Type: tc.Function.Name}
 
+	argsStr := tc.Function.Arguments
+
+	// [G-DEBUG] 记录原始ToolCall参数，排查JSON解析问题
+	fmt.Printf("[SE-RAW] tool=%q | args_len=%d | raw=%s\n", tc.Function.Name, len(argsStr),
+		func() string {
+			if len(argsStr) > 300 { return argsStr[:300] + "..." }
+			return argsStr
+		}())
+
 	var args map[string]interface{}
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		fmt.Printf("[SE Tools] failed to parse tool args: %v\n", err)
-		return action
+	if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+		fmt.Printf("[SE Tools] failed to parse tool args: %v, attempting repair...\n", err)
+		// 尝试修复后再解析
+		repaired := repairJSONArgs(argsStr)
+		if err2 := json.Unmarshal([]byte(repaired), &args); err2 != nil {
+			fmt.Printf("[SE Tools] repair also failed: %v\n", err2)
+			return action
+		}
+		fmt.Printf("[SE Tools] ✅ JSON repair succeeded\n")
 	}
 
 	switch tc.Function.Name {
@@ -233,6 +291,9 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 		if v, ok := args["content"].(string); ok {
 			action.Content = v
 		}
+		// [G-DEBUG] 显示解析结果
+		fmt.Printf("[SE-PARSED] write_file → path=%q (%d chars) | content=%d chars\n",
+			action.Path, len(action.Path), len(action.Content))
 	case "exec":
 		if v, ok := args["command"].(string); ok {
 			action.Command = v
@@ -559,47 +620,136 @@ func (s *SEProcessor) walkMatch(baseDir, pattern, currentDir string, results *[]
 	}
 }
 
-// webSearch 执行网络搜索，返回搜索结果摘要
+// searchEngine 定义搜索引擎接口
+type searchEngine struct {
+	Name string
+	URL  func(query string) string
+}
+
+var searchEngines = []searchEngine{
+	{
+		Name: "DuckDuckGo",
+		URL:  func(q string) string { return fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(q)) },
+	},
+	{
+		Name: "Bing",
+		URL:  func(q string) string { return fmt.Sprintf("https://www.bing.com/search?q=%s", url.QueryEscape(q)) },
+	},
+}
+
+// webSearch 执行网络搜索，多引擎 fallback + 来源 URL 引用
 func (s *SEProcessor) webSearch(query string) string {
 	client := &http.Client{Timeout: 15 * time.Second}
-	// 使用 DuckDuckGo HTML 版本获取即时答案
-	url := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))
-	req, _ := http.NewRequest("GET", url, nil)
+	maxResults := 5
+
+	for _, engine := range searchEngines {
+		results, err := s.searchWithEngine(client, engine, query, maxResults)
+		if err == nil && len(results) > 0 {
+			output := []string{fmt.Sprintf("🔍 搜索: %s (via %s)\n", query, engine.Name)}
+			for i, r := range results {
+				output = append(output, fmt.Sprintf("%d. %s\n   %s\n   📎 %s\n", i+1, r.Title, r.Snippet, r.URL))
+			}
+			return strings.Join(output, "\n")
+		}
+		fmt.Printf("[webSearch] ⚠️ %s 失败: %v，尝试下一个引擎...\n", engine.Name, err)
+	}
+
+	return fmt.Sprintf("未找到 '%s' 的相关结果（已尝试 DuckDuckGo + Bing）。\n提示: 可尝试更具体的关键词，或使用 exec 执行 curl 命令直接访问文档URL", query)
+}
+
+type searchResult struct {
+	Title   string
+	Snippet string
+	URL     string
+}
+
+// searchWithEngine 使用指定搜索引擎执行查询并解析结果
+func (s *SEProcessor) searchWithEngine(client *http.Client, engine searchEngine, query string, maxResults int) ([]searchResult, error) {
+	req, _ := http.NewRequest("GET", engine.URL(query), nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ArgusSE/1.0)")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Sprintf("网络搜索失败（网络不可用）: %v\n建议: 使用 exec 工具执行 curl 命令获取信息", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
-	// 提取结果片段：查找 <a class="result__a" 和 <a class="result__snippet"
-	var results []string
-	// 简单提取 result__snippet 内容
+	var results []searchResult
+	switch engine.Name {
+	case "DuckDuckGo":
+		results = s.parseDuckDuckGo(html, maxResults)
+	case "Bing":
+		results = s.parseBing(html, maxResults)
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no results from %s", engine.Name)
+	}
+	return results, nil
+}
+
+// parseDuckDuckGo 解析 DuckDuckGo HTML 结果（含 URL）
+func (s *SEProcessor) parseDuckDuckGo(html string, max int) []searchResult {
+	var results []searchResult
+
 	snippetRegex := regexp.MustCompile(`<a[^>]*class="result__snippet"[^>]*>(.*?)</a>`)
-	titleRegex := regexp.MustCompile(`<a[^>]*class="result__a"[^>]*>(.*?)</a>`)
+	titleRegex := regexp.MustCompile(`<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>`)
 
-	snippets := snippetRegex.FindAllStringSubmatch(html, 5)
-	titles := titleRegex.FindAllStringSubmatch(html, 5)
+	snippets := snippetRegex.FindAllStringSubmatch(html, max)
+	titles := titleRegex.FindAllStringSubmatch(html, max)
 
-	maxResults := len(titles)
-	if maxResults > len(snippets) {
-		maxResults = len(snippets)
-	}
-	if maxResults == 0 {
-		return fmt.Sprintf("未找到 '%s' 的相关结果。\n提示: 可尝试更具体的关键词，或使用 exec 执行 curl 命令直接访问文档URL", query)
+	count := len(titles)
+	if count > len(snippets) {
+		count = len(snippets)
 	}
 
-	results = append(results, fmt.Sprintf("🔍 搜索: %s\n", query))
-	for i := 0; i < maxResults; i++ {
-		title := stripHTML(titles[i][1])
-		snippet := stripHTML(snippets[i][1])
-		results = append(results, fmt.Sprintf("%d. %s\n   %s\n", i+1, title, snippet))
+	for i := 0; i < count; i++ {
+		results = append(results, searchResult{
+			Title:   stripHTML(titles[i][2]),
+			Snippet: stripHTML(snippets[i][1]),
+			URL:     titles[i][1],
+		})
 	}
-	return strings.Join(results, "\n")
+	return results
+}
+
+// parseBing 解析 Bing HTML 结果（含 URL）
+func (s *SEProcessor) parseBing(html string, max int) []searchResult {
+	var results []searchResult
+
+	b_algoRegex := regexp.MustCompile(`(?si)<li[^>]*class="b_algo"[^>]*>(.*?)</li>`)
+	algoBlocks := b_algoRegex.FindAllStringSubmatch(html, max)
+
+	titleRegex := regexp.MustCompile(`(?si)<h2[^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>\s*</h2>`)
+	pRegex := regexp.MustCompile(`(?si)<p[^>]*>(.*?)</p>`)
+
+	for _, block := range algoBlocks {
+		if len(results) >= max {
+			break
+		}
+		content := block[1]
+
+		titleMatch := titleRegex.FindStringSubmatch(content)
+		pMatch := pRegex.FindStringSubmatch(content)
+
+		if titleMatch != nil {
+			result := searchResult{
+				Title:   stripHTML(titleMatch[2]),
+				URL:     titleMatch[1],
+			}
+			if pMatch != nil {
+				result.Snippet = stripHTML(pMatch[1])
+				if len(result.Snippet) > 200 {
+					result.Snippet = result.Snippet[:200] + "..."
+				}
+			}
+			results = append(results, result)
+		}
+	}
+	return results
 }
 
 // stripHTML 移除HTML标签
@@ -706,56 +856,170 @@ func (s *SEProcessor) AddResult(result string) {
 	s.history = append(s.history, Message{Role: "user", Content: result})
 }
 
-// compressHistory 智能压缩历史消息：保留最近的工具交互，将旧对话摘要化
+// compressHistory 分层智能压缩历史消息
+// 升级前: 固定留15条 + 简单拼接摘要 → 长任务丢失关键决策上下文
+// 升级后: 分层保留 → 指令层完整保留 / 工具结果压缩为1行 / 最近3轮完整对话 / token计数控制总长度
 func (s *SEProcessor) compressHistory() {
-	if len(s.history) <= 20 {
-		return
+	if len(s.history) <= 24 {
+		return // 提升阈值：24条以下不压缩（原20）
 	}
 
-	// 保留最近15条消息（当前活跃的上下文）
-	recentCount := 15
-	oldMessages := s.history[:len(s.history)-recentCount]
-	s.history = s.history[len(s.history)-recentCount:]
+	// --- Layer 0: 统计 ---
+	totalMsgs := len(s.history)
+	var toolResultCount, userInstrCount, assistantCount int
+	for _, msg := range s.history {
+		switch msg.Role {
+		case "tool":
+			toolResultCount++
+		case "user", "system":
+			userInstrCount++
+		case "assistant":
+			assistantCount++
+		}
+	}
 
-	// 将旧消息摘要化：提取关键信息（做了什么操作、结果如何）
-	var summaryParts []string
+	// --- Layer 1: 保留最近3轮完整对话（6条: 3×assistant+tool）---
+	keepRecentRounds := 3
+	recentSize := keepRecentRounds * 2 // 每轮 = assistant + tool
+	if recentSize > len(s.history) {
+		recentSize = len(s.history)
+	}
+	recentMessages := s.history[len(s.history)-recentSize:]
+
+	// --- Layer 2: 从旧消息中提取并分类 ---
+	oldMessages := s.history[:len(s.history)-recentSize]
+
+	// 2a. 用户/系统指令 — 完整保留关键词（这些是决策依据，不能丢）
+	var keyInstructions []string
+	for _, msg := range oldMessages {
+		if msg.Role == "user" || msg.Role == "system" {
+			content := strings.TrimSpace(msg.Content)
+			// 过滤掉自动注入的 AddResult 反馈和工具结果
+			if strings.HasPrefix(content, "✅") || strings.HasPrefix(content, "❌") ||
+				strings.HasPrefix(content, "[文件:") || strings.HasPrefix(content, "[搜索]") ||
+				strings.HasPrefix(content, "[上下文摘要]") || len(content) < 5 {
+				continue
+			}
+			// 截断但保留完整意图
+			if len(content) > 120 {
+				content = content[:120] + "..."
+			}
+			keyInstructions = append(keyInstructions, content)
+		}
+	}
+	// 只保留最后5条关键指令（最早的丢弃）
+	if len(keyInstructions) > 5 {
+		keyInstructions = keyInstructions[len(keyInstructions)-5:]
+	}
+
+	// 2b. 工具操作记录 — 压缩为1行摘要
+	var actionSummaries []string
 	var lastToolName string
 	actionCount := 0
+	errorCount := 0
+	filesModified := make(map[string]bool) // 去重
 
 	for _, msg := range oldMessages {
 		switch msg.Role {
 		case "assistant":
-			// 记录使用了哪些工具
 			if len(msg.ToolCalls) > 0 {
 				for _, tc := range msg.ToolCalls {
-					summaryParts = append(summaryParts, tc.Function.Name)
 					lastToolName = tc.Function.Name
+					actionCount++
 				}
-				actionCount++
 			}
 		case "tool":
-			// 记录工具结果的简短信息
 			preview := strings.TrimSpace(msg.Content)
-			if len(preview) > 80 {
-				preview = preview[:80] + "..."
-			}
-			if lastToolName != "" && !strings.HasPrefix(preview, "错误") && !strings.HasPrefix(preview, "[文件:") {
-				summaryParts = append(summaryParts, fmt.Sprintf("→%s", preview))
-			}
-		case "user":
-			// 用户/系统指令保留关键词
-			if len(msg.Content) > 60 {
-				summaryParts = append(summaryParts, fmt.Sprintf("任务:%s...", msg.Content[:60]))
-			} else if msg.Content != "" {
-				summaryParts = append(summaryParts, fmt.Sprintf("任务:%s", msg.Content))
+			// 提取文件路径和操作结果
+			if strings.Contains(preview, "写入成功") || strings.Contains(preview, "written") {
+				// 提取文件名
+				if idx := strings.Index(preview, ":"); idx >= 0 && idx < len(preview)-1 {
+					fname := strings.TrimSpace(preview[idx+1 : idx+min(60, len(preview)-idx)])
+					if !filesModified[fname] {
+						filesModified[fname] = true
+						actionSummaries = append(actionSummaries, "写:"+fname)
+					}
+				}
+			} else if strings.Contains(preview, "错误") || strings.Contains(preview, "error") ||
+				strings.Contains(preview, "失败") || strings.Contains(preview, "failed") {
+				errorCount++
+				if len(preview) > 60 {
+					preview = preview[:60]
+				}
+				actionSummaries = append(actionSummaries, "错:"+preview)
+			} else if lastToolName == "exec" || lastToolName == "exec_session" {
+				if len(preview) > 50 {
+					preview = preview[:50]
+				}
+				actionSummaries = append(actionSummaries, "exec:"+preview)
 			}
 		}
 	}
 
-	summary := fmt.Sprintf("[上下文摘要] 此前已完成 %d 轮操作: %s",
-		actionCount, strings.Join(summaryParts, "; "))
-	// 将摘要作为最早的 system/user 消息插入
-	s.history = append([]Message{{Role: "system", Content: summary}}, s.history...)
+	// --- Layer 3: 构建结构化摘要 ---
+	summaryParts := []string{}
+	summaryParts = append(summaryParts, fmt.Sprintf("共%d轮/%d个工具调用", totalMsgs/2, actionCount))
+
+	if len(filesModified) > 0 {
+		var fList []string
+		for f := range filesModified {
+			fList = append(fList, f)
+		}
+		summaryParts = append(summaryParts, fmt.Sprintf("修改:%s", strings.Join(fList, ",")))
+	}
+	if errorCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("错误:%d次", errorCount))
+	}
+	if len(actionSummaries) > 8 {
+		actionSummaries = actionSummaries[len(actionSummaries)-8:] // 只保留最近8条
+	}
+	if len(actionSummaries) > 0 {
+		summaryParts = append(summaryParts, strings.Join(actionSummaries, "|"))
+	}
+	if len(keyInstructions) > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("指令:[%s]", strings.Join(keyInstructions, "; ")))
+	}
+
+	summary := fmt.Sprintf("[上下文摘要 v2] %s", strings.Join(summaryParts, " | "))
+
+	// --- Layer 4: 组装新 history ---
+	newHistory := make([]Message, 0, recentSize+len(keyInstructions)+2)
+
+	// 4a. 摘要作为 system 消息插入头部
+	newHistory = append(newHistory, Message{Role: "system", Content: summary})
+
+	// 4b. 关键指令（如果不多的话也插入）
+	for _, instr := range keyInstructions {
+		newHistory = append(newHistory, Message{Role: "user", Content: instr})
+	}
+
+	// 4c. 最近N轮完整对话
+	newHistory = append(newHistory, recentMessages...)
+
+	s.history = newHistory
+
+	// --- Token 估算与保护 ---
+	estimatedTokens := s.estimateTokens()
+	maxTokens := 32000 // 安全上限（大多数模型上下文窗口的 80% 左右）
+	if estimatedTokens > maxTokens {
+		// 二次压缩：只保留最近2轮 + 摘要
+		s.history = append([]Message{s.history[0]}, s.history[len(s.history)-4:]...)
+		fmt.Printf("[compressHistory] ⚠️ 二次压缩: %d tokens → 估计 ~%d tokens\n", estimatedTokens, s.estimateTokens())
+	}
+}
+
+// estimateTokens 粗略估算当前 history 的 token 数量
+// 规则: 中文≈2字符/token, 英文≈4字符/token, 平均≈3.5字符/token
+func (s *SEProcessor) estimateTokens() int {
+	totalChars := 0
+	for _, msg := range s.history {
+		totalChars += len(msg.Content)
+		for _, tc := range msg.ToolCalls {
+			totalChars += len(tc.Function.Name) + len(tc.Function.Arguments)
+		}
+	}
+	// 粗略估算: ~3.5 chars per token (混合中英文)
+	return totalChars * 10 / 35 // ≈ totalChars / 3.5
 }
 
 type SEResponse struct {
@@ -795,16 +1059,160 @@ type SECompletion struct {
 	Status         string `json:"status"`
 }
 
-func (s *SEProcessor) CheckSemanticComplete(response string) bool {
+// SemanticCheckResult 智能终止检测结果（多维度）
+type SemanticCheckResult struct {
+	IsComplete   bool    // 是否判定为完成
+	Confidence  float64 // 置信度 0.0-1.0
+	Reason       string  // 判定原因
+	ActionScore  int     // 最近N轮动作有效性得分
+}
+
+// CheckSemanticComplete 智能终止检测：多维度评估SE是否真的完成了任务
+// 升级前: 仅关键词匹配("完成"/"done") → 误判率高
+// 升级后: 关键词 + 动作收敛检测 + complete_task 验证 + 内容质量评估 → 置信度评分
+func (s *SEProcessor) CheckSemanticComplete(response string) *SemanticCheckResult {
+	result := &SemanticCheckResult{Confidence: 0, ActionScore: 0}
 	lower := strings.ToLower(response)
-	for _, kw := range []string{
+
+	// --- 维度1: 关键词信号 (基础权重 40%) ---
+	strongKeywords := []string{
 		"任务完成", "已完成", "task completed", "done", "finished",
-	} {
+	}
+	weakKeywords := []string{
+		"全部通过", "编译成功", "测试通过",
+	}
+	kwFound := 0
+	hasStrongKW := false
+	for _, kw := range strongKeywords {
 		if strings.Contains(lower, kw) {
-			return true
+			kwFound++
+			hasStrongKW = true
+			result.Reason += fmt.Sprintf("[%s]", kw)
 		}
 	}
-	return false
+	for _, kw := range weakKeywords {
+		if strings.Contains(lower, kw) {
+			kwFound++
+			result.Reason += fmt.Sprintf("[%s]", kw)
+		}
+	}
+	if kwFound > 0 {
+	 // 强关键词直接给高基础分，弱关键词补充
+		base := 0.40
+		if hasStrongKW {
+			base = 0.50 // "任务完成"/"done" 等强关键词 → 基础0.5
+		}
+		bonus := math.Min(0.20, float64(kwFound)*0.05) // 每多一个关键词+0.05，上限+0.20
+		result.Confidence += base + bonus
+	}
+
+	// --- 维度2: complete_task 动作验证 (权重 35%) ---
+	// 检查最近几轮是否有 complete_task 调用
+	hasCompleteTask := false
+	recentRounds := 5
+	startIdx := len(s.history) - recentRounds*2 // 每轮=assistant+tool
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	for i := startIdx; i < len(s.history); i++ {
+		msg := s.history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				if tc.Function.Name == "complete_task" || strings.Contains(tc.Function.Name, "complete") {
+					hasCompleteTask = true
+					result.Reason += "[complete_task]"
+				}
+			}
+		}
+	}
+	if hasCompleteTask {
+		result.Confidence += 0.35
+	}
+
+	// --- 维度3: 动作收敛检测 (权重 25%) ---
+	// 最近N轮如果只有 read/search/list/glob（只读操作）而无 write/edit/exec，说明在收尾
+	readOnlyActions := 0
+	writeOrExecActions := 0
+	totalRecentActions := 0
+	convergenceWindow := 8 // 检查最近8个工具调用
+	actionCount := 0
+	for i := len(s.history) - 1; i >= 0 && actionCount < convergenceWindow; i-- {
+		msg := s.history[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				name := tc.Function.Name
+				totalRecentActions++
+				switch name {
+				case "read_file", "search_files", "list_files", "glob", "semantic_search", "web_search":
+					readOnlyActions++
+				case "write_file", "edit_file", "exec", "exec_session", "delete_file":
+					writeOrExecActions++
+				case "complete_task", "run_tests", "git_operation":
+					// 中性操作，不算收敛也不算发散
+				}
+			}
+			actionCount++
+		}
+	}
+
+	if totalRecentActions > 0 {
+	 readOnlyRatio := float64(readOnlyActions) / float64(totalRecentActions)
+	 // 只读比例高 + 有写操作历史 = 收尾阶段
+	 if readOnlyRatio >= 0.7 && writeOrExecActions > 0 {
+		 result.Confidence += 0.25
+		 result.Reason += fmt.Sprintf("[收敛:%d/%d只读]", readOnlyActions, totalRecentActions)
+	 } else if readOnlyRatio >= 0.9 && totalRecentActions >= 3 {
+		 // 纯只读但无写操作 = 可能还没开始干，降低置信度
+		 result.Confidence -= 0.15
+		 result.Reason += "[纯只读-未执行]"
+	 }
+	 result.ActionScore = writeOrExecActions*10 + readOnlyActions
+	}
+
+	// --- 维度4: 内容质量/长度信号 (权重 10%) ---
+	// 完成响应通常包含技术总结或变更说明，不是空话
+	if len(response) > 50 {
+		hasTechnicalContent := strings.Contains(lower, "function") ||
+			strings.Contains(lower, "file") ||
+			strings.Contains(lower, "test") ||
+			strings.Contains(lower, "error") ||
+			strings.Contains(lower, "fix") ||
+			strings.Contains(lower, "implement") ||
+			strings.Contains(lower, "修改") ||
+			strings.Contains(lower, "实现") ||
+			strings.Contains(lower, "修复")
+		if hasTechnicalContent {
+			result.Confidence += 0.10
+			result.Reason += "[有技术内容]"
+		}
+	}
+
+	// --- 判定阈值 ---
+	// ≥0.6 高置信完成，0.4-0.6 边界（需要PM审核），<0.4 未完成
+	if result.Confidence >= 0.60 {
+		result.IsComplete = true
+	} else if result.Confidence >= 0.40 {
+	 // 边界情况：有关键词但动作不够收敛 → 标记为可能完成，让PM决定
+	 result.IsComplete = true
+	 result.Reason += "[边界-需PM确认]"
+	} else {
+		result.IsComplete = false
+		if kwFound > 0 {
+		 result.Reason += "[假阳性-关键词匹配但无实质动作]"
+		} else {
+		 result.Reason += "[未完成]"
+		}
+	}
+
+	// 置信度钳制到 [0, 1]
+	if result.Confidence < 0 {
+		result.Confidence = 0
+	}
+	if result.Confidence > 1 {
+		result.Confidence = 1
+	}
+
+	return result
 }
 
 func (s *SEProcessor) ResetHistory() {

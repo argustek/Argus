@@ -188,6 +188,7 @@ type ChatResponse struct {
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+	ToolsDefined int // 非JSON字段：记录请求中发送的tools数量（用于调试）
 }
 
 // Chat 发送聊天请求
@@ -575,6 +576,9 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 		return nil, fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
+	// 记录发送的tools数量（用于调试ToolCalls=0问题）
+	chatResp.ToolsDefined = len(tools)
+
 	if chatResp.Error != nil {
 		c.recordFailure()
 		return nil, fmt.Errorf("API error: %s", chatResp.Error.Message)
@@ -586,6 +590,22 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	}
 
 	c.recordSuccess()
+
+	// [G-DEBUG] 记录原始响应中的ToolCalls情况，排查为何LLM不走tool calling
+	if len(chatResp.Choices) > 0 {
+		msg := chatResp.Choices[0].Message
+		if len(msg.ToolCalls) == 0 && chatResp.ToolsDefined > 0 {
+			fmt.Printf("[G-DEBUG] ⚠️ LLM返回ToolCalls=0 (已发送%d个tools) | content_len=%d | model=%s\n",
+				chatResp.ToolsDefined, len(msg.Content), c.config.Model)
+			// 只截取前200字符避免日志爆炸
+			preview := msg.Content
+			if len(preview) > 200 { preview = preview[:200] + "..." }
+			fmt.Printf("[G-DEBUG] content_preview: %s\n", preview)
+		} else if len(msg.ToolCalls) > 0 {
+			fmt.Printf("[G-DEBUG] ✅ LLM返回ToolCalls=%d\n", len(msg.ToolCalls))
+		}
+	}
+
 	return &chatResp, nil
 }
 

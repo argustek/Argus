@@ -86,22 +86,22 @@ func TestToolCallToSEAction_EditFile(t *testing.T) {
 
 func TestCheckSemanticComplete_Chinese(t *testing.T) {
 	s := &SEProcessor{}
-	assert.True(t, s.CheckSemanticComplete("任务完成，请审核"))
-	assert.True(t, s.CheckSemanticComplete("所有功能已完成"))
+	assert.True(t, s.CheckSemanticComplete("任务完成，请审核").IsComplete)
+	assert.True(t, s.CheckSemanticComplete("所有功能已完成").IsComplete)
 }
 
 func TestCheckSemanticComplete_English(t *testing.T) {
 	s := &SEProcessor{}
-	assert.True(t, s.CheckSemanticComplete("Task completed successfully"))
-	assert.True(t, s.CheckSemanticComplete("All done!"))
-	assert.True(t, s.CheckSemanticComplete("Build finished with no errors"))
+	assert.True(t, s.CheckSemanticComplete("Task completed successfully").IsComplete)
+	assert.True(t, s.CheckSemanticComplete("All done!").IsComplete)
+	assert.True(t, s.CheckSemanticComplete("Build finished with no errors").IsComplete)
 }
 
 func TestCheckSemanticComplete_NotComplete(t *testing.T) {
 	s := &SEProcessor{}
-	assert.False(t, s.CheckSemanticComplete("正在编译代码..."))
-	assert.False(t, s.CheckSemanticComplete("Writing file main.go"))
-	assert.False(t, s.CheckSemanticComplete("I'll fix that error"))
+	assert.False(t, s.CheckSemanticComplete("正在编译代码...").IsComplete)
+	assert.False(t, s.CheckSemanticComplete("Writing file main.go").IsComplete)
+	assert.False(t, s.CheckSemanticComplete("I'll fix that error").IsComplete)
 }
 
 func TestSEAction_RoundTrip(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -135,6 +136,7 @@ type Manager struct {
 	apProcessor     *ai.APProcessor
 	pmExecutor      *executor.Executor
 	seExecutor      *executor.Executor
+	fileTracker     *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
 	boardManager    *board.Manager
 	cMonitor        *monitor.CMonitor
 	memoryManager   *MemoryManager
@@ -270,6 +272,9 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	pmExecutor := executor.NewExecutor(workDir, boardManager)
 	seExecutor := executor.NewExecutor(workDir, boardManager)
 
+	// 初始化文件变更追踪器
+	fileTracker := executor.NewFileChangeTracker(workDir, 20)
+
 	// 初始化AI处理器
 	pmProcessor := ai.NewPMProcessor(aiClient, workDir, nil)
 	seProcessor := ai.NewSEProcessor(aiClient, workDir)
@@ -283,6 +288,7 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 		apProcessor:   apProcessor,
 		pmExecutor:    pmExecutor,
 		seExecutor:    seExecutor,
+		fileTracker:   fileTracker,
 		boardManager:  boardManager,
 		memoryManager: NewMemoryManager(workDir),
 		sseBridge:     NewSSEBridge(),
@@ -2834,8 +2840,9 @@ Generate corrected actions JSON (use ONLY relative filenames):
 				fmt.Println("[System] SE actions done but still needs help, asking PM... [TAG-S1]")
 				return m.handleSEAskPM(resp.Content)
 			}
-			if m.seProcessor.CheckSemanticComplete(resp.Content) {
-				fmt.Println("[🛡️ 语义兜底] SE回复包含完成关键词但无completed JSON，强制路由到PM [TAG-D3]")
+			scResult := m.seProcessor.CheckSemanticComplete(resp.Content)
+			if scResult.IsComplete {
+				fmt.Printf("[🛡️ 语义兜底] SE完成检测: confidence=%.2f reason=%s\n", scResult.Confidence, scResult.Reason)
 				m.seReportedComplete = true
 				m.currentRole = ""
 				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
@@ -3342,7 +3349,14 @@ func formatSearchResult(r *executor.SearchFilesResult) string {
 func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	fmt.Printf("[PROBE-executeSEActions] 🟢 入口: actions=%d (时间:%s)\n",
 		len(actions), time.Now().Format("15:04:05.000"))
-	
+
+	// [G-FIX] Action重排序：write_file必须在同文件exec之前执行
+	// LLM经常先返回exec再返回write_file，导致文件不存在错误
+	actions = m.reorderActions(actions)
+
+	// [G-FIX] Action类型规范化：LLM经常返回错误的tool name
+	actions = m.normalizeActionTypes(actions)
+
 	func() {
 		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_actions_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if f != nil {
@@ -3490,6 +3504,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 				continue
 			}
+			// [P1-2.5] 编辑前快照
+			m.fileTracker.Snapshot(action.Path, "write")
 			if err := m.seExecutor.WriteFile(action.Path, action.Content); err != nil {
 				errMsg := fmt.Sprintf("写入文件 %s 失败: %v", action.Path, err)
 				fmt.Printf("[Action] ❌ %s\n", errMsg)
@@ -3513,7 +3529,37 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 				continue
 			}
-			fmt.Printf("[Action] Write file: %s\n", action.Path)
+			fmt.Printf("[Action] Write file: %s (%d bytes)\n", action.Path, len(action.Content))
+
+			// [G-FIX] Go文件语法预检：写入后立即验证，避免执行失败
+			if strings.HasSuffix(action.Path, ".go") && len(action.Content) > 10 {
+				absPath := filepath.Join(m.workDir, action.Path)
+
+				// [G-FIX] 修复 _test.go 文件名（go run 不允许执行 _test.go 文件）
+				if strings.Contains(filepath.Base(action.Path), "_test.") || strings.Contains(filepath.Base(action.Path), "_test") {
+					newName := strings.Replace(filepath.Base(action.Path), "_test", "_app", 1)
+					newPath := filepath.Join(filepath.Dir(action.Path), newName)
+					fmt.Printf("[G-FIX] 🔧 重命名 %s → %s (避免_test.go限制)\n", action.Path, newPath)
+					action.Path = newPath
+					absPath = filepath.Join(m.workDir, action.Path)
+				}
+
+				// 先尝试修复常见LLM生成错误
+				repaired := m.repairGoContent(action.Content)
+				if repaired != action.Content {
+					fmt.Printf("[G-FIX] 🔧 Go代码已修复: %s (%d→%d chars)\n", action.Path, len(action.Content), len(repaired))
+					// 用修复后的内容重写
+					m.seExecutor.WriteFile(action.Path, repaired)
+				}
+
+				if syntaxErr := m.validateGoSyntax(absPath); syntaxErr != "" {
+					fmt.Printf("[G-FIX] ⚠️ Go语法错误: %s → %s\n", action.Path, syntaxErr)
+					m.seProcessor.AddResult(fmt.Sprintf("⚠️ 文件 %s 存在Go语法错误: %s\n建议SE修复后重写", action.Path, syntaxErr))
+				} else {
+					fmt.Printf("[G-FIX] ✅ Go语法检查通过: %s\n", action.Path)
+				}
+			}
+
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se",
 				"index":    i + 1,
@@ -3543,6 +3589,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 				continue
 			}
+			// [P1-2.5] 编辑前快照
+			m.fileTracker.Snapshot(action.Path, "edit")
 
 			editResult, err := m.seExecutor.EditFile(action.Path, action.OldStr, action.NewStr)
 			if err != nil {
@@ -4561,7 +4609,11 @@ func (m *Manager) ensureSEToUSR(content string) string {
 	return "@USR " + content
 }
 
-// addSEToUserMsg 发送SE→USR消息（自动加@USR，直接回复）
+// addSEToUserMsg 发送SE状态通知→USR
+// 路由策略: SE的任务内容走 se_to_pm → PM审核后转发USR；
+//           但SE的错误/状态/进度通知需要立即触达用户，不经过PM中转。
+// 这类消息包括: 执行失败、语义完成报告、需要帮助、达到重试上限等。
+// Source统一为 "se_notify" 以区别于任务内容消息。
 func (m *Manager) addSEToUserMsg(content string) {
 	content = m.ensureSEToUSR(content)
 	seMsg := Message{
@@ -4570,7 +4622,7 @@ func (m *Manager) addSEToUserMsg(content string) {
 		Role:      "se",
 		Content:   content,
 		Raw:       content,
-		Source:    "se_to_user",
+		Source:    "se_notify", // 状态通知，非任务内容
 		Timestamp: time.Now(),
 		ReplyTo:   m.getReplyToID("se"),
 	}
@@ -4586,6 +4638,192 @@ func (m *Manager) addSEToUserMsg(content string) {
 
 	if m.onMessageAdded != nil {
 		m.onMessageAdded(seMsg)
+	}
+}
+
+// validateGoSyntax 检查Go文件语法是否正确，返回错误信息（空=通过）
+func (m *Manager) validateGoSyntax(absPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "go", "build", "-o", os.DevNull, absPath)
+	cmd.Dir = m.workDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// 提取关键错误信息（通常在最后几行）
+		lines := strings.Split(string(output), "\n")
+		var keyErrors []string
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				keyErrors = append(keyErrors, line)
+			}
+		}
+		if len(keyErrors) == 0 {
+			return err.Error()
+		}
+		return strings.Join(keyErrors[len(keyErrors)-2:], "; ")
+	}
+	return ""
+}
+
+// reorderActions 重排序actions：确保write_file在exec之前
+// LLM经常先返回exec再返回write_file，导致文件不存在
+func (m *Manager) reorderActions(actions []ai.SEAction) []ai.SEAction {
+	if len(actions) <= 1 {
+		return actions
+	}
+
+	var writes []ai.SEAction
+	var others []ai.SEAction
+
+	for i, a := range actions {
+		switch a.Type {
+		case "write_file", "edit_file":
+			writes = append(writes, actions[i])
+		default:
+			others = append(others, actions[i])
+		}
+	}
+
+	if len(writes) == 0 {
+		return actions
+	}
+
+	result := append(writes, others...)
+	if len(writes) > 0 && len(others) > 0 {
+		fmt.Printf("[reorderActions] 🔄 重排序: %d个write/edit → %d个其他\n", len(writes), len(others))
+	}
+	return result
+}
+
+// repairGoContent 修复LLM生成的常见Go代码错误
+// 基于实测错误模式：缺import关键字、缺fmt前缀、引号丢失等
+func (m *Manager) repairGoContent(content string) string {
+	fixed := content
+	changed := false
+
+	// 模式0: 清除尾部JSON泄漏（如 "}},{" , "}," 等）
+	// LLM的content字段经常包含JSON结构残留
+	re0 := regexp.MustCompile(`[\s]*[",}\]]{2,}\s*$`)
+	if re0.MatchString(fixed) {
+		fixed = re0.ReplaceAllString(fixed, "")
+		changed = true
+	}
+
+	// 模式1: 独立的 "fmt" 行（缺import关键字）
+	re1 := regexp.MustCompile(`(?m)^\s*"\s*fmt\s*"\s*$`)
+	if re1.MatchString(fixed) {
+		fixed = re1.ReplaceAllString(fixed, `import "fmt"`)
+		changed = true
+	}
+
+	// 模式1b: 开头只有 " main" 或 "main" （缺package关键字）
+	re1b := regexp.MustCompile(`(?m)^(\s*)main\s*$`)
+	if re1b.MatchString(fixed) && !strings.Contains(fixed, "package ") {
+		fixed = re1b.ReplaceAllString(fixed, `${1}package main`)
+		changed = true
+	}
+
+	// 模式2: package "fmt" → package main + import "fmt"
+	if strings.Contains(fixed, `package "fmt"`) || strings.Contains(fixed, "package\"fmt\"") {
+		fixed = strings.Replace(fixed, `package "fmt"`, "package main\n\nimport \"fmt\"", 1)
+		fixed = strings.Replace(fixed, "package\"fmt\"", "package main\n\nimport \"fmt\"", 1)
+		changed = true
+	}
+
+	// 模式3: .Println( / .Sprintf( （缺fmt前缀）
+	re3 := regexp.MustCompile(`(?m)^\s*\.\s*(Println|Sprintf|Printf|Fprintf|Errorf)\s*\(`)
+	if re3.MatchString(fixed) {
+		fixed = re3.ReplaceAllString(fixed, "fmt.$1(")
+		changed = true
+	}
+
+	// 模式4: importfmt" / import"fmt" → import "fmt"
+	fixed = strings.ReplaceAll(fixed, "importfmt\"", "import \"fmt\"")
+	fixed = strings.ReplaceAll(fixed, "import\"fmt\"", "import \"fmt\"")
+	if strings.Contains(fixed, "import\"") || strings.Contains(fixed, "importfmt") { changed = true }
+
+	// 模式5: func main { （缺括号）→ func main()
+	re5 := regexp.MustCompile(`func\s+main\s*\{`)
+	if re5.MatchString(fixed) {
+		fixed = re5.ReplaceAllString(fixed, "func main() {")
+		changed = true
+	}
+
+	// 模式6: 确保有 package main（如果文件有 func main 但没有 package）
+	if !regexp.MustCompile(`package\s+\w+`).MatchString(fixed) && regexp.MustCompile(`func\s+main\s*\(`).MatchString(fixed) {
+		fixed = "package main\n\n" + fixed
+		changed = true
+	}
+
+	if changed {
+		fmt.Printf("[repairGoContent] 🔧 Go代码已修复 (%d patterns)\n", 1)
+	}
+	return fixed
+}
+
+// normalizeActionTypes 规范化LLM返回的action type
+// LLM经常返回错误的tool name（如 write→write_file, 空字符串等）
+func (m *Manager) normalizeActionTypes(actions []ai.SEAction) []ai.SEAction {
+	// 常见错误映射：LLM实际返回 → 正确的tool name
+	typeMap := map[string]string{
+		"write":        "write_file",
+		"w":            "write_file",
+		"create":       "write_file",
+		"create_file":  "write_file",
+		"edit":         "edit_file",
+		"modify":       "edit_file",
+		"read":         "read_file",
+		"run":          "exec",
+		"execute":      "exec",
+		"command":      "exec",
+		"shell":        "exec",
+		"search":       "search_files",
+		"find":         "search_files",
+		"grep":         "search_files",
+		"git":          "git_operation",
+		"":             "", // 空字符串特殊处理
+	}
+
+	changed := false
+	for i := range actions {
+		oldType := actions[i].Type
+		if mapped, ok := typeMap[oldType]; ok && mapped != "" {
+			actions[i].Type = mapped
+			if oldType != mapped {
+				fmt.Printf("[normalizeAction] %q → %q\n", oldType, mapped)
+				changed = true
+			}
+		} else if oldType == "" {
+			// 空type：尝试从content/command推断
+			if actions[i].Content != "" && actions[i].Path != "" {
+				actions[i].Type = "write_file"
+				fmt.Printf("[normalizeAction] \"\" → write_file (inferred from path+content)\n")
+				changed = true
+			} else if actions[i].Command != "" {
+				actions[i].Type = "exec"
+				fmt.Printf("[normalizeAction] \"\" → exec (inferred from command)\n")
+				changed = true
+			}
+		} else if !isValidActionType(oldType) {
+			// 完全未知的action type，记录但不修改（让switch default处理）
+			fmt.Printf("[normalizeAction] ⚠️ 未知action type: %q\n", oldType)
+		}
+	}
+
+	if changed {
+		fmt.Printf("[normalizeActionTypes] 🔄 已规范化%d个actions\n", len(actions))
+	}
+	return actions
+}
+
+func isValidActionType(t string) bool {
+	switch t {
+	case "write_file", "edit_file", "read_file", "exec", "exec_session", "search_files", "git_operation", "run_tests", "semantic_search", "web_search":
+		return true
+	default:
+		return false
 	}
 }
 
