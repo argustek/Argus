@@ -355,21 +355,43 @@ Search(query)
 
 ---
 
-## 五、架构优势总结（不应丢失）
+## 五、核心能力盘点
 
-以下能力经代码验证确实领先于大多数同类产品，后续迭代应保持并强化：
+> 本节客观列出 Argus 代码验证通过的能力，不做"独有/领先"断言。
+> 行业中 Planner-Executor-Reviewer 是常见模式（OpenCode 10角色编排、Copilot Plan-Implement、Windsurf Plan Mode），Argus 的 PM→SE→AP 是此模式的工程化实现。
 
-1. **Tool Result Feedback Loop** — 不是"AI猜结果"，而是"AI看到真实执行结果再决定"。这是与普通 chatbot 的本质区别。
+以下能力经代码验证正常工作，后续迭代应保持：
+
+1. **Tool Result Feedback Loop** — 工具执行结果注入 SE 对话历史，SE 基于实际输出（非猜测）决定下一步。30+ 处 AddResult 调用点。
 2. **Auto-Fix 三级降级** — SE自修 → SE继续尝试 → PM介入，每级有次数上限和超时保护。
-3. **7层防死循环** — 从空actions到isProcessing超时，覆盖了所有已知死循环模式。
-4. **9类错误分析 + 3类重试分类** — 不是简单"报错了"，而是精确到 File:Line:Column + SuggestedFix + ExampleFix。
-5. **并行只读批处理** — 5个 read/search 操作同时跑，速度提升 2-5x。
-6. **双通道语义搜索** — 关键词倒排 + AI概念融合，不需要 embedding API 就能实现语义级代码查找。
-7. **持久化 Shell Session** — 多步构建（cd → make → ./test）不再是噩梦。
-8. **LSP 语义理解** — gopls daemon 5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename），从"文本搜索"升级到"语义理解"，safe rename 成为可能。
-9. **多模态视觉分析** — 截图→描述→代码，UI开发场景可用。
-10. **文件变更追踪 + 自动回滚** — 编辑前自动快照，编辑失败自动回滚，20步 undo 栈。
-11. **权限配置系统** — PermissionConfig + PathRule + CheckPermission，每次 write/edit/delete 前校验，支持通配符匹配，Persistent JSON 配置文件。默认保护 .env / .git / .argus / Windows 系统目录。
+3. **7层防死循环** — L1空actions → L2 JSON重试 → L3 continue次数 → L4 语义兜底 → L5 PM轮次 → L6 SE求助上限 → L7 超时清理。
+4. **9类错误分析 + 3类重试分类** — AnalyzeError + ClassifyError + ExecuteWithRetry(指数退避)，精确到 File:Line:Column + SuggestedFix + ExampleFix。
+5. **并行只读批处理** — 5个 read/search 操作 goroutine 并发，结果按序组装。
+6. **双通道语义搜索** — 关键词倒排 + AI概念融合，不依赖外部 embedding API。
+7. **持久化 Shell Session** — cmd.exe 持久进程，cd/env 状态跨命令保持，10MB buffer。
+8. **LSP 语义理解** — 5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename），safe rename 成为可能。
+9. **多模态视觉分析** — PNG/JPG/GIF/WebP/BMP/PDF → vision LLM → 代码。
+10. **文件变更追踪 + 自动回滚** — 编辑前快照，失败自动 RollbackLast，20步 undo 栈。
+11. **权限配置系统** — PermissionConfig + PathRule + CheckPermission，每次 write/edit/delete 前校验，默认保护 .env / .git / .argus / 系统目录。
+12. **代码片段库** — 9个模板（HTTP/CRUD/认证/DB/测试/并发/配置/CLI），search_snippet 工具。
+13. **Diff 预览** — write/edit 前 ComputeDiff 推送到前端 SSE，show_diff 工具。
+14. **调试运行** — debug_run 自动加 -v -race -count=1，panic/trace 结构化展示。
+15. **web_search 三引擎并行** — DuckDuckGo + Bing + Google goroutine 竞速，fetch_url HTML→纯文本。
+
+### 与竞品共有的能力（不是独有）
+
+| 能力 | Argus | OpenCode | Copilot | Claude Code | Windsurf |
+|------|------|----------|---------|-------------|----------|
+| 规划-执行-审查管道 | PM→SE→AP | Orchestrator→Worker→Reviewer | Plan→Implement | Plan→Code→Review | Plan Mode→Cascade |
+| 角色分工 | 3角色 | 10角色 | 2角色 | 3内置+自定义 | 2角色 |
+
+### Argus 实际差异点
+
+| 差异 | 说明 |
+|------|------|
+| **每角色可配不同模型** | PM/SE/AP 各自独立 AI Client，可分别用强推理/编码/轻量模型。OpenCode 也支持多模型分层，其他家基本单一模型串全流程 |
+| **工程可靠性优先** | 7层防死循环 + 9类错误分析 + 三级降级 + 健康自愈，比多数竞品更偏"生产稳定性"而非"炫技" |
+| **安全靠审查不靠隔离** | CheckPermission + PathRule + PM审核 + 自动回滚，不需要 Docker/VM |
 
 ---
 
