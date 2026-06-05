@@ -34,6 +34,17 @@ function Wait-Idle($maxSec = 180) {
 Write-Host ("=" * 40)
 Write-Host "Hello World Regression x5"
 Write-Host ("=" * 40)
+
+# Pre-check: is argus-desktop running?
+try {
+    $check = Invoke-RestMethod -Uri "$BASE/admin/status" -TimeoutSec 5 -ErrorAction Stop
+    Write-Host "  Connected: $($check.version)"
+} catch {
+    Write-Host "  FATAL: argus-desktop not reachable at $BASE"
+    Write-Host "  Start it first: .\build\bin\argus-desktop.exe"
+    exit 1
+}
+
 $PASS = 0; $FAIL = 0
 
 for ($n = 1; $n -le 5; $n++) {

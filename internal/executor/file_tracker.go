@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -178,4 +179,77 @@ func (t *FileChangeTracker) Stats() map[string]interface{} {
 		"actions":         actionCount,
 		"top_files":       fileCount,
 	}
+}
+
+// ComputeDiff 计算统一 diff（unified diff 格式）
+// oldContent 为编辑前内容，newContent 为编辑后内容，path 为文件路径
+// 返回 "" 表示无变化
+func ComputeDiff(path, oldContent, newContent string) string {
+	if oldContent == newContent {
+		return ""
+	}
+	oldLines := strings.SplitAfter(oldContent, "\n")
+	newLines := strings.SplitAfter(newContent, "\n")
+	// 移除末尾空行（split 产生的）
+	if len(oldLines) > 0 && oldLines[len(oldLines)-1] == "" {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+	if len(newLines) > 0 && newLines[len(newLines)-1] == "" {
+		newLines = newLines[:len(newLines)-1]
+	}
+
+	// LCS 计算 diff hunks
+	type hunk struct {
+		oldStart, oldEnd int
+		newStart, newEnd int
+		lines            []string // +/ - 前缀
+	}
+	// 简化版：逐行对比，识别连续的差异块
+	var hunks []hunk
+	var cur *hunk
+	oi, ni := 0, 0
+	for oi < len(oldLines) || ni < len(newLines) {
+		if oi < len(oldLines) && ni < len(newLines) && oldLines[oi] == newLines[ni] {
+			oi++
+			ni++
+			continue
+		}
+		// 找到差异块边界
+		os, ns := oi, ni
+		for (oi < len(oldLines) || ni < len(newLines)) &&
+			!(oi < len(oldLines) && ni < len(newLines) && oldLines[oi] == newLines[ni]) {
+			if oi < len(oldLines) {
+				oi++
+			}
+			if ni < len(newLines) {
+				ni++
+			}
+		}
+		cur = &hunk{oldStart: os, oldEnd: oi, newStart: ns, newEnd: ni}
+		for i := os; i < oi; i++ {
+			cur.lines = append(cur.lines, "-"+trimNewline(oldLines[i]))
+		}
+		for i := ns; i < ni; i++ {
+			cur.lines = append(cur.lines, "+"+trimNewline(newLines[i]))
+		}
+		hunks = append(hunks, *cur)
+	}
+
+	if len(hunks) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("--- a/%s\n+++ b/%s\n", path, path))
+	for _, h := range hunks {
+		sb.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", h.oldStart+1, h.oldEnd-h.oldStart, h.newStart+1, h.newEnd-h.newStart))
+		for _, l := range h.lines {
+			sb.WriteString(l + "\n")
+		}
+	}
+	return sb.String()
+}
+
+func trimNewline(s string) string {
+	return strings.TrimSuffix(s, "\n")
 }

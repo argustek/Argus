@@ -3256,7 +3256,7 @@ func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, 
 // isReadOnlyAction 判断是否为无副作用只读操作（可并行执行）
 func isReadOnlyAction(actionType string) bool {
 	switch actionType {
-	case "read_file", "search_files":
+	case "read_file", "search_files", "search_snippet", "show_diff":
 		return true
 	}
 	return false
@@ -3312,6 +3312,11 @@ func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActio
 			} else {
 				results[bi] = batchResult{idx: bi, content: formatSearchResult(searchResult)}
 			}
+
+			case "search_snippet":
+				store := m.seProcessor.GetSnippetStore()
+				snippets := store.Search(action.Pattern)
+				results[bi] = batchResult{idx: bi, content: store.FormatResults(snippets)}
 			}
 		}(bi, action)
 	}
@@ -3529,6 +3534,23 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				}
 				continue
 			}
+			// [P1] Diff预览：编辑前计算diff推送到前端
+			oldContent, _ := os.ReadFile(filepath.Join(m.workDir, action.Path))
+			if diff := executor.ComputeDiff(action.Path, string(oldContent), action.Content); diff != "" {
+				m.emitWailsEvent("diff_preview", map[string]interface{}{
+					"type":   "write_file",
+					"path":   action.Path,
+					"diff":   diff,
+					"action": "before_write",
+				})
+			} else if len(oldContent) == 0 {
+				m.emitWailsEvent("diff_preview", map[string]interface{}{
+					"type":   "write_file",
+					"path":   action.Path,
+					"diff":   fmt.Sprintf("+++ 新建文件: %s (%d bytes)", action.Path, len(action.Content)),
+					"action": "new_file",
+				})
+			}
 			// [P1-2.5] 编辑前快照
 			m.fileTracker.Snapshot(action.Path, "write")
 			if err := m.seExecutor.WriteFile(action.Path, action.Content); err != nil {
@@ -3620,6 +3642,18 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					m.taskManager.UpdateStatus(currentTask.ID, "failed")
 				}
 				continue
+			}
+			// [P1] Diff预览：编辑前计算diff推送到前端
+			if oldBytes, err := os.ReadFile(filepath.Join(m.workDir, action.Path)); err == nil {
+				newContent := strings.Replace(string(oldBytes), action.OldStr, action.NewStr, 1)
+				if diff := executor.ComputeDiff(action.Path, string(oldBytes), newContent); diff != "" {
+					m.emitWailsEvent("diff_preview", map[string]interface{}{
+						"type":   "edit_file",
+						"path":   action.Path,
+						"diff":   diff,
+						"action": "before_edit",
+					})
+				}
 			}
 			// [P1-2.5] 编辑前快照
 			m.fileTracker.Snapshot(action.Path, "edit")
@@ -4157,6 +4191,49 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"index":    i + 1,
 				"type":     "check_env",
 				"label":    action.Tool,
+				"status":   "done",
+			})
+
+		case "search_snippet":
+			query := action.Pattern
+			if query == "" {
+				query = action.Tool
+			}
+			store := m.seProcessor.GetSnippetStore()
+			snippets := store.Search(query)
+			resultMsg := store.FormatResults(snippets)
+			m.seProcessor.AddResult(resultMsg)
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se",
+				"index":    i + 1,
+				"type":     "search_snippet",
+				"label":    fmt.Sprintf("search_snippet('%s')", query),
+				"status":   "done",
+				"matches":  len(snippets),
+			})
+
+		case "show_diff":
+			absPath := filepath.Join(m.workDir, action.Path)
+			oldBytes, err := os.ReadFile(absPath)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 无法读取文件: %v", err))
+				continue
+			}
+			diff := executor.ComputeDiff(action.Path, string(oldBytes), action.Content)
+			if diff == "" {
+				diff = "无变化"
+			}
+			m.seProcessor.AddResult(fmt.Sprintf("📊 Diff预览:\n%s", diff))
+			m.emitWailsEvent("diff_preview", map[string]interface{}{
+				"type": "show_diff",
+				"path": action.Path,
+				"diff": diff,
+			})
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se",
+				"index":    i + 1,
+				"type":     "show_diff",
+				"label":    fmt.Sprintf("show_diff(%s)", action.Path),
 				"status":   "done",
 			})
 
@@ -5057,7 +5134,7 @@ func isValidActionType(t string) bool {
 		"git_operation", "run_tests", "semantic_search", "web_search",
 		"undo_file", "list_changes",
 		"go_to_definition", "find_references", "hover_info", "diagnostics", "rename_symbol",
-		"analyze_image":
+		"analyze_image", "search_snippet", "show_diff":
 		return true
 	default:
 		return false
