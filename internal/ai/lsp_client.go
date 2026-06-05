@@ -14,8 +14,8 @@ import (
 	"time"
 )
 
-// LSPClient 与 gopls daemon 通信的客户端
-// 实现 GoToDefinition / FindReferences / Hover / Diagnostics / Rename 5 个核心能力
+// LSPClient LSP 客户端，管理 LSP daemon 通信
+// 支持 Go/TypeScript/Python/Rust/C/C++ 多种语言
 type LSPClient struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
@@ -93,8 +93,74 @@ type WorkspaceEdit struct {
 	Changes map[string][]TextEdit `json:"changes,omitempty"` // URI -> edits
 }
 
-// NewLSPClient 创建 LSP 客户端，启动 gopls daemon
+// LSPServerConfig LSP 服务器配置
+type LSPServerConfig struct {
+	Name    string   // 语言服务器名称
+	Command string   // 启动命令
+	Args    []string // 启动参数
+}
+
+// lspServerMap 语言 → LSP 服务器配置
+var lspServerMap = map[string]LSPServerConfig{
+	"go":         {Name: "gopls", Command: "gopls", Args: []string{"serve"}},
+	"typescript": {Name: "typescript-language-server", Command: "typescript-language-server", Args: []string{"--stdio"}},
+	"javascript": {Name: "typescript-language-server", Command: "typescript-language-server", Args: []string{"--stdio"}},
+	"python":     {Name: "pylsp", Command: "pylsp", Args: nil},
+	"rust":       {Name: "rust-analyzer", Command: "rust-analyzer", Args: nil},
+	"c":          {Name: "clangd", Command: "clangd", Args: nil},
+	"cpp":        {Name: "clangd", Command: "clangd", Args: nil},
+}
+
+// DetectCodeLanguage 从工作目录检测主要编程语言
+func DetectCodeLanguage(workDir string) string {
+	extCount := map[string]int{}
+	_ = filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != "" {
+			extCount[ext]++
+		}
+		return nil
+	})
+
+	langByExt := map[string]string{
+		".go": "go", ".ts": "typescript", ".tsx": "typescript",
+		".js": "javascript", ".jsx": "javascript",
+		".py": "python", ".rs": "rust",
+		".c": "c", ".cpp": "cpp", ".cc": "cpp", ".h": "c", ".hpp": "cpp",
+	}
+
+	bestLang := "go" // 默认 Go
+	bestCount := 0
+	for ext, count := range extCount {
+		if lang, ok := langByExt[ext]; ok && count > bestCount {
+			bestCount = count
+			bestLang = lang
+		}
+	}
+	return bestLang
+}
+
+// SupportedLanguages 返回支持的 LSP 语言列表
+func SupportedLanguages() []string {
+	return []string{"go", "typescript", "javascript", "python", "rust", "c", "cpp"}
+}
+
+// NewLSPClient 创建 LSP 客户端（自动检测语言）
 func NewLSPClient(workDir string) (*LSPClient, error) {
+	lang := DetectCodeLanguage(workDir)
+	return NewLSPClientForLang(workDir, lang)
+}
+
+// NewLSPClientForLang 按指定语言创建 LSP 客户端
+func NewLSPClientForLang(workDir, lang string) (*LSPClient, error) {
+	config, ok := lspServerMap[lang]
+	if !ok {
+		return nil, fmt.Errorf("unsupported language: %s (supported: %v)", lang, SupportedLanguages())
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	absDir, err := filepath.Abs(workDir)
@@ -103,10 +169,10 @@ func NewLSPClient(workDir string) (*LSPClient, error) {
 		return nil, fmt.Errorf("abs path: %w", err)
 	}
 
-	// 检查 gopls 是否可用
-	if _, err := exec.LookPath("gopls"); err != nil {
+	// 检查 LSP 服务器是否可用
+	if _, err := exec.LookPath(config.Command); err != nil {
 		cancel()
-		return nil, fmt.Errorf("gopls not found in PATH: %w", err)
+		return nil, fmt.Errorf("%s not found in PATH: %w (install: go install %s@latest)", config.Name, err, installHint(config.Name))
 	}
 
 	client := &LSPClient{
@@ -117,8 +183,8 @@ func NewLSPClient(workDir string) (*LSPClient, error) {
 		pending:  make(map[int64]chan *LSPResponse),
 	}
 
-	// 启动 gopls
-	client.cmd = exec.CommandContext(ctx, "gopls", "serve")
+	// 启动 LSP 服务器
+	client.cmd = exec.CommandContext(ctx, config.Command, config.Args...)
 	client.cmd.Dir = absDir
 
 	stdin, err := client.cmd.StdinPipe()
@@ -137,7 +203,7 @@ func NewLSPClient(workDir string) (*LSPClient, error) {
 
 	if err := client.cmd.Start(); err != nil {
 		cancel()
-		return nil, fmt.Errorf("start gopls: %w", err)
+		return nil, fmt.Errorf("start %s: %w", config.Name, err)
 	}
 
 	// 启动读循环
@@ -149,8 +215,24 @@ func NewLSPClient(workDir string) (*LSPClient, error) {
 		return nil, fmt.Errorf("init: %w", err)
 	}
 
-	fmt.Printf("[LSP] ✅ gopls daemon started (root=%s)\n", absDir)
+	fmt.Printf("[LSP] ✅ %s daemon started (lang=%s, root=%s)\n", config.Name, lang, absDir)
 	return client, nil
+}
+
+func installHint(name string) string {
+	switch name {
+	case "gopls":
+		return "golang.org/x/tools/gopls"
+	case "typescript-language-server":
+		return "npm: typescript-language-server"
+	case "pylsp":
+		return "pip: python-lsp-server"
+	case "rust-analyzer":
+		return "rustup: rust-analyzer"
+	case "clangd":
+		return "apt/brew: clangd"
+	}
+	return name
 }
 
 // fileToURI 将文件路径转为 file:// URI
@@ -231,7 +313,7 @@ func (c *LSPClient) call(method string, params interface{}) (*LSPResponse, error
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return nil, fmt.Errorf("gopls error [%d]: %s", resp.Error.Code, resp.Error.Message)
+			return nil, fmt.Errorf("LSP error [%d]: %s", resp.Error.Code, resp.Error.Message)
 		}
 		return resp, nil
 	case <-time.After(30 * time.Second):
@@ -257,7 +339,7 @@ func (c *LSPClient) notify(method string, params interface{}) error {
 	return err
 }
 
-// readLoop 读取 gopls 输出
+// readLoop 读取 LSP daemon 输出
 func (c *LSPClient) readLoop() {
 	reader := bufio.NewReader(c.stdout)
 	for {
@@ -305,14 +387,13 @@ func (c *LSPClient) readLoop() {
 	}
 }
 
-// Close 关闭 gopls daemon
+// Close 关闭 LSP daemon
 func (c *LSPClient) Close() {
 	c.cancel()
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()
-		c.cmd.Wait()
 	}
-	fmt.Println("[LSP] gopls daemon stopped")
+	fmt.Println("[LSP] daemon stopped")
 }
 
 // ========== 核心 LSP 操作 ==========
@@ -404,7 +485,7 @@ func (c *LSPClient) Hover(filePath string, line, col int) (string, error) {
 // Diagnostics 获取文件诊断（编译错误、类型错误等）
 // 注意：diagnostics 通常通过 push 通知发送，这里用 textDocument/codeAction 触发刷新
 func (c *LSPClient) Diagnostics(filePath string) ([]Diagnostic, error) {
-	// 先打开文件确保 gopls 有缓存
+	// 先打开文件确保 LSP 有缓存
 	c.notify("textDocument/didOpen", map[string]interface{}{
 		"textDocument": map[string]interface{}{
 			"uri":        fileToURI(filePath),
@@ -423,7 +504,7 @@ func (c *LSPClient) Diagnostics(filePath string) ([]Diagnostic, error) {
 		},
 	})
 	if err != nil {
-		// 旧版 gopls 不支持 pull diagnostics，返回空
+		// LSP 不支持 pull diagnostics，返回空
 		return []Diagnostic{}, nil
 	}
 
