@@ -321,8 +321,7 @@ Search(query)
 |---|------|------|
 | 9 | 多语言 LSP | 仅 gopls（Go），无 TS/RS/Python |
 | 10 | 分布式 Agent | 单机运行 |
-| 11 | 沙盒隔离 | 无 Docker/VM |
-| 12 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana |
+| 11 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana |
 
 ---
 
@@ -351,9 +350,8 @@ Search(query)
 | # | 项目 | 状态 |
 |---|------|------|
 | 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | 🔴 |
-| 3.2 | 沙盒隔离（Docker/VM） | 🔴 |
-| 3.3 | 交互式调试（断点/变量查看） | 🔴 |
-| 3.4 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
+| 3.2 | 交互式调试（断点/变量查看） | 🔴 |
+| 3.3 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
 
 ---
 
@@ -371,6 +369,7 @@ Search(query)
 8. **LSP 语义理解** — gopls daemon 5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename），从"文本搜索"升级到"语义理解"，safe rename 成为可能。
 9. **多模态视觉分析** — 截图→描述→代码，UI开发场景可用。
 10. **文件变更追踪 + 自动回滚** — 编辑前自动快照，编辑失败自动回滚，20步 undo 栈。
+11. **权限配置系统** — PermissionConfig + PathRule + CheckPermission，每次 write/edit/delete 前校验，支持通配符匹配，Persistent JSON 配置文件。默认保护 .env / .git / .argus / Windows 系统目录。
 
 ---
 

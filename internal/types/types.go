@@ -294,7 +294,10 @@ func GetDefaultPermissionConfig(workDir string) PermissionConfig {
 		DefaultPermission: PermFullAccess, // 默认：工作目录全开放！
 		UpdatedAt:         time.Now(),
 		Rules: []PathRule{
-			{PathPattern: ".git/**", Permission: PermReadWrite, Description: "Git版本控制目录（可读写，不能删除）", IsDirectory: true, Priority: 1},
+			{PathPattern: ".env*", Permission: PermReadOnly, Description: "环境变量文件（AI不可修改）", Priority: 1},
+			{PathPattern: "**/credentials*", Permission: PermReadOnly, Description: "凭证文件（AI不可修改）", Priority: 2},
+			{PathPattern: "**/secret*", Permission: PermReadOnly, Description: "密钥文件（AI不可修改）", Priority: 2},
+			{PathPattern: ".git/**", Permission: PermReadWrite, Description: "Git版本控制目录（可读写，不能删除）", IsDirectory: true, Priority: 3},
 			{PathPattern: ".argus/**", Permission: PermProtected, Description: "Argus系统目录（AI不可操作）", IsDirectory: true, Priority: 1},
 			{PathPattern: "C:/Windows/**", Permission: PermReadOnly, Description: "Windows系统目录（只读）", IsDirectory: true, Priority: 1},
 			{PathPattern: "C:\\Windows\\**", Permission: PermReadOnly, Description: "Windows系统目录（只读）", IsDirectory: true, Priority: 1},
