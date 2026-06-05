@@ -1,13 +1,15 @@
 # Argus SE AI 能力差距分析
 
-> 对比对象: Cursor / Claude Code / GitHub Copilot / Trae
-> 分析日期: 2026-06-04
-> 方法: 逐文件代码扫描（非文档推断）
-> 状态: 代码实测定稿
+> 对比对象: Cursor / Claude Code / GitHub Copilot / Trae / Windsurf
+> 分析日期: 2026-06-05（基于 e31f7ac 重新扫描）
+> 方法: 逐文件代码扫描（非文档推断），经 2 次代码实测
+> 状态: ✅ 已更新 — P0 已补齐，聚焦 P1
 
 ---
 
-## 一、工具集实测（14 个）
+## 一、工具集实测（23 个）
+
+### 1.1 基础文件/搜索（9个）
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
@@ -18,13 +20,47 @@
 | 5 | list_files | [se_prompt.go:398](internal/ai/se_prompt.go#L398) | 递归遍历 + glob 过滤 + ** 双星展开 + Walk 回退 | ✅ |
 | 6 | glob | [se_prompt.go:438](internal/ai/se_prompt.go#L438) | glob 模式匹配 + ** 双星展开 + Walk 回退 | ✅ |
 | 7 | search_files | [se_prompt.go:612](internal/ai/se_prompt.go#L612) | 正则 + 文件类型过滤 + 跳过 12 种忽略目录 + 上下文行 | ✅ |
-| 8 | exec | [manager.go:3920](internal/chat/manager.go#L3920) | CMD独立进程，30s超时，sanitizeCommandPath 自动纠错 | ✅ |
-| 9 | exec_session | [shell_session.go](internal/executor/shell_session.go#L1) (287行) | 持久化 cmd.exe，cd/env 状态保持跨命令，60s 超时，10MB buffer | 🆕✅ |
-| 10 | run_tests | [manager.go:3760](internal/chat/manager.go#L3760) | go test，支持 pattern/coverage/verbose | ✅ |
-| 11 | git_operation | [manager.go:3686](internal/chat/manager.go#L3686) | status/diff/commit/push/pull/log/branch/show 8 种操作 | ✅ |
-| 12 | web_search | [se_prompt.go:563](internal/ai/se_prompt.go#L563) | DuckDuckGo HTML 解析，提取搜索结果摘要 | ⚠️ 单引擎 |
-| 13 | semantic_search | [code_indexer.go](internal/ai/code_indexer.go#L1) (677行) | 倒排索引(函数/类型/注释/字段tag) + AI GenerateConcepts 双通道评分，跨 20+ 语言 | 🆕✅ |
-| 14 | complete_task | [se_prompt.go:490](internal/ai/se_prompt.go#L490) | 文件清单 + 摘要 + 状态标记 + CheckSemanticComplete 验证 | ✅ |
+| 8 | semantic_search | [code_indexer.go](internal/ai/code_indexer.go#L1) (677行) | 倒排索引(函数/类型/注释/字段tag) + AI GenerateConcepts 双通道评分，跨 20+ 语言 | 🆕✅ |
+| 9 | web_search | [se_prompt.go:563](internal/ai/se_prompt.go#L563) | DuckDuckGo HTML 解析 + 来源URL，并行搜索 3 引擎（DuckDuckGo/Bing/Google），goroutine 并发取最快结果 | 🆕✅ |
+
+### 1.1b 网络抓取（1个）🆕
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 10 | fetch_url | [se_prompt.go:921](internal/ai/se_prompt.go#L921) | HTTP GET + 正文提取（去除 script/style/head 标签 + HTML → 纯文本 + 实体解码），2MB 限制，8000字符截断 | 🆕✅ |
+
+### 1.2 执行/终端（3个）
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 11 | exec | [manager.go:3920](internal/chat/manager.go#L3920) | CMD独立进程，30s超时，sanitizeCommandPath 自动纠错 | ✅ |
+| 12 | exec_session | [shell_session.go](internal/executor/shell_session.go#L1) (287行) | 持久化 cmd.exe，cd/env 状态保持跨命令，60s 超时，10MB buffer | 🆕✅ |
+| 13 | run_tests | [manager.go:3760](internal/chat/manager.go#L3760) | go test，支持 pattern/coverage/verbose | ✅ |
+
+### 1.3 版本控制/任务（2个）
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 14 | git_operation | [manager.go:3686](internal/chat/manager.go#L3686) | status/diff/commit/push/pull/log/branch/show 8 种操作 | ✅ |
+| 15 | complete_task | [se_prompt.go:490](internal/ai/se_prompt.go#L490) | 文件清单 + 摘要 + 状态标记 + CheckSemanticComplete 验证 | ✅ |
+
+### 1.4 LSP 代码理解（5个）🆕
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 16 | go_to_definition | [lsp_client.go:319](internal/ai/lsp_client.go#L319) | gopls daemon → textDocument/definition JSON-RPC；返回 LocationList | 🆕✅ |
+| 17 | find_references | [lsp_client.go:346](internal/ai/lsp_client.go#L346) | gopls daemon → textDocument/references；支持 includeDeclaration；按文件分组展示 | 🆕✅ |
+| 18 | hover_info | [lsp_client.go:379](internal/ai/lsp_client.go#L379) | gopls daemon → textDocument/hover；获取类型签名/文档注释；支持 plaintext/markdown | 🆕✅ |
+| 19 | diagnostics | [lsp_client.go:406](internal/ai/lsp_client.go#L406) | gopls daemon → textDocument/diagnostic (pull API)；打开文件后主动拉取编译诊断，回退兼容旧版 gopls | 🆕✅ |
+| 20 | rename_symbol | [lsp_client.go:440](internal/ai/lsp_client.go#L440) | gopls daemon → textDocument/rename → WorkspaceEdit；ApplyWorkspaceEdit 从后往前应用文本编辑避免位置偏移 | 🆕✅ |
+
+### 1.5 多模态/撤销（3个）🆕
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 21 | analyze_image | [vision.go:1](internal/ai/vision.go#L1) (272行) | PNG/JPG/GIF/WebP/BMP/PDF → base64 data URI → vision LLM；支持 HTTP URL/本地路径；IsVisionModel() 自动检测模型能力；5 种场景预设提示词 | 🆕✅ |
+| 22 | undo_file | [file_tracker.go:112](internal/executor/file_tracker.go#L112) | RollbackLast() 回滚到编辑前快照；自动回滚已集成到 write/edit 失败路径（[manager.go:3584](manager.go#L3584) + [manager.go:3687](manager.go#L3687)）；最近 20 步 | 🆕✅ |
+| 23 | list_changes | [file_tracker.go:149](internal/executor/file_tracker.go#L149) | GetRecentChanges() 列出最近 N 步变更（按时间倒序）；Stats() 展示文件追踪统计（总快照数/文件数/操作类型分布） | 🆕✅ |
 
 ---
 
@@ -129,7 +165,86 @@ CategoryPermanent  = "permanent"  // 权限/致命错误 → 不重试
 - 60s 空闲超时自动清理
 - HTTP API 直接访问：`POST /api/v1/tool/exec-session`
 
-### 2.7 语义搜索引擎
+### 2.7 LSP 代码理解引擎 🆕
+
+[LSPClient](internal/ai/lsp_client.go#L1)（560行）— 通过 gopls daemon 子进程实现 5 个语言服务器协议操作：
+
+```go
+// 初始化流程
+NewLSPClient(workDir)
+  → exec.LookPath("gopls") 检查可用性
+  → exec.CommandContext(ctx, "gopls", "serve") 启动 daemon
+  → initialize(): 发送 capabilities 声明（hover/def/refs/rename/documentSymbol）
+  → initialized 通知 → initDone=true
+  → readLoop() goroutine 循环读取 stdout（Content-Length header + JSON-RPC body）
+
+// 5 个核心操作
+GoToDefinition(file, line, col)   → "textDocument/definition"  → []LSPLocation
+FindReferences(file, line, col)   → "textDocument/references" → []LSPLocation（按文件分组）
+Hover(file, line, col)            → "textDocument/hover"      → 类型签名 + 文档注释
+Diagnostics(file)                 → "textDocument/diagnostic" → Diagnostic[]（Error/Warning/Info/Hint）
+Rename(file, line, col, newName)  → "textDocument/rename"     → WorkspaceEdit（跨文件安全重命名）
+```
+
+**关键设计细节：**
+- JSON-RPC 2.0 协议，30s 请求超时
+- 旧版 gopls 不支持 pull diagnostics 时自动回退返回空（不崩溃）
+- ApplyWorkspaceEdit：从后往前应用文本编辑（避免行号偏移Bug）
+- GoToDefinition 兼容单/location 和数组两种响应格式
+- 每个操作独立锁保护并发安全
+
+### 2.8 多模态视觉分析 🆕
+
+[vision.go](internal/ai/vision.go#L1)（272行）— AnalyzeImage 核心流程：
+
+```
+本地路径 或 HTTP URL
+  → 读取图片数据（PNG/JPG/GIF/WebP/BMP/PDF）
+  → 检测 MIME 类型（detectImageMIME）
+  → 验证支持格式（isSupportedImage）
+  → base64.StdEncoding → data URI
+  → 构造多模态消息（text + image_url）
+  → callVisionLLM → vision-capable LLM API
+  → extractCodeBlock → 提取 ```language\n...\n``` 代码块
+  → 返回 VisionResponse{Description, Code, Raw}
+```
+
+**5 种场景预设提示词**（GetImageAnalysisPrompt）：
+| 场景 | 描述 |
+|------|------|
+| `ui_to_code` | UI截图→React/HTML代码 |
+| `design_review` | UI设计稿评审（布局/色彩/UX） |
+| `screenshot_debug` | 错误截图诊断 |
+| `diagram_parse` | 图表/流程图/架构图→文本 |
+| `general` | 通用图片描述 |
+
+IsVisionModel() 自动检测模型名称是否包含 vision 关键词（gpt-4o / claude-3 / gemini / qwen-vl / glm-4v）。
+
+### 2.9 文件变更追踪 + 撤销系统 🆕
+
+[FileChangeTracker](internal/executor/file_tracker.go#L1)（181行）— 三重能力：
+
+```
+1. Snapshot(path, action) — 编辑前自动快照
+   → 读取完整文件内容 + mtime
+   → 追加到内存栈（最多20步）
+   → write/edit 执行前自动调用（manager.go:3533 + manager.go:3625）
+   → 新文件（不存在）自动跳过
+
+2. RollbackLast(path) — 回滚到编辑前状态
+   → 从栈尾找到该文件的最新快照
+   → 定位前一个快照（i-1）→ 恢复到该状态
+   → os.WriteFile 写回文件
+   → 自动回滚已集成到失败路径：
+     - write 失败 → manager.go:3584 Auto-Rollback
+     - edit 失败 → manager.go:3687 Auto-Rollback
+
+3. CheckConflict(path) — 外部修改冲突检测
+   → 对比当前文件 mtime 与最近快照 mtime
+   → 不一致则返回冲突描述（用于 PM 审核参考）
+```
+
+### 2.10 语义搜索引擎
 
 [CodeIndexer](internal/ai/code_indexer.go#L1)（677行）：
 
@@ -155,21 +270,21 @@ Search(query)
 - 不依赖外部 embedding API，本地运行
 - HTTP API: `POST /api/v1/tool/semantic-search`
 
-### 2.8 消息总线 + SSE 推送
+### 2.11 消息总线 + SSE 推送
 
 - msgBus 历史记录 + SSE 实时推送
 - 前端任意时刻重连 → 全量同步
 - pendingQueue 忙时消息暂存（27处引用）
 - 4 个 API 端点: send/history/pending/clear-pending
 
-### 2.9 上下文压缩
+### 2.12 上下文压缩
 
 [compressHistory()](internal/ai/se_prompt.go#L710)：
 - history > 20 条时触发
 - 保留最近 15 条活跃上下文
 - 旧消息提取 tool name + result preview → 拼接为 `[上下文摘要]` system 消息插入头部
 
-### 2.10 健康恢复机制
+### 2.13 健康恢复机制
 
 | 机制 | 触发条件 | 代码位置 | 动作 |
 |------|----------|---------|------|
@@ -180,63 +295,65 @@ Search(query)
 
 ---
 
-## 三、竞品差距（代码实测）
+## 三、竞品差距（代码实测，2026-06-05 更新）
 
-### P0 — 影响核心编码能力
+### P0 — 已全部补齐 ✅
 
-| # | 能力 | Cursor/Claude Code | Argus 实测 | 差距评估 |
-|---|------|-------------------|-----------|---------|
-| 1 | **LSP 代码理解** | go-to-definition / find-references / hover info / rename-symbol / diagnostics（gopls daemon） | ❌ 零 LSP 集成，纯文本搜索+正则 | **最大硬伤** — 无法精确理解类型关系、无法做 safe rename、无法获取实时编译诊断 |
-| 2 | **多模态输入** | 截图→UI代码 / 设计稿→组件 / PDF→解析 | ❌ 无 image/vision/pdf 输入能力 | UI 开发场景完全不可用 |
-| 3 | **撤销/回滚** | 每次 edit 可 undo，可回滚到任意 checkpoint | ❌ 无 undo 机制，无编辑前快照 | 改错代码只能靠 SE 自己修复，无安全网 |
+| # | 能力 | 之前状态 | 实现 | 评估 |
+|---|------|----------|------|------|
+| 1 | **LSP 代码理解** | ❌ 零 LSP 集成 | [lsp_client.go](internal/ai/lsp_client.go#L1) 560行 — gopls daemon 子进程，5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename）全部可用 | ✅ **已补齐** |
+| 2 | **多模态输入** | ❌ 无 vision 能力 | [vision.go](internal/ai/vision.go#L1) 272行 — base64 data URI → vision LLM，5种场景预设提示词，支持PNG/JPG/GIF/WebP/BMP/PDF | ✅ **已补齐** |
+| 3 | **撤销/回滚** | ❌ 无 undo 机制 | [file_tracker.go](internal/executor/file_tracker.go#L1) 181行 — Snapshot → RollbackLast 双层回滚，失败自动回滚集成到 write/edit 路径 | ✅ **已补齐** |
 
-### P1 — 影响效率体验
+### P1 — 实际差距（代码扫描后修订）
 
-| # | 能力 | 竞品 | Argus 实测 | 差距评估 |
-|---|------|------|-----------|---------|
-| 4 | **Agent 智能终止** | LLM 自主判断"任务完成了"，精准停手 | ⚠️ CheckSemanticComplete() 存在但粗糙：仅关键词匹配("完成"/"done"/"finished")，无置信度评分，常误判或漏判 | 导致 continueSETask 无效空转或过早结束 |
-| 5 | **上下文管理** | 分层摘要（tool结果压缩→决策保留→指令锁定）+ 滑动窗口 + token 计数 | ⚠️ compressHistory() 固定留15条+简单拼接摘要，无优先级分层，无 token 计数 | 长任务（50+轮）会丢失早期关键决策上下文 |
-| 6 | **web_search 增强** | 多引擎聚合 + 网页全文抓取 + RAG 引用 | ⚠️ 仅 DuckDuckGo HTML 单引擎，无页面抓取，无引用来源 | 技术文档查询经常不够准确 |
-| 7 | **文件变更追踪** | fsnotify 实时监听 + 编辑前自动 snapshot + 冲突检测 | ⚠️ DB schema 有 files_snapshot 字段设计，但 **无 watcher 实现** | 多 agent 并发编辑时可能冲突 |
-| 8 | **SE→USR 直连** | SE 可以直接向用户汇报进度和提问 | ⚠️ argus.go 已全部改为 se_to_pm，但 manager.go 仍有 addSEToUserMsg() + Source:"se_to_user" 路径 | 路由策略不一致，部分场景 SE 可能绕过 PM |
+| # | 能力 | Argus 实测 | 差距评估 |
+|---|------|-----------|---------|
+| 4 | **多 Agent 协作** | ❌ 单 SE agent，无任务拆分 | 复杂全栈任务效率低 |
+| 5 | **增量 Diff 预览** | ❌ 直接写入，无 diff 预审 | 用户对修改缺乏掌控感 |
+| 6 | **交互式调试** | ❌ 只能 exec 运行看输出 | 调试复杂 bug 困难 |
+| 7 | **代码模板/片段库** | ❌ 无 | 重复模式每次从头写 |
+| 8 | **agent 调试可视化** | ❌ 无执行过程可视化 | 用户看不到 agent 思考过程 |
 
-### P2 — 锦上添花
+### P2 — 长期优化
 
-| # | 能力 | 竞品 | Argus 实测 | 差距评估 |
-|---|------|------|-----------|---------|
-| 9 | **多 agent 协作** | 前端agent + 后端agent + DBA agent 同时工作 | ❌ 单 SE agent | 复杂全栈任务效率低 |
-| 10 | **增量 diff 预览** | 编辑前显示精确 diff，用户确认后才写入 | ❌ 直接写入，无 diff 预审 | 用户对修改缺乏掌控感 |
-| 11 | **交互式调试** | 断点设置 / 变量查看 / 单步执行 | ❌ 只能 exec 运行看输出 | 调试复杂 bug 困难 |
-| 12 | **代码模板/片段库** | 常用模式一键生成（CRUD API / auth middleware 等） | ❌ 无 | 重复模式每次从头写 |
+| # | 能力 | 说明 |
+|---|------|------|
+| 9 | 多语言 LSP | 仅 gopls（Go），无 TS/RS/Python |
+| 10 | 分布式 Agent | 单机运行 |
+| 11 | 沙盒隔离 | 无 Docker/VM |
+| 12 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana |
 
 ---
 
 ## 四、优先修复路线图
 
-### Phase 1 — 补齐致命短板（P0）
+### ✅ Phase 1 — P0 致命差距（已完成）
 
-| 顺序 | 项目 | 方案 | 预计工作量 | 影响 |
-|------|------|------|-----------|------|
-| **1.1** | **LSP 集成** | 启动 gopls daemon 作为子进程；实现 GoToDef/FindRefs/Hover/Diagnostics/Rename 5 个基础能力；将 diagnostics 注入 Tool Result Feedback | 大（2-3天） | **质变** — 从"文本搜索"升级到"语义理解"，safe rename 成为可能 |
-| **1.2** | **撤销/回滚** | 每次 write/edit 前 snapshot 目标文件内容；维护 undo stack（最近20步）；实现 undo_tool 或自动 rollback-on-failure | 中（1天） | **安全感** — 敢大胆改，改错了能回 |
-| **1.3** | **多模态基础** | 接入 vision-capable LLM（如 gpt-4o）；实现 screenshot→code 和 image-description→code 两个工具 | 中（1-2天） | UI 场景可用 |
+| 项目 | 方案 | 代码 | 状态 |
+|------|------|------|------|
+| **LSP 集成** | 启动 gopls daemon 子进程；JSON-RPC 2.0 协议；GoToDef/FindRefs/Hover/Diagnostics/Rename 5个能力；diagnostics 注入 Tool Result Feedback | [lsp_client.go](internal/ai/lsp_client.go#L1) (560行) | ✅ |
+| **撤销/回滚** | write/edit 前自动 Snapshot（最多20步）；RollbackLast 双层回滚到前一个快照；失败自动回滚已集成到 write/edit 路径 | [file_tracker.go](internal/executor/file_tracker.go#L1) (181行) | ✅ |
+| **多模态基础** | base64 data URI → vision LLM；5种场景预设提示词；HTTP URL/本地路径双支持；IsVisionModel 自动检测 | [vision.go](internal/ai/vision.go#L1) (272行) | ✅ |
 
-### Phase 2 — 效率提升（P1）
+### Phase 2 — P1 增强（2026-06-05 执行中）
 
-| 顺序 | 项目 | 方案 | 预计工作量 | 影响 |
-|------|------|------|-----------|------|
-| **2.1** | **Agent 智能终止** | CheckSemanticComplete 升级为：LLM confidence score + 最近N轮 action 有效性评分 + 工具调用收敛检测（连续 read/search 无 write/exec = 准备收尾） | 小（半天） | 减少 30-50% 无效空转 |
-| **2.2** | **上下文管理升级** | compressHistory 改为分层：① 保留 user/system 指令完整 ② 压缩 tool result 为 1 行摘要 ③ 保留最后 3 轮完整对话 ④ 加 token 计数器控制总长度 | 中（1天） | 长任务不再丢失关键信息 |
-| **2.3** | **统一 SE 路由** | 清理 manager.go 中残留的 se_to_user 路径；统一为全部走 se_to_pm → PM 审核后转发 USR | 小（半天） | 消除路由不一致 bug |
-| **2.4** | **web_search 增强** | 加入 Google/Bing fallback + 简单网页抓取（正文提取）+ 来源 URL 引用 | 小（半天） | 文档查询准确度提升 |
+| # | 项目 | 方案 | 状态 |
+|---|------|------|------|
+| **2.1** | **web_search 增强** | 并行 3 引擎（DuckDuckGo/Bing/Google）goroutine 竞速取最快返回 + fetch_url 网页抓取正文提取 | ✅ |
+| **2.2** | **Agent 智能终止** | CheckSemanticComplete 升级：关键词信号 + complete_task 验证 + 动作收敛检测 + 置信度评分 (0-1.0) | ✅ （远程已实现） |
+| **2.3** | **上下文管理升级** | compressHistory 分层：①保留 user/system 指令 ②压缩 tool result ③保留最近3轮 ④token 计数 + 二次压缩保护 | ✅ （远程已实现） |
+| **2.4** | **Diff 预览** | edit/write 前计算 unified diff；SSE 推送前端用户确认 | 🔴 |
+| **2.5** | **多语言 LSP** | 扩展 LSPClient → typescript-language-server / rust-analyzer / pyright | 🔴 |
 
 ### Phase 3 — 体验打磨（P2）
 
-| 顺序 | 项目 | 方案 | 预计工作量 |
-|------|------|------|-----------|
-| 3.1 | 文件变更 watcher | fsnotify 监听 workDir；编辑前 auto-snapshot；冲突检测 | 中 |
-| 3.2 | Diff 预览 | edit/write 前计算 unified diff；通过 SSE 推送前端展示；用户确认才执行 | 中 |
-| 3.3 | 代码片段库 | JSON/YAML 模板文件 + semantic_search 匹配 + SE prompt 引用 | 小 |
+| # | 项目 | 状态 |
+|---|------|------|
+| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | 🔴 |
+| 3.2 | 沙盒隔离（Docker/VM） | 🔴 |
+| 3.3 | 交互式调试（断点/变量查看） | 🔴 |
+| 3.4 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
 
 ---
 
@@ -251,6 +368,9 @@ Search(query)
 5. **并行只读批处理** — 5个 read/search 操作同时跑，速度提升 2-5x。
 6. **双通道语义搜索** — 关键词倒排 + AI概念融合，不需要 embedding API 就能实现语义级代码查找。
 7. **持久化 Shell Session** — 多步构建（cd → make → ./test）不再是噩梦。
+8. **LSP 语义理解** — gopls daemon 5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename），从"文本搜索"升级到"语义理解"，safe rename 成为可能。
+9. **多模态视觉分析** — 截图→描述→代码，UI开发场景可用。
+10. **文件变更追踪 + 自动回滚** — 编辑前自动快照，编辑失败自动回滚，20步 undo 栈。
 
 ---
 
@@ -258,8 +378,10 @@ Search(query)
 
 | 指标 | 数值 |
 |------|------|
-| 工具总数 | 14 |
+| 工具总数 | 23 |
 | AddResult 反馈点 | 30+ |
+| web_search 引擎数 | 3 (并行) |
+| fetch_url | 正文提取 + 2MB/8000字符限制 |
 | 防死循环层数 | 7 |
 | ErrorType 种类 | 9 |
 | ClassifyError Category | 3 |
@@ -271,9 +393,10 @@ Search(query)
 | AP retry | 1 |
 | 并行批处理上限 | 5 操作/批 |
 | compressHistory 保留条数 | 15 |
+| LSP 操作数 | 5 (gopls) |
+| Undo 栈深度 | 20 步 |
+| 支持图片格式 | 6 (PNG/JPG/GIF/WebP/BMP/PDF) |
 | ShellSession buffer | 10 MB |
 | ShellSession 超时 | 60 s |
 | exec 超时 | 30 s |
-| CodeIndexer 行数 | 677 |
-| ShellSession 行数 | 287 |
-| manager.go 总行数 | ~6500 |
+| manager.go 总行数 | ~7500 |

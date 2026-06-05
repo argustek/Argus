@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	htmlpkg "html"
 	"io"
 	"math"
 	"net/http"
@@ -383,6 +384,11 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			action.Command = v // 复用 Command 字段存 query
 		}
 		action.Type = "web_search"
+	case "fetch_url":
+		if v, ok := args["url"].(string); ok {
+			action.Command = v // 复用 Command 字段存 url
+		}
+		action.Type = "fetch_url"
 	case "delete_file":
 		if v, ok := args["path"].(string); ok {
 			action.Path = v
@@ -605,6 +611,16 @@ func (s *SEProcessor) executeSETool(name, argsJSON string) string {
 		}
 		return s.webSearch(args.Query)
 
+	case "fetch_url":
+		var args struct {
+			URL string `json:"url"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.URL == "" {
+			return "错误: url参数为空"
+		}
+		return s.webFetch(args.URL)
+
 	case "delete_file":
 		var args struct {
 			Path string `json:"path"`
@@ -702,26 +718,55 @@ var searchEngines = []searchEngine{
 		Name: "Bing",
 		URL:  func(q string) string { return fmt.Sprintf("https://www.bing.com/search?q=%s", url.QueryEscape(q)) },
 	},
+	{
+		Name: "Google",
+		URL:  func(q string) string { return fmt.Sprintf("https://www.google.com/search?q=%s&hl=en", url.QueryEscape(q)) },
+	},
 }
 
-// webSearch 执行网络搜索，多引擎 fallback + 来源 URL 引用
+// webSearch 并行搜索：同时查询所有引擎，取最先返回的结果
 func (s *SEProcessor) webSearch(query string) string {
 	client := &http.Client{Timeout: 15 * time.Second}
 	maxResults := 5
 
+	type engineResult struct {
+		engineName string
+		results    []searchResult
+	}
+	resultCh := make(chan engineResult, len(searchEngines))
+
+	// 并行启动所有引擎
 	for _, engine := range searchEngines {
-		results, err := s.searchWithEngine(client, engine, query, maxResults)
-		if err == nil && len(results) > 0 {
-			output := []string{fmt.Sprintf("🔍 搜索: %s (via %s)\n", query, engine.Name)}
-			for i, r := range results {
-				output = append(output, fmt.Sprintf("%d. %s\n   %s\n   📎 %s\n", i+1, r.Title, r.Snippet, r.URL))
+		go func(eng searchEngine) {
+			results, err := s.searchWithEngine(client, eng, query, maxResults)
+			if err == nil && len(results) > 0 {
+				resultCh <- engineResult{eng.Name, results}
+			} else {
+				fmt.Printf("[webSearch] ⚠️ %s 失败: %v\n", eng.Name, err)
 			}
-			return strings.Join(output, "\n")
-		}
-		fmt.Printf("[webSearch] ⚠️ %s 失败: %v，尝试下一个引擎...\n", engine.Name, err)
+		}(engine)
 	}
 
-	return fmt.Sprintf("未找到 '%s' 的相关结果（已尝试 DuckDuckGo + Bing）。\n提示: 可尝试更具体的关键词，或使用 exec 执行 curl 命令直接访问文档URL", query)
+	// 等待第一个成功的结果，或全部失败
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	failedEngines := []string{}
+	for range searchEngines {
+		select {
+		case r := <-resultCh:
+			output := []string{fmt.Sprintf("🔍 搜索: %s (via %s)\n", query, r.engineName)}
+			for i, res := range r.results {
+				output = append(output, fmt.Sprintf("%d. %s\n   %s\n   📎 %s\n", i+1, res.Title, res.Snippet, res.URL))
+			}
+			return strings.Join(output, "\n")
+		case <-timer.C:
+			return fmt.Sprintf("搜索超时: 所有搜索引擎均无响应（DuckDuckGo / Bing / Google）。\n提示: 可尝试更具体的关键词，或使用 fetch_url 直接访问文档URL")
+		}
+	}
+	_ = failedEngines
+
+	return fmt.Sprintf("未找到 '%s' 的相关结果（已尝试 DuckDuckGo / Bing / Google）。\n提示: 可尝试更具体的关键词，或使用 fetch_url 直接访问文档URL", query)
 }
 
 type searchResult struct {
@@ -750,6 +795,8 @@ func (s *SEProcessor) searchWithEngine(client *http.Client, engine searchEngine,
 		results = s.parseDuckDuckGo(html, maxResults)
 	case "Bing":
 		results = s.parseBing(html, maxResults)
+	case "Google":
+		results = s.parseGoogle(html, maxResults)
 	}
 
 	if len(results) == 0 {
@@ -819,10 +866,115 @@ func (s *SEProcessor) parseBing(html string, max int) []searchResult {
 	return results
 }
 
+// parseGoogle 解析 Google HTML 搜索结果
+func (s *SEProcessor) parseGoogle(html string, max int) []searchResult {
+	var results []searchResult
+
+	// Google uses <h3> for titles with <a> inside, and various div patterns for snippets
+	// Match result blocks: <a href="URL"><h3>Title</h3></a>...<div>Snippet</div>
+	linkRegex := regexp.MustCompile(`(?si)<a[^>]*href="(/url\?q=[^"&]*)[^"]*"[^>]*>\s*<h3[^>]*>(.*?)</h3>\s*</a>`)
+	snippetRegex := regexp.MustCompile(`(?si)<div[^>]*class="[^"]*BNeawe[^"]*s3v9rd[^"]*AP7Wnd[^"]*"[^>]*>(.*?)</div>`)
+
+	links := linkRegex.FindAllStringSubmatch(html, -1)
+	snippets := snippetRegex.FindAllStringSubmatch(html, -1)
+
+	for i := 0; i < len(links) && len(results) < max; i++ {
+		rawURL := strings.TrimPrefix(links[i][1], "/url?q=")
+		// Strip Google tracking params
+		if idx := strings.Index(rawURL, "&"); idx > 0 {
+			rawURL = rawURL[:idx]
+		}
+		cleanURL, _ := url.QueryUnescape(rawURL)
+		if !strings.HasPrefix(cleanURL, "http") {
+			continue
+		}
+
+		result := searchResult{
+			Title: stripHTML(links[i][2]),
+			URL:   cleanURL,
+		}
+		if i < len(snippets) {
+			result.Snippet = stripHTML(snippets[i][1])
+			if len(result.Snippet) > 200 {
+				result.Snippet = result.Snippet[:200] + "..."
+			}
+		}
+		results = append(results, result)
+	}
+
+	// Fallback: try simpler parsing if the class-based regex didn't match
+	if len(results) == 0 {
+		simpleTitle := regexp.MustCompile(`(?si)<h3[^>]*>(.*?)</h3>`)
+		simpleLink := regexp.MustCompile(`(?si)href="(https?://[^"]*)"`)
+		titles := simpleTitle.FindAllStringSubmatch(html, max)
+		allLinks := simpleLink.FindAllStringSubmatch(html, max)
+		for i := 0; i < len(titles) && i < len(allLinks) && len(results) < max; i++ {
+			results = append(results, searchResult{
+				Title:   stripHTML(titles[i][1]),
+				URL:     allLinks[i][1],
+				Snippet: "",
+			})
+		}
+	}
+
+	return results
+}
+
 // stripHTML 移除HTML标签
 func stripHTML(s string) string {
 	re := regexp.MustCompile(`<[^>]*>`)
 	return re.ReplaceAllString(s, "")
+}
+
+// webFetch 抓取网页内容并提取正文
+func (s *SEProcessor) webFetch(urlStr string) string {
+	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
+		return "错误: URL必须以 http:// 或 https:// 开头"
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequest("GET", urlStr, nil)
+	if err != nil {
+		return fmt.Sprintf("请求创建失败: %v", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ArgusSE/1.0)")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Sprintf("HTTP错误 %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 限制 2MB
+	html := string(body)
+
+	// 移除 script/style/noscript 标签及其内容
+	for _, tag := range []string{"script", "style", "noscript", "head"} {
+		re := regexp.MustCompile(`(?is)<` + tag + `[^>]*>.*?</` + tag + `>`)
+		html = re.ReplaceAllString(html, "")
+	}
+
+	// 移除所有 HTML 标签
+	html = stripHTML(html)
+
+	// 解码 HTML 实体
+	html = htmlpkg.UnescapeString(html)
+	html = htmlpkg.UnescapeString(html) // double-unescape for &amp;lt; etc
+
+	// 压缩空白
+	html = regexp.MustCompile(`\s+`).ReplaceAllString(html, " ")
+
+	// 截断
+	const maxLen = 8000
+	if len(html) > maxLen {
+		html = html[:maxLen] + fmt.Sprintf("\n\n... (截断，原文共%d字符)", len(html))
+	}
+
+	return fmt.Sprintf("📄 抓取 %s (%d字符):\n\n%s", urlStr, len(html), strings.TrimSpace(html))
 }
 
 // searchFilesEnhanced 增强版文件搜索：Walk遍历 + 跳过忽略目录 + 支持上下文行
@@ -1544,6 +1696,23 @@ var SETools = []Tool{
 					},
 				},
 				"required": []string{"query"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "fetch_url",
+			Description: "抓取单个网页内容并提取正文。用于获取文档、API参考、技术文章的完整内容。返回纯文本内容（去除HTML标签、脚本、样式），自动截断到8000字符。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "要抓取的网页URL（如 'https://pkg.go.dev/net/http'）",
+					},
+				},
+				"required": []string{"url"},
 			},
 		},
 	},
