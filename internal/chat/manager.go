@@ -129,11 +129,14 @@ type ReceiveAuditEntry struct {
 
 // Manager 对话管理器
 type Manager struct {
-	router          *Router
-	aiClient        *ai.Client
-	pmProcessor     *ai.PMProcessor
-	seProcessor     *ai.SEProcessor
-	apProcessor     *ai.APProcessor
+	router      *Router
+	aiClient    *ai.Client // 默认AI客户端（所有角色共用，除非有独立配置）
+	pmClient    *ai.Client // PM专用客户端（nil时用aiClient）
+	seClient    *ai.Client // SE专用客户端（nil时用aiClient）
+	apClient    *ai.Client // AP专用客户端（nil时用aiClient）
+	pmProcessor *ai.PMProcessor
+	seProcessor *ai.SEProcessor
+	apProcessor *ai.APProcessor
 	pmExecutor      *executor.Executor
 	seExecutor      *executor.Executor
 	fileTracker     *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
@@ -260,8 +263,35 @@ type HandoverState struct {
 
 // NewManager 创建对话管理器
 func NewManager(config types.Config, workDir string, configDir string) (*Manager, error) {
-	// 创建AI客户端
+	// 创建AI客户端 — 支持每角色独立模型配置
 	aiClient := ai.NewClient(config.APIConfig)
+	var pmClient, seClient, apClient *ai.Client
+	if config.PMConfig.BaseURL != "" && config.PMConfig.APIKey != "" {
+		pmClient = ai.NewClient(config.PMConfig)
+		fmt.Printf("[Manager] PM使用独立模型: %s\n", config.PMConfig.Model)
+	}
+	if config.SEConfig.BaseURL != "" && config.SEConfig.APIKey != "" {
+		seClient = ai.NewClient(config.SEConfig)
+		fmt.Printf("[Manager] SE使用独立模型: %s\n", config.SEConfig.Model)
+	}
+	if config.APConfig.BaseURL != "" && config.APConfig.APIKey != "" {
+		apClient = ai.NewClient(config.APConfig)
+		fmt.Printf("[Manager] AP使用独立模型: %s\n", config.APConfig.Model)
+	}
+
+	// 每个Processor用各自的Client（nil回退到aiClient）
+	pmActual := aiClient
+	if pmClient != nil {
+		pmActual = pmClient
+	}
+	seActual := aiClient
+	if seClient != nil {
+		seActual = seClient
+	}
+	apActual := aiClient
+	if apClient != nil {
+		apActual = apClient
+	}
 
 	// 初始化看板
 	boardManager := board.NewManager(".argus/board.json")
@@ -286,14 +316,17 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	}
 
 	// 初始化AI处理器
-	pmProcessor := ai.NewPMProcessor(aiClient, workDir, nil)
-	seProcessor := ai.NewSEProcessor(aiClient, workDir)
-	apProcessor := ai.NewAPProcessor(aiClient, workDir)
+	pmProcessor := ai.NewPMProcessor(pmActual, workDir, nil)
+	seProcessor := ai.NewSEProcessor(seActual, workDir)
+	apProcessor := ai.NewAPProcessor(apActual, workDir)
 
 	manager := &Manager{
-		router:        NewRouter(),
-		aiClient:      aiClient,
-		pmProcessor:   pmProcessor,
+		router:      NewRouter(),
+		aiClient:    aiClient,
+		pmClient:    pmClient,
+		seClient:    seClient,
+		apClient:    apClient,
+		pmProcessor: pmProcessor,
 		seProcessor:   seProcessor,
 		apProcessor:   apProcessor,
 		pmExecutor:    pmExecutor,
@@ -393,14 +426,19 @@ func (m *Manager) InitCMonitor() {
 	m.recoverState()
 }
 
-// UpdateAPIConfig 更新API配置并重建AI客户端
+// UpdateAPIConfig 更新API配置并重建AI客户端（支持每角色独立模型）
 func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.config.APIConfig = apiConfig
 	m.aiClient = ai.NewClient(apiConfig)
-	m.pmProcessor = ai.NewPMProcessor(m.aiClient, m.workDir, func(state int) {
+
+	// 重建各角色独立客户端（如果配置了）
+	m.rebuildRoleClients()
+
+	// PM
+	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
 		fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
 		if m.cMonitor != nil {
 			m.cMonitor.UpdateProjectState(state)
@@ -408,8 +446,11 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 			fmt.Printf("[PM] ⚠️ cMonitor 未初始化，跳过状态更新\n")
 		}
 	})
-	m.seProcessor = ai.NewSEProcessor(m.aiClient, m.workDir)
-	m.apProcessor = ai.NewAPProcessor(m.aiClient, m.workDir)
+	// SE
+	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
+	// AP
+	m.apProcessor = ai.NewAPProcessor(m.getAPClient(), m.workDir)
+
 	m.pmProcessor.ReplyLanguage = m.ReplyLanguage
 	m.seProcessor.ReplyLanguage = m.ReplyLanguage
 
@@ -422,6 +463,83 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	fmt.Printf("[Manager] API配置已更新: BaseURL=%s, Model=%s\n", apiConfig.BaseURL, apiConfig.Model)
 }
 
+// getPMClient 返回PM专用客户端（nil时回退到默认aiClient）
+func (m *Manager) getPMClient() *ai.Client {
+	if m.pmClient != nil {
+		return m.pmClient
+	}
+	return m.aiClient
+}
+
+// getSEClient 返回SE专用客户端（nil时回退到默认aiClient）
+func (m *Manager) getSEClient() *ai.Client {
+	if m.seClient != nil {
+		return m.seClient
+	}
+	return m.aiClient
+}
+
+// getAPClient 返回AP专用客户端（nil时回退到默认aiClient）
+func (m *Manager) getAPClient() *ai.Client {
+	if m.apClient != nil {
+		return m.apClient
+	}
+	return m.aiClient
+}
+
+// rebuildRoleClients 从config重建各角色独立客户端
+func (m *Manager) rebuildRoleClients() {
+	if m.config.PMConfig.BaseURL != "" && m.config.PMConfig.APIKey != "" {
+		m.pmClient = ai.NewClient(m.config.PMConfig)
+		fmt.Printf("[Manager] PM使用独立模型: %s\n", m.config.PMConfig.Model)
+	} else {
+		m.pmClient = nil
+	}
+	if m.config.SEConfig.BaseURL != "" && m.config.SEConfig.APIKey != "" {
+		m.seClient = ai.NewClient(m.config.SEConfig)
+		fmt.Printf("[Manager] SE使用独立模型: %s\n", m.config.SEConfig.Model)
+	} else {
+		m.seClient = nil
+	}
+	if m.config.APConfig.BaseURL != "" && m.config.APConfig.APIKey != "" {
+		m.apClient = ai.NewClient(m.config.APConfig)
+		fmt.Printf("[Manager] AP使用独立模型: %s\n", m.config.APConfig.Model)
+	} else {
+		m.apClient = nil
+	}
+}
+
+// UpdatePMConfig 动态更新PM的独立模型配置
+func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.PMConfig = pmConfig
+	m.rebuildRoleClients()
+	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
+		fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
+		if m.cMonitor != nil {
+			m.cMonitor.UpdateProjectState(state)
+		}
+	})
+	m.pmProcessor.ReplyLanguage = m.ReplyLanguage
+	m.pmProcessor.SetTodoCallbacks(
+		func(desc string) string { return m.AddTodo(desc) },
+		func(id, status string) { m.UpdateTodoStatus(id, status) },
+	)
+	fmt.Printf("[Manager] PM配置已更新: Model=%s\n", pmConfig.Model)
+}
+
+// UpdateSEConfig 动态更新SE的独立模型配置
+func (m *Manager) UpdateSEConfig(seConfig types.APIConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.SEConfig = seConfig
+	m.rebuildRoleClients()
+	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
+	m.seProcessor.ReplyLanguage = m.ReplyLanguage
+	fmt.Printf("[Manager] SE配置已更新: Model=%s\n", seConfig.Model)
+}
+
 // UpdateAPConfig 更新AP的独立API配置（如果为空则复用PM的）
 func (m *Manager) UpdateAPConfig(apConfig types.APIConfig) {
 	m.mu.Lock()
@@ -429,10 +547,12 @@ func (m *Manager) UpdateAPConfig(apConfig types.APIConfig) {
 
 	if apConfig.BaseURL == "" || apConfig.APIKey == "" {
 		fmt.Println("[Manager] AP未配置独立API，复用PM的AI客户端")
-		m.apProcessor = ai.NewAPProcessor(m.aiClient, m.workDir)
+		m.apClient = nil
+		m.apProcessor = ai.NewAPProcessor(m.getAPClient(), m.workDir)
 	} else {
-		apClient := ai.NewClient(apConfig)
-		m.apProcessor = ai.NewAPProcessor(apClient, m.workDir)
+		m.config.APConfig = apConfig
+		m.apClient = ai.NewClient(apConfig)
+		m.apProcessor = ai.NewAPProcessor(m.apClient, m.workDir)
 		fmt.Printf("[Manager] AP使用独立API: BaseURL=%s, Model=%s\n", apConfig.BaseURL, apConfig.Model)
 	}
 }
@@ -654,10 +774,11 @@ func (m *Manager) initCMonitor() {
 	// PM重启函数
 	pmRestarter := func() error {
 		fmt.Println("[PM] 正在重启...")
-		// 重新创建AI客户端
+		// 重建AI客户端（支持每角色独立模型）
 		m.aiClient = ai.NewClient(m.config.APIConfig)
+		m.rebuildRoleClients()
 		// 重新初始化PM处理器
-		m.pmProcessor = ai.NewPMProcessor(m.aiClient, m.workDir, func(state int) {
+		m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
 			fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
 			m.cMonitor.UpdateProjectState(state)
 		})
@@ -5185,7 +5306,7 @@ func isValidActionType(t string) bool {
 		"git_operation", "run_tests", "semantic_search", "web_search",
 		"undo_file", "list_changes",
 		"go_to_definition", "find_references", "hover_info", "diagnostics", "rename_symbol",
-		"analyze_image", "search_snippet", "show_diff", "debug_run":
+		"analyze_image", "search_snippet", "show_diff", "debug_run", "spawn_subtask":
 		return true
 	default:
 		return false

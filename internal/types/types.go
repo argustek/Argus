@@ -163,7 +163,10 @@ type Config struct {
 	CheckInterval    int       `yaml:"check_interval"`    // C检查看板间隔（秒）
 	CommitInterval   int       `yaml:"commit_interval"`   // 自动commit间隔（分钟）
 	HeartbeatTimeout int       `yaml:"heartbeat_timeout"` // 心跳超时（秒）
-	APIConfig        APIConfig `yaml:"api_config"`
+	APIConfig        APIConfig `yaml:"api_config"`        // 默认API配置（所有角色共用）
+	PMConfig         APIConfig `yaml:"pm_config"`         // PM专用配置（为空则用APIConfig）
+	SEConfig         APIConfig `yaml:"se_config"`         // SE专用配置（为空则用APIConfig）
+	APConfig         APIConfig `yaml:"ap_config"`         // AP专用配置（为空则用APIConfig）
 	PmDecisionAlert  bool      `yaml:"pm_decision_alert"` // PM决策提醒（弹窗）
 }
 
