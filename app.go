@@ -115,17 +115,21 @@ type IMConfig struct {
 
 // Config 配置结构
 type Config struct {
-	APIConfigs      []APIConfig    `json:"apiConfigs"`
-	IMConfigs       []IMConfig     `json:"imConfigs"`
-	ShowCodeBlocks  bool           `json:"showCodeBlocks"`
-	ShowThinking    bool           `json:"showThinking"`
-	PmDecisionAlert bool           `json:"pmDecisionAlert"`
-	WorkDir         string         `json:"workDir"`
-	RecentProjects  []string       `json:"recentProjects"`
-	DingTalk        DingTalkConfig `json:"dingtalk,omitempty"`
-	HTTP            HTTPConfig     `json:"http"` // [FIX-20260528-F] 移除omitempty确保HTTP配置始终保存
-	APEnabled       bool           `json:"apEnabled"`
-	APConfig        *APIConfig     `json:"apConfig,omitempty"`
+	APIConfigs        []APIConfig    `json:"apiConfigs"`
+	IMConfigs         []IMConfig     `json:"imConfigs"`
+	ShowCodeBlocks    bool           `json:"showCodeBlocks"`
+	ShowThinking      bool           `json:"showThinking"`
+	PmDecisionAlert   bool           `json:"pmDecisionAlert"`
+	WorkDir           string         `json:"workDir"`
+	RecentProjects    []string       `json:"recentProjects"`
+	DingTalk          DingTalkConfig `json:"dingtalk,omitempty"`
+	HTTP              HTTPConfig     `json:"http"`
+	APEnabled         bool           `json:"apEnabled"`
+	APConfig          *APIConfig     `json:"apConfig,omitempty"`       // [deprecated] 旧AP独立配置对象，v1.0.22后改用APConfigID
+	PMConfigID        string         `json:"pmConfigId,omitempty"`     // PM绑定的模型ID（空=用默认）
+	SEConfigID        string         `json:"seConfigId,omitempty"`     // SE绑定的模型ID（空=用默认）
+	APConfigID        string         `json:"apConfigId,omitempty"`     // AP绑定的模型ID（空=用默认）
+	UseSeparateModels bool           `json:"useSeparateModels"`        // 是否各角色使用不同模型
 }
 
 // ChatMessage 聊天消息
@@ -289,6 +293,13 @@ func (a *App) Startup(ctx context.Context) {
 	a.addLog("【Startup】开始加载配置")
 	a.loadConfig()
 	a.addLog("【Startup】配置加载完成")
+
+	// [v1.0.22] 旧配置自动迁移保存
+	if a.config.PMConfigID == "" && a.config.SEConfigID == "" && a.config.APConfigID == "" {
+		fmt.Println("[Startup] 🔄 执行旧配置格式自动迁移...")
+		a.saveConfigToFile()
+	}
+
 	a.addLog("应用启动完成")
 
 	a.initMemorySystem()
@@ -949,7 +960,6 @@ func (a *App) SaveConfig(config Config) error {
 	oldDingEnabled := a.isDingTalkEnabled()
 	oldHttpEnabled := a.config.HTTP.Enabled
 
-	// [FIX-20260528-F] 添加HTTP配置保存日志
 	fmt.Printf("[SaveConfig] HTTP配置保存: enabled=%v, port=%d, apiToken=%s, allowRemote=%v\n",
 		config.HTTP.Enabled, config.HTTP.Port,
 		func() string { if config.HTTP.APIToken != "" { return "***" }; return "" }(),
@@ -957,37 +967,56 @@ func (a *App) SaveConfig(config Config) error {
 
 	a.config = config
 
-	// 先用明文 API Key 更新 ChatManager（必须在 saveConfigToFile 加密之前！）
+	// [v1.0.22] 每角色独立模型配置
 	if a.chatManager != nil {
-		selectedConfig := a.getDefaultAPIConfig()
-		if selectedConfig != nil {
+		// 1. 默认模型 → 更新主 Client（不配独立模型时的兜底）
+		defaultCfg := a.getDefaultAPIConfig()
+		if defaultCfg != nil {
 			a.chatManager.UpdateAPIConfig(types.APIConfig{
-				Provider: selectedConfig.Provider,
-				BaseURL:  selectedConfig.BaseURL,
-				APIKey:   selectedConfig.APIKey,
-				Model:    selectedConfig.ModelName,
+				Provider: defaultCfg.Provider,
+				BaseURL:  defaultCfg.BaseURL,
+				APIKey:   defaultCfg.APIKey,
+				Model:    defaultCfg.ModelName,
 			})
 		}
 
-		// 更新 AP 配置
+		// 2. PM独立模型
+		pmCfg := a.findAPIConfigByID(config.PMConfigID)
+		if pmCfg != nil {
+			a.chatManager.UpdatePMConfig(types.APIConfig{
+				Provider: pmCfg.Provider,
+				BaseURL:  pmCfg.BaseURL,
+				APIKey:   pmCfg.APIKey,
+				Model:    pmCfg.ModelName,
+			})
+		}
+
+		// 3. SE独立模型
+		seCfg := a.findAPIConfigByID(config.SEConfigID)
+		if seCfg != nil {
+			a.chatManager.UpdateSEConfig(types.APIConfig{
+				Provider: seCfg.Provider,
+				BaseURL:  seCfg.BaseURL,
+				APIKey:   seCfg.APIKey,
+				Model:    seCfg.ModelName,
+			})
+		}
+
+		// 4. AP模型
 		if config.APEnabled {
-			if config.APConfig != nil && config.APConfig.BaseURL != "" && config.APConfig.APIKey != "" {
-				// AP使用独立API
+			apCfg := a.findAPIConfigByID(config.APConfigID)
+			if apCfg != nil {
 				a.chatManager.UpdateAPConfig(types.APIConfig{
-					Provider: config.APConfig.Provider,
-					BaseURL:  config.APConfig.BaseURL,
-					APIKey:   config.APConfig.APIKey,
-					Model:    config.APConfig.ModelName,
+					Provider: apCfg.Provider,
+					BaseURL:  apCfg.BaseURL,
+					APIKey:   apCfg.APIKey,
+					Model:    apCfg.ModelName,
 				})
-				fmt.Printf("[SaveConfig] AP使用独立API: %s\n", config.APConfig.BaseURL)
 			} else {
-				// AP复用PM的API
 				a.chatManager.UpdateAPConfig(types.APIConfig{})
-				fmt.Printf("[SaveConfig] AP使用PM的API配置（共用模式）\n")
 			}
 		} else {
 			a.chatManager.UpdateAPConfig(types.APIConfig{})
-			fmt.Printf("[SaveConfig] AP未启用\n")
 		}
 	}
 
@@ -1393,6 +1422,33 @@ func (a *App) loadConfig() {
 		}}
 	}
 
+	// [v1.0.22] 自动迁移：旧配置无角色模型ID → 用默认模型填充
+	defaultCfg := a.getDefaultAPIConfig()
+	if defaultCfg != nil {
+		if a.config.PMConfigID == "" {
+			a.config.PMConfigID = defaultCfg.ID
+		}
+		if a.config.SEConfigID == "" {
+			a.config.SEConfigID = defaultCfg.ID
+		}
+	}
+	// 迁移旧 apConfig 对象 → APConfigID
+	if a.config.APConfigID == "" && a.config.APConfig != nil {
+		for _, cfg := range a.config.APIConfigs {
+			if cfg.BaseURL == a.config.APConfig.BaseURL && cfg.ModelName == a.config.APConfig.ModelName {
+				a.config.APConfigID = cfg.ID
+				break
+			}
+		}
+		if a.config.APConfigID == "" && defaultCfg != nil {
+			a.config.APConfigID = defaultCfg.ID
+		}
+	}
+	needsMigration := a.config.PMConfigID == "" && a.config.SEConfigID == "" && a.config.APConfigID == ""
+	if needsMigration {
+		fmt.Println("[loadConfig] 🔄 检测到旧配置格式，将在Setup阶段自动迁移")
+	}
+
 	// 加载钉钉配置（无论主配置是否存在）
 	a.loadDingTalkConfig()
 
@@ -1559,9 +1615,18 @@ func (a *App) ExecuteReset(reason string) error {
 func (a *App) saveConfigToFile() error {
 	configPath := filepath.Join(a.getConfigDir(), "config.json")
 
-	encryptAPIKeys(&a.config)
+	// 深拷贝（json序列化/反序列化）以避免加密污染内存中的原始key
+	data, err := json.Marshal(a.config)
+	if err != nil {
+		return err
+	}
+	var configCopy Config
+	if err := json.Unmarshal(data, &configCopy); err != nil {
+		return err
+	}
+	encryptAPIKeys(&configCopy)
 
-	data, err := json.MarshalIndent(a.config, "", "  ")
+	data, err = json.MarshalIndent(configCopy, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -3236,6 +3301,19 @@ func (a *App) getDefaultAPIConfig() *APIConfig {
 	}
 	if len(a.config.APIConfigs) > 0 {
 		return &a.config.APIConfigs[0]
+	}
+	return nil
+}
+
+// findAPIConfigByID 根据ID查找模型配置
+func (a *App) findAPIConfigByID(id string) *APIConfig {
+	if id == "" {
+		return nil
+	}
+	for i := range a.config.APIConfigs {
+		if a.config.APIConfigs[i].ID == id {
+			return &a.config.APIConfigs[i]
+		}
 	}
 	return nil
 }

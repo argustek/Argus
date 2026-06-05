@@ -44,128 +44,136 @@
         <div class="settings-content">
         <!-- API 配置 -->
         <div v-if="currentTab === 'api'" class="tab-panel">
-        <div class="settings-section">
-          <div class="section-header">
-            <h4>{{ t('settings.apiConfig') }}</h4>
-            <button class="btn-small" @click="addApiConfig">+ {{ t('settings.addConfig') }}</button>
-          </div>
-          
-          <!-- API 配置列表 -->
-          <div class="api-config-list">
-            <div 
-              v-for="(config, index) in apiConfigs" 
-              :key="config.id"
-              class="api-config-item"
-              :class="{ 
-                active: selectedConfigIndex === index, 
-                default: config.isDefault,
-                'current-use': currentApiConfigId === config.id
-              }"
-              @click="selectConfig(index)"
-            >
-              <div class="config-info">
-                <span class="config-name">{{ config.name }}</span>
-                <span class="config-provider">{{ getProviderName(config.provider) }} · {{ config.modelName }}</span>
-                <span v-if="currentApiConfigId === config.id" class="current-badge">🟢 {{ t('settings.inUse') }}</span>
-                <span v-else-if="config.isDefault" class="default-badge">{{ t('common.default') }}</span>
-              </div>
-              <div class="config-item-actions">
-                <button 
-                  v-if="currentApiConfigId !== config.id" 
-                  class="switch-btn" 
-                  @click.stop="switchToConfig(config.id)"
-                  :title="t('common.switch')"
-                >{{ t('common.switch') }}</button>
-                <button class="delete-btn" @click.stop="deleteConfig(index)">×</button>
-              </div>
+          <!-- 表1：模型配置 -->
+          <div class="settings-section">
+            <div class="section-header">
+              <h4>{{ t('settings.modelConfigs') }}</h4>
+              <button class="btn-small" @click="addApiConfig">+ {{ t('settings.addModel') }}</button>
+            </div>
+
+            <div class="model-table-wrap">
+              <table class="model-table">
+                <thead>
+                  <tr>
+                    <th class="col-provider">{{ t('settings.provider') }}</th>
+                    <th class="col-url">URL</th>
+                    <th class="col-model">{{ t('settings.modelName') }}</th>
+                    <th class="col-key">{{ t('settings.apiKey') }}</th>
+                    <th class="col-multimodal">{{ t('settings.multimodal') }}</th>
+                    <th class="col-default">{{ t('common.default') }}</th>
+                    <th class="col-test">{{ t('settings.testConnection') }}</th>
+                    <th class="col-del"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(cfg, idx) in apiConfigs" :key="cfg.id">
+                    <td>
+                      <select class="table-select" v-model="cfg.provider" @change="onProviderChangeFor(cfg)">
+                        <option value="qwen">{{ t('settings.providerQwen') }}</option>
+                        <option value="zhipu">{{ t('settings.providerZhipu') }}</option>
+                        <option value="openai">{{ t('settings.providerOpenAI') }}</option>
+                        <option value="claude">{{ t('settings.providerClaude') }}</option>
+                        <option value="deepseek">{{ t('settings.providerDeepSeek') }}</option>
+                        <option value="nvidia">{{ t('settings.providerNvidia') }}</option>
+                        <option value="custom">{{ t('settings.providerCustom') }}</option>
+                      </select>
+                    </td>
+                    <td><input class="table-input" v-model="cfg.baseUrl" placeholder="https://api.example.com/v1" /></td>
+                    <td><input class="table-input" v-model="cfg.modelName" placeholder="model-name" /></td>
+                    <td>
+                      <div class="key-cell">
+                        <input :type="showKeys[idx] ? 'text' : 'password'" class="table-input" v-model="cfg.apiKey" placeholder="sk-..." />
+                        <button class="key-toggle" @click="showKeys[idx] = !showKeys[idx]" :title="showKeys[idx] ? '隐藏' : '显示'">👁</button>
+                      </div>
+                    </td>
+                    <td class="td-center"><input type="checkbox" v-model="cfg.supportsMultimodal" /></td>
+                    <td class="td-center"><input type="radio" name="defaultModel" :value="cfg.id" v-model="defaultModelId" /></td>
+                    <td class="td-center">
+                      <button class="btn-test" @click="testTableConfig(idx)" :disabled="testLoading[idx]">
+                        <span v-if="testLoading[idx]">⏳</span>
+                        <span v-else-if="testResults[idx] === true">✅</span>
+                        <span v-else-if="testResults[idx] === false">❌</span>
+                        <span v-else>🧪</span>
+                      </button>
+                    </td>
+                    <td class="td-center">
+                      <button class="delete-btn" @click="deleteConfig(idx)" :disabled="apiConfigs.length <= 1">🗑</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
-          
-          <!-- 选中的配置详情 -->
-          <div v-if="selectedConfig" class="config-detail">
-            <div class="form-group">
-              <label>{{ t('settings.configName') }}</label>
-              <input type="text" class="input" v-model="selectedConfig.name" :placeholder="t('settings.configNamePlaceholder')" />
+
+          <!-- 表2：角色模型绑定 -->
+          <div class="settings-section">
+            <div class="section-header">
+              <h4>{{ t('settings.roleModelBinding') }}</h4>
             </div>
-            
-            <div class="form-group">
-              <label>{{ t('settings.provider') }}</label>
-              <select class="input" v-model="selectedConfig.provider" @change="onProviderChange">
-                <option value="qwen">{{ t('settings.providerQwen') }}</option>
-                <option value="zhipu">{{ t('settings.providerZhipu') }}</option>
-                <option value="openai">{{ t('settings.providerOpenAI') }}</option>
-                <option value="claude">{{ t('settings.providerClaude') }}</option>
-                <option value="deepseek">{{ t('settings.providerDeepSeek') }}</option>
-                <option value="nvidia">{{ t('settings.providerNvidia') }}</option>
-                <option value="custom">{{ t('settings.providerCustom') }}</option>
+
+            <div class="form-group checkbox" style="margin-bottom: 12px;">
+              <label>
+                <input type="checkbox" v-model="useSeparateModels" />
+                {{ t('settings.useSeparateModels') }}
+              </label>
+            </div>
+
+            <!-- 不勾选：统一模型 -->
+            <div v-if="!useSeparateModels" class="role-single-row">
+              <span class="role-label">{{ t('settings.allRoles') }}</span>
+              <select class="input role-select" v-model="sharedModelId">
+                <option v-for="cfg in apiConfigs" :key="cfg.id" :value="cfg.id">
+                  {{ cfg.modelName || cfg.baseUrl }} ({{ truncateUrl(cfg.baseUrl) }})
+                </option>
               </select>
             </div>
-            
-            <div class="form-group">
-              <label>{{ t('settings.baseUrl') }}</label>
-              <input type="text" class="input" v-model="selectedConfig.baseUrl" :placeholder="t('settings.baseUrlPlaceholder')" />
-            </div>
-            
-            <div class="form-group">
-              <label>{{ t('settings.apiKey') }}</label>
-              <input type="password" class="input" v-model="selectedConfig.apiKey" :placeholder="t('settings.apiKeyPlaceholder')" />
-            </div>
-            
-            <div class="form-group">
-              <label>{{ t('settings.modelName') }}</label>
-              <input type="text" class="input" v-model="selectedConfig.modelName" :placeholder="t('settings.modelNamePlaceholder')" />
-            </div>
-            
-            <div class="form-group checkbox">
-              <label>
-                <input type="checkbox" v-model="selectedConfig.supportsMultimodal" />
-                {{ t('settings.supportsMultimodal') }}
-              </label>
-            </div>
-            
-            <div class="form-group checkbox">
-              <label>
-                <input type="checkbox" v-model="selectedConfig.isDefault" @change="onDefaultChange" />
-                {{ t('settings.setAsDefault') }}
-              </label>
-            </div>
-            
-            <div class="config-actions">
-              <button class="btn" @click="testConfig">{{ t('settings.testConnection') }}</button>
-              <span v-if="testStatus" :class="['test-status', testStatus.type]">{{ testStatus.message }}</span>
-            </div>
-          </div>
 
-          <!-- AP 审批者配置（独立模型选择） -->
-          <div class="settings-section" style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 16px;">
-            <div class="section-header">
-              <h4>🛡️ AP 审批者配置</h4>
-            </div>
-
-            <div class="form-group checkbox">
-              <label>
-                <input type="checkbox" v-model="useIndependentModel" @change="onUseIndependentModelChange" />
-                AP 使用独立模型
-              </label>
-            </div>
-
-            <template v-if="useIndependentModel">
-              <div class="form-group">
-                <label>选择 API 配置</label>
-                <select class="input" v-model="apConfigId" @change="onAPConfigChange">
-                  <option v-for="config in apiConfigs" :key="config.id" :value="config.id">
-                    {{ config.name }} - {{ getProviderName(config.provider) }} · {{ config.modelName }}
-                  </option>
-                </select>
-              </div>
-              <div class="config-actions">
-                <button class="btn" @click="apTestConfig" :disabled="!apConfig">🧪 测试连接</button>
-                <span v-if="apTestStatus" :class="['test-status', apTestStatus.type]">{{ apTestStatus.message }}</span>
-              </div>
-            </template>
+            <!-- 勾选：三行独立 -->
+            <table v-else class="model-table role-table">
+              <thead>
+                <tr>
+                  <th class="col-role">{{ t('settings.role') }}</th>
+                  <th class="col-model-select">{{ t('settings.model') }}</th>
+                  <th class="col-note">{{ t('settings.note') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>🧠 PM</td>
+                  <td>
+                    <select class="input role-select" v-model="pmConfigId">
+                      <option v-for="cfg in apiConfigs" :key="cfg.id" :value="cfg.id">
+                        {{ cfg.modelName || cfg.baseUrl }} ({{ truncateUrl(cfg.baseUrl) }})
+                      </option>
+                    </select>
+                  </td>
+                  <td class="role-note">{{ t('settings.pmNote') }}</td>
+                </tr>
+                <tr>
+                  <td>🔧 SE</td>
+                  <td>
+                    <select class="input role-select" v-model="seConfigId">
+                      <option v-for="cfg in apiConfigs" :key="cfg.id" :value="cfg.id">
+                        {{ cfg.modelName || cfg.baseUrl }} ({{ truncateUrl(cfg.baseUrl) }})
+                      </option>
+                    </select>
+                  </td>
+                  <td class="role-note">{{ t('settings.seNote') }}</td>
+                </tr>
+                <tr>
+                  <td>🛡️ AP</td>
+                  <td>
+                    <select class="input role-select" v-model="apConfigId">
+                      <option v-for="cfg in apiConfigs" :key="cfg.id" :value="cfg.id">
+                        {{ cfg.modelName || cfg.baseUrl }} ({{ truncateUrl(cfg.baseUrl) }})
+                      </option>
+                    </select>
+                  </td>
+                  <td class="role-note">{{ t('settings.apNote') }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
-          </div>
-        </div>
         </div>
 
         <!-- IM 集成 -->
@@ -344,6 +352,7 @@
         </div>
         </div>
       </div>
+    </div>
       
       <div class="settings-footer">
         <button class="btn" @click="$emit('close')">{{ t('common.cancel') }}</button>
@@ -422,116 +431,27 @@ const localHttpConfig = ref({
   allowRemote: props.config.http?.allowRemote ?? false
 })
 
-// AP 配置（使用已配置好的 API）
-const apConfigId = ref<string>('') // 选中的API配置ID
-const useIndependentModel = ref<boolean>(false) // 是否使用独立模型
-const apConfig = ref<ApiConfig | null>(null) // 选中的独立API配置
-const apTestStatus = ref<{type: string, message: string} | null>(null) // AP测试状态
+// ========== 表1：模型配置 ==========
+const showKeys = ref<Record<number, boolean>>({})
+const testLoading = ref<Record<number, boolean>>({})
+const testResults = ref<Record<number, boolean | null>>({})
+const defaultModelId = ref<string>('')
 
-function onUseIndependentModelChange() {
-  if (!useIndependentModel.value) {
-    apConfigId.value = ''
-    apConfig.value = null
-    apTestStatus.value = null
-  } else {
-    // 启用独立模型时，默认选中第一个API配置
-    if (apiConfigs.value.length > 0) {
-      apConfigId.value = apiConfigs.value[0].id
-      apConfig.value = { ...apiConfigs.value[0] }
-    }
-  }
+// ========== 表2：角色模型绑定 ==========
+const useSeparateModels = ref(false)
+const sharedModelId = ref<string>('')
+const pmConfigId = ref<string>('')
+const seConfigId = ref<string>('')
+const apConfigId = ref<string>('')
+
+function truncateUrl(url: string): string {
+  if (!url) return ''
+  const u = url.replace(/^https?:\/\//, '')
+  return u.length > 25 ? u.substring(0, 25) + '...' : u
 }
 
-function onAPConfigChange() {
-  if (apConfigId.value) {
-    const selected = apiConfigs.value.find(c => c.id === apConfigId.value)
-    if (selected) {
-      apConfig.value = { ...selected }
-    }
-  } else {
-    apConfig.value = null
-  }
-  apTestStatus.value = null
-}
-
-async function apTestConfig() {
-  if (!apConfig.value) return
-  apTestStatus.value = { type: 'testing', message: '测试中...' }
-  try {
-    const result = await TestAPIConfig(
-      apConfig.value.provider,
-      apConfig.value.baseUrl,
-      apConfig.value.apiKey,
-      apConfig.value.modelName
-    )
-    if (result.success) {
-      apTestStatus.value = { type: 'success', message: result.message }
-      apConfig.value.testPassed = true
-    } else {
-      apTestStatus.value = { type: 'error', message: result.message }
-      apConfig.value.testPassed = false
-    }
-  } catch (e) {
-    apTestStatus.value = { type: 'error', message: (e as Error).message }
-    apConfig.value.testPassed = false
-  }
-}
-
-const selectedConfigIndex = ref(0)
-const testStatus = ref<{type: string, message: string} | null>(null)
-const currentApiConfigId = ref<string>('')
-
-// 获取当前正在使用的API配置ID
-async function loadCurrentApiConfigId() {
-  try {
-    const id = await GetCurrentAPIConfigID()
-    currentApiConfigId.value = id || ''
-  } catch (e) {
-    console.error('获取当前API配置失败:', e)
-  }
-}
-
-// 切换到指定配置（立即生效，不重启）
-async function switchToConfig(configId: string) {
-  try {
-    await SwitchAPIConfig(configId)
-    currentApiConfigId.value = configId
-    // 更新本地 isDefault 状态
-    apiConfigs.value.forEach(config => {
-      config.isDefault = (config.id === configId)
-    })
-    const newDefault = apiConfigs.value.find(c => c.id === configId)
-    emit('api-config-changed', newDefault)
-  } catch (e) {
-    console.error('切换API配置失败:', e)
-    alert(t('settings.switchFailed') + ': ' + (e as Error).message)
-  }
-}
-
-// 组件挂载时加载当前配置
-loadCurrentApiConfigId()
-
-// API 配置列表 - 从 props 加载
-const apiConfigs = ref<ApiConfig[]>(props.config.apiConfigs?.length > 0 
-  ? props.config.apiConfigs 
-  : [
-      {
-        id: '1',
-        name: '阿里通义千问',
-        provider: 'qwen',
-        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        apiKey: '',
-        modelName: 'qwen-turbo',
-        isDefault: true,
-        supportsMultimodal: false,
-        testPassed: false
-      }
-    ])
-
-const selectedConfig = ref<ApiConfig | null>(apiConfigs.value[0] || null)
-
-// 提供商默认配置
-const providerDefaults: Record<string, { baseUrl: string, modelName: string }> = {
+// 提供商默认 URL 和模型名
+const providerDefaults: Record<string, { baseUrl: string; modelName: string }> = {
   qwen: { baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', modelName: 'qwen-turbo' },
   zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', modelName: 'glm-4' },
   openai: { baseUrl: 'https://api.openai.com/v1', modelName: 'gpt-3.5-turbo' },
@@ -541,95 +461,103 @@ const providerDefaults: Record<string, { baseUrl: string, modelName: string }> =
   custom: { baseUrl: '', modelName: '' }
 }
 
-function getProviderName(provider: string): string {
-  const keyMap: Record<string, string> = {
-    qwen: 'settings.providerQwen',
-    zhipu: 'settings.providerZhipu',
-    openai: 'settings.providerOpenAI',
-    claude: 'settings.providerClaude',
-    deepseek: 'settings.providerDeepSeek',
-    nvidia: 'settings.providerNvidia',
-    custom: 'settings.providerCustom'
+function onProviderChangeFor(cfg: ApiConfig) {
+  const defaults = providerDefaults[cfg.provider || 'custom']
+  if (defaults) {
+    cfg.baseUrl = defaults.baseUrl
+    cfg.modelName = defaults.modelName
   }
-  return keyMap[provider] ? t(keyMap[provider]) : provider
 }
 
-function selectConfig(index: number) {
-  selectedConfigIndex.value = index
-  selectedConfig.value = apiConfigs.value[index]
-  testStatus.value = null
+// API 配置列表 - 从 props 加载
+const apiConfigs = ref<ApiConfig[]>(props.config.apiConfigs?.length > 0 
+  ? props.config.apiConfigs 
+  : [
+      {
+        id: '1',
+        name: '默认配置',
+        provider: 'custom',
+        baseUrl: 'https://api.openai.com/v1',
+        apiKey: '',
+        modelName: 'gpt-4o',
+        isDefault: true,
+        supportsMultimodal: false,
+        testPassed: false
+      }
+    ])
+
+function initFromConfig() {
+  // 初始化默认模型ID
+  const defCfg = apiConfigs.value.find(c => c.isDefault)
+  if (defCfg) {
+    defaultModelId.value = defCfg.id
+  } else if (apiConfigs.value.length > 0) {
+    defaultModelId.value = apiConfigs.value[0].id
+  }
+
+  // 初始化角色绑定
+  useSeparateModels.value = props.config.useSeparateModels ?? false
+  const defId = defaultModelId.value
+
+  if (useSeparateModels.value) {
+    pmConfigId.value = props.config.pmConfigId || defId
+    seConfigId.value = props.config.seConfigId || defId
+    apConfigId.value = props.config.apConfigId || defId
+  } else {
+    sharedModelId.value = props.config.pmConfigId || defId
+    pmConfigId.value = sharedModelId.value
+    seConfigId.value = sharedModelId.value
+    apConfigId.value = sharedModelId.value
+  }
 }
+
+// 调用初始化
+initFromConfig()
 
 function addApiConfig() {
   const newConfig: ApiConfig = {
     id: Date.now().toString(),
-    name: t('settings.unnamedConfig'),
-    provider: 'qwen',
-    baseUrl: providerDefaults.qwen.baseUrl,
+    name: '新模型',
+    provider: 'custom',
+    baseUrl: '',
     apiKey: '',
-    modelName: providerDefaults.qwen.modelName,
+    modelName: '',
     isDefault: false,
     supportsMultimodal: false,
     testPassed: false
   }
   apiConfigs.value.push(newConfig)
-  selectConfig(apiConfigs.value.length - 1)
 }
 
 function deleteConfig(index: number) {
-  if (apiConfigs.value.length <= 1) {
-    alert(t('settings.atLeastOneConfig'))
-    return
-  }
+  if (apiConfigs.value.length <= 1) return
+  const removedId = apiConfigs.value[index].id
   apiConfigs.value.splice(index, 1)
-  if (selectedConfigIndex.value >= apiConfigs.value.length) {
-    selectConfig(apiConfigs.value.length - 1)
-  } else {
-    selectConfig(selectedConfigIndex.value)
+  // 如果删除的是默认模型，选第一个为默认
+  if (defaultModelId.value === removedId) {
+    defaultModelId.value = apiConfigs.value[0]?.id || ''
   }
 }
 
-function onProviderChange() {
-  if (selectedConfig.value) {
-    const defaults = providerDefaults[selectedConfig.value.provider]
-    if (defaults) {
-      selectedConfig.value.baseUrl = defaults.baseUrl
-      selectedConfig.value.modelName = defaults.modelName
-    }
-  }
-}
-
-function onDefaultChange() {
-  if (selectedConfig.value?.isDefault) {
-    // 取消其他配置的默认状态
-    apiConfigs.value.forEach((config, index) => {
-      if (index !== selectedConfigIndex.value) {
-        config.isDefault = false
-      }
-    })
-  }
-}
-
-async function testConfig() {
-  if (!selectedConfig.value) return
-  testStatus.value = { type: 'testing', message: t('settings.testing') }
+async function testTableConfig(index: number) {
+  const cfg = apiConfigs.value[index]
+  if (!cfg) return
+  testLoading.value[index] = true
+  testResults.value[index] = null
   try {
-    const result = await TestAPIConfig(
-      selectedConfig.value.provider,
-      selectedConfig.value.baseUrl,
-      selectedConfig.value.apiKey,
-      selectedConfig.value.modelName
-    )
+    const result = await TestAPIConfig(cfg.provider || 'custom', cfg.baseUrl, cfg.apiKey, cfg.modelName)
     if (result.success) {
-      testStatus.value = { type: 'success', message: result.message }
-      selectedConfig.value.testPassed = true
+      testResults.value[index] = true
+      cfg.testPassed = true
     } else {
-      testStatus.value = { type: 'error', message: result.message }
-      selectedConfig.value.testPassed = false
+      testResults.value[index] = false
+      cfg.testPassed = false
     }
   } catch (e) {
-    testStatus.value = { type: 'error', message: (e as Error).message }
-    selectedConfig.value.testPassed = false
+    testResults.value[index] = false
+    cfg.testPassed = false
+  } finally {
+    testLoading.value[index] = false
   }
 }
 
@@ -727,6 +655,23 @@ function testImConnection() {
 }
 
 function save() {
+  // 同步默认模型到 apiConfigs
+  apiConfigs.value.forEach(cfg => {
+    cfg.isDefault = (cfg.id === defaultModelId.value)
+  })
+
+  // 角色模型ID：根据 useSeparateModels 决定
+  let pmId: string, seId: string, apId: string
+  if (useSeparateModels.value) {
+    pmId = pmConfigId.value
+    seId = seConfigId.value
+    apId = apConfigId.value
+  } else {
+    pmId = sharedModelId.value
+    seId = sharedModelId.value
+    apId = sharedModelId.value
+  }
+
   emit('save', {
     showCodeBlocks: localConfig.value.showCodeBlocks,
     showThinking: localConfig.value.showThinking,
@@ -735,7 +680,10 @@ function save() {
     imConfigs: imConfigs.value,
     http: localHttpConfig.value,
     apEnabled: true,
-    apConfig: useIndependentModel.value ? apConfig.value : null
+    useSeparateModels: useSeparateModels.value,
+    pmConfigId: pmId,
+    seConfigId: seId,
+    apConfigId: apId
   })
 }
 
@@ -750,9 +698,7 @@ watch(() => props.config, (newVal) => {
   }
   if (newVal.apiConfigs?.length > 0) {
     apiConfigs.value = newVal.apiConfigs
-    if (!selectedConfig.value && apiConfigs.value.length > 0) {
-      selectedConfig.value = apiConfigs.value[0]
-    }
+    initFromConfig()
   }
   if (newVal.imConfigs?.length > 0) {
     imConfigs.value = newVal.imConfigs
@@ -760,14 +706,11 @@ watch(() => props.config, (newVal) => {
       selectedImConfig.value = imConfigs.value[0]
     }
   }
-  apConfig.value = newVal.apConfig ?? null
-  if (apConfig.value) {
-    apConfigId.value = apConfig.value.id
-    useIndependentModel.value = true
-  } else {
-    apConfigId.value = ''
-    useIndependentModel.value = false
-  }
+  // 角色模型绑定
+  useSeparateModels.value = newVal.useSeparateModels ?? false
+  if (newVal.pmConfigId) pmConfigId.value = newVal.pmConfigId
+  if (newVal.seConfigId) seConfigId.value = newVal.seConfigId
+  if (newVal.apConfigId) apConfigId.value = newVal.apConfigId
 }, { deep: true, immediate: true })
 </script>
 
@@ -1183,5 +1126,146 @@ watch(() => props.config, (newVal) => {
 
 .btn-primary:hover {
   opacity: 0.9;
+}
+
+/* ========== 模型配置表 ========== */
+.model-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 8px;
+}
+
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: fixed;
+}
+
+.model-table th {
+  padding: 8px 6px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border-color);
+  white-space: nowrap;
+  background: var(--bg-tertiary);
+}
+
+.model-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+}
+
+.model-table .td-center {
+  text-align: center;
+}
+
+.col-provider { width: 12%; }
+.col-url { width: 22%; }
+.col-model { width: 15%; }
+.col-key { width: 18%; }
+.col-multimodal { width: 6%; }
+.col-default { width: 6%; }
+.col-test { width: 7%; }
+.col-del { width: 4%; }
+
+.table-select {
+  width: 100%;
+  padding: 4px 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 11px;
+  box-sizing: border-box;
+}
+
+.col-role { width: 15%; }
+.col-model-select { width: 55%; }
+.col-note { width: 30%; }
+
+.table-input {
+  width: 100%;
+  padding: 5px 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.table-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.key-cell {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.key-cell .table-input {
+  flex: 1;
+}
+
+.key-toggle {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.btn-test {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-test:hover {
+  background: var(--border-color);
+}
+
+.delete-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* ========== 角色模型绑定 ========== */
+.role-single-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.role-label {
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  min-width: 80px;
+}
+
+.role-select {
+  flex: 1;
+}
+
+.role-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.role-table th {
+  text-align: left;
 }
 </style>

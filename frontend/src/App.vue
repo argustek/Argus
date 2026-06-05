@@ -125,6 +125,14 @@
       @api-config-changed="onAPIConfigChanged"
     />
 
+    <!-- Diff 预览弹窗 -->
+    <DiffPreviewDialog
+      v-if="showDiffDialog && diffData"
+      :data="diffData!"
+      @approve="onDiffApprove"
+      @reject="onDiffReject"
+    />
+
   </div>
 </template>
 
@@ -143,6 +151,15 @@ import TerminalWindow from './components/TerminalWindow.vue'
 import ChangesWindow from './components/ChangesWindow.vue'
 import GitWindow from './components/GitWindow.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
+import DiffPreviewDialog from './components/DiffPreviewDialog.vue'
+
+// DiffPreviewDialog 数据类型
+interface DiffData {
+  type: string
+  path: string
+  diff: string
+  action?: string
+}
 
 const WINDOW_STATES_KEY = 'argus_window_states'
 
@@ -284,6 +301,10 @@ const unfinishedTask = ref<{
   taskDescription: ''
 })
 const showRecoveryDialog = ref(false)
+
+// Diff 预览
+const showDiffDialog = ref(false)
+const diffData = ref<DiffData | null>(null)
 
 // 项目目录
 const workDir = ref('')
@@ -1016,6 +1037,14 @@ onMounted(async () => {
     }
   }
   document.addEventListener('visibilitychange', handleVisibilityChange)
+
+  // 监听 Diff 预览事件（后端 write/edit 前推送）
+  EventsOn('diff_preview', (data: DiffData & { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+    console.log('[DiffPreview] 收到预览:', data.type, data.path)
+    diffData.value = { type: data.type, path: data.path, diff: data.diff, action: data.action }
+    showDiffDialog.value = true
+  })
 })
 
 // 更新项目状态指示灯
@@ -1160,6 +1189,21 @@ function acceptChanges() {
 
 function rejectChanges() {
   pendingChanges.value = []
+}
+
+// Diff 预览处理
+function onDiffApprove(data: DiffData) {
+  console.log('[DiffPreview] 用户批准:', data.path)
+  showDiffDialog.value = false
+  // 后端已推送diff时继续执行（write/edit已在diff之后执行）
+  // 如果未来需要后端等待确认，这里发确认事件
+  EventsEmit('diff_confirmed', { path: data.path, approved: true })
+}
+
+function onDiffReject(data: DiffData) {
+  console.log('[DiffPreview] 用户拒绝:', data.path)
+  showDiffDialog.value = false
+  EventsEmit('diff_confirmed', { path: data.path, approved: false })
 }
 
 function handleAdjust() {

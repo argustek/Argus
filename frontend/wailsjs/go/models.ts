@@ -326,6 +326,10 @@ export namespace main {
 	    http: HTTPConfig;
 	    apEnabled: boolean;
 	    apConfig?: APIConfig;
+	    pmConfigId?: string;
+	    seConfigId?: string;
+	    apConfigId?: string;
+	    useSeparateModels: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -344,6 +348,10 @@ export namespace main {
 	        this.http = this.convertValues(source["http"], HTTPConfig);
 	        this.apEnabled = source["apEnabled"];
 	        this.apConfig = this.convertValues(source["apConfig"], APIConfig);
+	        this.pmConfigId = source["pmConfigId"];
+	        this.seConfigId = source["seConfigId"];
+	        this.apConfigId = source["apConfigId"];
+	        this.useSeparateModels = source["useSeparateModels"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

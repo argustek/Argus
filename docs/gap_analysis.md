@@ -3,7 +3,7 @@
 > 对比对象: Cursor / Claude Code / GitHub Copilot / Trae / Windsurf
 > 分析日期: 2026-06-05（基于 e31f7ac 重新扫描）
 > 方法: 逐文件代码扫描（非文档推断），经 2 次代码实测
-> 状态: ✅ 已更新 — P0 已补齐，聚焦 P1
+> 状态: ✅ 已更新 — P0/P1 Diff+LSP 已补齐，聚焦 P2 多Agent/调试/片段库完善
 
 ---
 
@@ -310,16 +310,16 @@ Search(query)
 | # | 能力 | Argus 实测 | 差距评估 |
 |---|------|-----------|---------|
 | 4 | **多 Agent 协作** | ❌ 单 SE agent，无任务拆分 | 复杂全栈任务效率低 |
-| 5 | **增量 Diff 预览** | ❌ 直接写入，无 diff 预审 | 用户对修改缺乏掌控感 |
+| 5 | **增量 Diff 预览** | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") 已实现；前端 DiffPreviewDialog 弹窗（unified diff 语法高亮 + 批准/拒绝/自动批准）已接入 | 用户可预审修改再确认写入 |
 | 6 | **交互式调试** | ❌ 只能 exec 运行看输出 | 调试复杂 bug 困难 |
-| 7 | **代码模板/片段库** | ❌ 无 | 重复模式每次从头写 |
+| 7 | **代码模板/片段库** | ⚠️ 基础版：9个内置模板 + search_snippet 工具；缺持久化/CRUD UI | 重复模式每次从头写 |
 | 8 | **agent 调试可视化** | ❌ 无执行过程可视化 | 用户看不到 agent 思考过程 |
 
 ### P2 — 长期优化
 
 | # | 能力 | 说明 |
 |---|------|------|
-| 9 | 多语言 LSP | 仅 gopls（Go），无 TS/RS/Python |
+| 9 | 多语言 LSP | ✅ 已支持 7 语言：Go(gopls) / TS-JS(typescript-language-server) / Python(pylsp) / Rust(rust-analyzer) / C-CPP(clangd)；lspServerMap + NewLSPClientForLang() 按语言自动选择 |
 | 10 | 分布式 Agent | 单机运行 |
 | 11 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana |
 
@@ -342,14 +342,14 @@ Search(query)
 | **2.1** | **web_search 增强** | 并行 3 引擎（DuckDuckGo/Bing/Google）goroutine 竞速取最快返回 + fetch_url 网页抓取正文提取 | ✅ |
 | **2.2** | **Agent 智能终止** | CheckSemanticComplete 升级：关键词信号 + complete_task 验证 + 动作收敛检测 + 置信度评分 (0-1.0) | ✅ （远程已实现） |
 | **2.3** | **上下文管理升级** | compressHistory 分层：①保留 user/system 指令 ②压缩 tool result ③保留最近3轮 ④token 计数 + 二次压缩保护 | ✅ （远程已实现） |
-| **2.4** | **Diff 预览** | edit/write 前计算 unified diff；SSE 推送前端用户确认 | 🔴 |
-| **2.5** | **多语言 LSP** | 扩展 LSPClient → typescript-language-server / rust-analyzer / pyright | 🔴 |
+| **2.4** | **Diff 预览** | edit/write 前计算 unified diff；SSE 推送前端用户确认 | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") + 前端 DiffPreviewDialog（语法高亮/批准/拒绝/自动批准） |
+| **2.5** | **多语言 LSP** | 扩展 LSPClient → typescript-language-server / rust-analyzer / pyright | ✅ lspServerMap 已支持7语言(gopls/ts/pylsp/rust-analyzer/clangd) + NewLSPClientForLang() |
 
 ### Phase 3 — 体验打磨（P2）
 
 | # | 项目 | 状态 |
 |---|------|------|
-| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | 🔴 |
+| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | ⚠️ 基础版已有（9模板 + search_snippet），缺持久化存储 + CRUD UI |
 | 3.2 | 交互式调试（断点/变量查看） | 🔴 |
 | 3.3 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
 
@@ -414,8 +414,9 @@ Search(query)
 | AP retry | 1 |
 | 并行批处理上限 | 5 操作/批 |
 | compressHistory 保留条数 | 15 |
-| LSP 操作数 | 5 (gopls) |
+| LSP 操作数 | 5 (gopls) + 7语言支持(TS/JS/Python/Rust/C/C++) |
 | Undo 栈深度 | 20 步 |
+| Diff 预览 | ✅ ComputeDiff(unified) + DiffPreviewDialog(前端弹窗) |
 | 支持图片格式 | 6 (PNG/JPG/GIF/WebP/BMP/PDF) |
 | ShellSession buffer | 10 MB |
 | ShellSession 超时 | 60 s |
