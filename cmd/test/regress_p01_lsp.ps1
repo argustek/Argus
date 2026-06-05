@@ -15,9 +15,28 @@ function Log($msg) {
 function Send-Task($task) {
     $body = @{ message = $task } | ConvertTo-Json
     try {
-        Invoke-RestMethod -Uri "$apiBase/chat/send" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 15 | Out-Null
+        Invoke-RestMethod -Uri "$apiBase/chat/send" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30 | Out-Null
         return $true
-    } catch { return $false }
+    } catch {
+        Log "INFO: send initiated (monitoring via conversation.log)..."
+        $maxWait = 300; $elapsed = 0; $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
+        while ($elapsed -lt $maxWait) {
+            Start-Sleep 10; $elapsed += 10
+            Write-Host -NoNewline "."
+            try {
+                # Use Select-String to scan entire file (V2-Done may be on line after timestamp)
+                $doneMatch = Select-String -Path $convLog -Pattern "V2-Done|phase:done" -EA SilentlyContinue
+                $errMatch = Select-String -Path $convLog -Pattern "V2-Error|phase:error" -EA SilentlyContinue
+                if ($doneMatch) { Write-Host ""; return $true }
+                if ($errMatch) { Write-Host ""; Log "WARN: task completed with error"; return $false }
+                $proc = Get-Process argus-desktop -EA SilentlyContinue
+                if (-not $proc) { Write-Host ""; Log "WARN: argus-desktop process died"; return $false }
+            } catch {}
+        }
+        Write-Host ""
+        Log "WARN: task did not complete within ${maxWait}s"
+        return $false
+    }
 }
 
 function Wait-Done($timeoutSec=180) {

@@ -21,8 +21,9 @@ func TestNewMessageBus(t *testing.T) {
 
 func TestSendAndAck(t *testing.T) {
 	mb := NewMessageBus(nil)
+	mb.SetFrontendReady() // 必须标记前端就绪，否则 shouldTrack() 对所有路径返回 false
 
-	msgId := mb.Send("pm", "test content", "pm_message", PathCoreOutput, "test_location", nil)
+	msgId := mb.Send("pm", "test content", "pm_message", PathSEToUser, "test_location", nil) // PathSEToUser 全量追踪（PathSEStream有1/10采样）
 	if msgId == "" {
 		t.Fatal("msgId should not be empty")
 	}
@@ -75,10 +76,11 @@ func TestMsgIdUniqueness(t *testing.T) {
 
 func TestLostMessageDetection(t *testing.T) {
 	mb := NewMessageBus(nil)
+	mb.SetFrontendReady() // 必须标记前端就绪，否则 shouldTrack() 对所有路径返回 false
 	mb.timeout = 1 * time.Second
 	mb.checkInterval = 500 * time.Millisecond
 
-	msgId := mb.Send("pm", "lost content", "pm_message", PathCoreOutput, "test_loc", nil)
+	msgId := mb.Send("pm", "lost content", "pm_message", PathSEToUser, "test_loc", nil) // PathSEToUser 全量追踪（PathSEStream有1/10采样）
 
 	time.Sleep(2 * time.Second)
 
@@ -103,6 +105,8 @@ func TestLostMessageDetection(t *testing.T) {
 
 func TestConcurrentAccess(t *testing.T) {
 	mb := NewMessageBus(nil)
+	mb.SetFrontendReady() // 必须标记前端就绪
+	// 注意：使用 PathSEToUser 而非 PathSEStream，后者有采样逻辑(1/10)，并发测试需要全量追踪
 
 	var wg sync.WaitGroup
 	var ids []string
@@ -112,7 +116,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			msgId := mb.Send("pm", "concurrent test", "pm_message", PathCoreOutput, "concurrent_loc", nil)
+			msgId := mb.Send("pm", "concurrent test", "pm_message", PathSEToUser, "concurrent_loc", nil)
 			mu.Lock()
 			ids = append(ids, msgId)
 			mu.Unlock()
@@ -205,6 +209,7 @@ func TestPathConstants(t *testing.T) {
 
 func TestGetStats(t *testing.T) {
 	mb := NewMessageBus(nil)
+	mb.SetFrontendReady() // 必须标记前端就绪
 
 	stats := mb.GetStats()
 
@@ -218,7 +223,7 @@ func TestGetStats(t *testing.T) {
 		t.Fatalf("Initial lost should be 0, got %d", stats["lost"])
 	}
 
-	mb.Send("pm", "test", "pm_message", PathCoreOutput, "test_loc", nil)
+	mb.Send("pm", "test", "pm_message", PathSEToUser, "test_loc", nil) // 使用 PathSEToUser（全量追踪，无采样）
 
 	stats = mb.GetStats()
 	if stats["pending"].(int) != 1 {

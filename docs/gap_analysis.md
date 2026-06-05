@@ -311,8 +311,8 @@ Search(query)
 |---|------|-----------|---------|
 | 4 | **多 Agent 协作** | ❌ 单 SE agent，无任务拆分 | 复杂全栈任务效率低 |
 | 5 | **增量 Diff 预览** | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") 已实现；前端 DiffPreviewDialog 弹窗（unified diff 语法高亮 + 批准/拒绝/自动批准）已接入 | 用户可预审修改再确认写入 |
-| 6 | **交互式调试** | ❌ 只能 exec 运行看输出 | 调试复杂 bug 困难 |
-| 7 | **代码模板/片段库** | ⚠️ 基础版：9个内置模板 + search_snippet 工具；缺持久化/CRUD UI | 重复模式每次从头写 |
+| 6 | **静态代码分析** | ✅ analyze_code 已实现（AST+正则，22条规则，9类检测） | 🔴 动态调试（DAP/Delve集成）仍缺口 |
+| 7 | **代码模板/片段库** | ✅ 完整版：9个内置模板 + 持久化(JSON) + CRUD(Add/Update/Delete/List) + 增强搜索(语言/标签/评分) + SE工具(add/list/delete/search) | 已完善 |
 | 8 | **agent 调试可视化** | ❌ 无执行过程可视化 | 用户看不到 agent 思考过程 |
 
 ### P2 — 长期优化
@@ -349,8 +349,8 @@ Search(query)
 
 | # | 项目 | 状态 |
 |---|------|------|
-| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | ⚠️ 基础版已有（9模板 + search_snippet），缺持久化存储 + CRUD UI |
-| 3.2 | 交互式调试（断点/变量查看） | 🔴 |
+| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | ✅ 已完成：持久化存储(.argus/snippets.json) + 完整CRUD + 增强搜索 + 4个SE工具 |
+| 3.2 | 交互式调试 | ⚠️ 静态分析+auto_debug已完成（analyze_code: 22条规则/9类检测 + auto_debug: Test-Fix循环），动态调试（Delve集成）待做 |
 | 3.3 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
 
 ---
@@ -373,7 +373,7 @@ Search(query)
 9. **多模态视觉分析** — PNG/JPG/GIF/WebP/BMP/PDF → vision LLM → 代码。
 10. **文件变更追踪 + 自动回滚** — 编辑前快照，失败自动 RollbackLast，20步 undo 栈。
 11. **权限配置系统** — PermissionConfig + PathRule + CheckPermission，每次 write/edit/delete 前校验，默认保护 .env / .git / .argus / 系统目录。
-12. **代码片段库** — 9个模板（HTTP/CRUD/认证/DB/测试/并发/配置/CLI），search_snippet 工具。
+12. **代码片段库** — 9个内置模板 + 持久化存储(.argus/snippets.json) + 完整CRUD(Add/Update/Delete/List/GetByID) + 增强搜索(SearchOptions: 语言/标签/评分) + 4个SE工具(search_snippet/add_snippet/list_snippets/delete_snippet)。内置模板受保护不可删除。
 13. **Diff 预览** — write/edit 前 ComputeDiff 推送到前端 SSE，show_diff 工具。
 14. **调试运行** — debug_run 自动加 -v -race -count=1，panic/trace 结构化展示。
 15. **web_search 三引擎并行** — DuckDuckGo + Bing + Google goroutine 竞速，fetch_url HTML→纯文本。

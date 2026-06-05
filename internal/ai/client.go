@@ -301,17 +301,17 @@ type StreamChunk struct {
 
 // ChatStream 流式聊天请求，每收到文本片段调用 onChunk，返回累积的完整文本
 func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
-	maxRetries := 1
+	maxRetries := 3  // Increased from 1 to handle unstable LLM API connections
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if ctx.Err() != nil {
-				fmt.Printf("[AI Retry] ⛔ 上下文已取消(用户停止)，放弃重试\n")
+				fmt.Printf("[AI Retry] Context cancelled, giving up\n")
 				return "", lastErr
 			}
-			waitTime := time.Duration(attempt*2) * time.Second
-			fmt.Printf("[AI Retry] 第%d次重试，等待%v...\n", attempt, waitTime)
+			waitTime := time.Duration(attempt*3) * time.Second  // 3s, 6s, 9s backoff
+			fmt.Printf("[AI Retry] Attempt %d/%d, waiting %v...\n", attempt, maxRetries, waitTime)
 			time.Sleep(waitTime)
 		}
 
@@ -328,7 +328,7 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 			return "", err
 		}
 
-		fmt.Printf("[AI Retry] 可重试错误: %v (尝试 %d/%d)\n", err, attempt+1, maxRetries)
+		fmt.Printf("[AI Retry] Retryable error: %v (attempt %d/%d)\n", err, attempt+1, maxRetries)
 	}
 
 	c.recordFailure()
@@ -697,6 +697,8 @@ func isRetryableError(err error) bool {
 		"connection refused",
 		"connection reset",
 		"connection aborted",
+		"forcibly closed",      // Windows wsarev: remote host forcibly closed
+		"closed by the remote",  // Connection forcibly closed
 		"network is unreachable",
 		"no such host",
 		"dns",

@@ -22,11 +22,34 @@ function Log($msg) {
 
 function Send-Task($task) {
     $body = @{ message = $task } | ConvertTo-Json
+    # Record current log size to detect NEW completion markers only
+    $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
+    $startSize = 0
+    if (Test-Path $convLog) { $startSize = (Get-Item $convLog).Length }
     try {
-        Invoke-RestMethod -Uri "$apiBase/chat/send" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 15 | Out-Null
+        Invoke-RestMethod -Uri "$apiBase/chat/send" -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30 | Out-Null
         return $true
     } catch {
-        Log "WARN: send failed: $_"
+        Log "INFO: send initiated (monitoring via conversation.log)..."
+        $maxWait = 300; $elapsed = 0
+        while ($elapsed -lt $maxWait) {
+            Start-Sleep 10; $elapsed += 10
+            Write-Host -NoNewline "."
+            try {
+                # Only check content ADDED after send (ignore old V2-Done)
+                if ((Test-Path $convLog) -and ((Get-Item $convLog).Length -gt $startSize)) {
+                    $newContent = Get-Content $convLog -EA SilentlyContinue | Select-Object -Skip ([math]::Max(0, (Get-Content $convLog).Count - 20))
+                    foreach ($line in $newContent) {
+                        if ($line -match "V2-Done|phase:done") { Write-Host ""; return $true }
+                        if ($line -match "V2-Error|phase:error") { Write-Host ""; Log "WARN: task completed with error"; return $false }
+                    }
+                }
+                $proc = Get-Process argus-desktop -EA SilentlyContinue
+                if (-not $proc) { Write-Host ""; Log "WARN: argus-desktop process died"; return $false }
+            } catch {}
+        }
+        Write-Host ""
+        Log "WARN: task did not complete within ${maxWait}s"
         return $false
     }
 }
@@ -68,28 +91,42 @@ if (-not $ready) { Log "FAIL: Server not ready after 45s"; $failed++; taskkill /
 $testFile = Join-Path $workDir "p02_undo_demo.go"
 Remove-Item $testFile -Force -EA SilentlyContinue
 
-Send-Task 'Create p02_undo_demo.go with Go code: package main, import fmt, func main() prints Hello Undo'
-Start-Sleep 5; Wait-Done
-
-if (-not (Test-Path $testFile)) {
-    Log "FAIL: File not created by SE"
+$sendOk = Send-Task 'Create p02_undo_demo.go with Go code: package main, import fmt, func main() prints Hello Undo'
+if (-not $sendOk) {
+    Log "FAIL: Send task failed (server not ready or timeout)"
     $failed++
+    taskkill /f /im argus-desktop.exe 2>$null
 } else {
-    Log "PASS: File created by SE ($(Get-Item $testFile).Length bytes)"
-    
-    Send-Task 'Use undo_file to undo your last edit on p02_undo_demo.go, then use list_changes to show remaining changes'
     Start-Sleep 5; Wait-Done
-    
-    Start-Sleep 3
-    $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
-    $hasUndoOutput = (Get-Content $convLog -EA SilentlyContinue | Select-String "undo|list_changes").Count -gt 0
-    
-    if ($hasUndoOutput) { Log "PASS: undo_file and list_changes executed"; $passed++ }
-    else { Log "INFO: No undo output (model may not have called tools)"; $passed++ }
-}
 
-taskkill /f /im argus-desktop.exe 2>$null
-Remove-Item $testFile -Force -EA SilentlyContinue
+    if (-not (Test-Path $testFile)) {
+        Log "FAIL: File not created by SE"
+        $failed++
+        taskkill /f /im argus-desktop.exe 2>$null
+        Remove-Item $testFile -Force -EA SilentlyContinue
+    } else {
+        # Verify file compiles
+        $br = go build $testFile 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Log "FAIL: File created but has syntax errors: $br"
+            $failed++
+        } else {
+            Log "PASS: File created and compiles OK ($(Get-Item $testFile).Length bytes)"
+
+            Send-Task 'Use undo_file to undo your last edit on p02_undo_demo.go, then use list_changes to show remaining changes'
+            Start-Sleep 5; Wait-Done
+
+            Start-Sleep 3
+            $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
+            $hasUndoOutput = (Get-Content $convLog -EA SilentlyContinue | Select-String "undo|list_changes").Count -gt 0
+
+            if ($hasUndoOutput) { Log "PASS: undo_file and list_changes executed"; $passed++ }
+            else { Log "FAIL: SE did not call undo/list_changes tools"; $failed++ }
+        }
+        taskkill /f /im argus-desktop.exe 2>$null
+        Remove-Item $testFile -Force -EA SilentlyContinue
+    }
+}
 Start-Sleep 4
 
 
@@ -107,10 +144,14 @@ for ($retry = 0; $retry -lt 6; $retry++) {
 $testFile2 = Join-Path $workDir "p02_rollback_test.go"
 Remove-Item $testFile2 -Force -EA SilentlyContinue
 
-Send-Task 'Create p02_rollback_test.go: a Go program that has INTENTIONAL syntax errors first, then fix them. The final file must compile successfully.'
-Start-Sleep 5; Wait-Done
+$sendOk2 = Send-Task 'Create p02_rollback_test.go: a Go program that has INTENTIONAL syntax errors first, then fix them. The final file must compile successfully.'
+if (-not $sendOk2) {
+    Log "FAIL: Send task failed (server not ready or timeout)"
+    $failed++
+} else {
+    Start-Sleep 5; Wait-Done
 
-if (Test-Path $testFile2) {
+    if (Test-Path $testFile2) {
     $buildResult = go build $testFile2 2>&1
     if ($LASTEXITCODE -eq 0) {
         Log "PASS: Final file compiles after rollback+fix"
@@ -125,6 +166,7 @@ if (Test-Path $testFile2) {
 } else {
     Log "FAIL: File not created"
     $failed++
+}
 }
 
 taskkill /f /im argus-desktop.exe 2>$null
@@ -146,26 +188,36 @@ for ($retry = 0; $retry -lt 6; $retry++) {
 $testFile3 = Join-Path $workDir "p02_multi_undo.go"
 Remove-Item $testFile3 -Force -EA SilentlyContinue
 
-Send-Task 'Create p02_multi_undo.go with: package main, func main() { println("v1") }. Then edit it to print v2, then edit again to print v3. After all edits, use undo_file TWICE to go back to v1 state.'
-Start-Sleep 5; Wait-Done
+$sendOk3 = Send-Task 'Create p02_multi_undo.go with: package main, func main() { println("v1") }. Then edit it to print v2, then edit again to print v3. After all edits, use undo_file TWICE to go back to v1 state.'
+if (-not $sendOk3) {
+    Log "FAIL: Send task failed (server not ready or timeout)"
+    $failed++
+} else {
+    Start-Sleep 5; Wait-Done
 
-if (Test-Path $testFile3) {
+    if (Test-Path $testFile3) {
     $finalContent = Get-Content $testFile3 -Raw
     Log "Final file content: $($finalContent.Trim())"
     
-    $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
-    $undoCount = (Get-Content $convLog -EA SilentlyContinue | Select-String "undo").Count
-    
-    if ($undoCount -ge 2) { Log "PASS: Multiple undos detected ($undoCount ops)"; $passed++ }
-    elseif ($undoCount -ge 1) { Log "PARTIAL: At least 1 undo ($undoCount total)"; $passed++ }
-    else { Log "INFO: No undo in log"; $passed++ }
-    
+    # Must compile to pass
     $br = go build $testFile3 2>&1
-    if ($LASTEXITCODE -eq 0) { Log "PASS: File compiles OK" }
-    else { Log "WARN: File does not compile: $br" }
+    if ($LASTEXITCODE -ne 0) {
+        Log "FAIL: File does not compile: $br"
+        $failed++
+    } else {
+        Log "PASS: File compiles OK"
+        
+        $convLog = "F:\ArgusTek\Argus\logs\conversation.log"
+        $undoCount = (Get-Content $convLog -EA SilentlyContinue | Select-String "undo").Count
+        
+        if ($undoCount -ge 2) { Log "PASS: Multiple undos detected ($undoCount ops)"; $passed++ }
+        elseif ($undoCount -ge 1) { Log "PARTIAL: At least 1 undo ($undoCount total)"; $failed++ }
+        else { Log "FAIL: No undo operations found"; $failed++ }
+    }
 } else {
     Log "FAIL: File not created"
     $failed++
+}
 }
 
 taskkill /f /im argus-desktop.exe 2>$null

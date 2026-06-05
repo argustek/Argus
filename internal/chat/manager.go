@@ -3436,7 +3436,7 @@ func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActio
 
 			case "search_snippet":
 				store := m.seProcessor.GetSnippetStore()
-				snippets := store.Search(action.Pattern)
+				snippets := store.SearchSimple(action.Pattern)
 				results[bi] = batchResult{idx: bi, content: store.FormatResults(snippets)}
 			}
 		}(bi, action)
@@ -3546,6 +3546,18 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					label = "诊断: " + filepath.Base(a.Path)
 				case "rename_symbol":
 					label = "重命名: " + a.Command
+				case "analyze_code":
+					label = "分析代码: " + a.Path
+				case "auto_debug":
+					label = "自动调试"
+				case "search_snippet":
+					label = "搜索片段"
+				case "add_snippet":
+					label = "添加片段"
+				case "list_snippets":
+					label = "列出片段"
+				case "delete_snippet":
+					label = "删除片段"
 				default:
 					label = a.Type
 				}
@@ -3654,6 +3666,30 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					m.taskManager.UpdateStatus(currentTask.ID, "failed")
 				}
 				continue
+			}
+			// [TRUNCATION-GUARD] 拒绝写入异常短的代码文件（防止LLM输出截断导致无效代码）
+			if len(action.Content) > 0 && len(action.Content) < 30 {
+				ext := strings.ToLower(filepath.Ext(action.Path))
+				codeExts := map[string]bool{".go": true, ".py": true, ".js": true, ".ts": true, ".java": true, ".c": true, ".cpp": true, ".rs": true}
+				if codeExts[ext] {
+					errMsg := fmt.Sprintf("内容截断检测: %s 内容仅 %d 字节，代码文件不可能这么短！请重新生成完整代码。", action.Path, len(action.Content))
+					fmt.Printf("[Action] ⚠️ %s\n", errMsg)
+					fmt.Printf("[Action] ⚠️ 截断内容预览: %q\n", action.Content)
+					m.seProcessor.AddResult(fmt.Sprintf("⚠️ %s", errMsg))
+					m.emitWailsEvent("exec_done", map[string]interface{}{
+						"executor": "se",
+						"index":    i + 1,
+						"type":     "write_file",
+						"label":    actionLabel,
+						"status":   "truncated",
+						"error":    errMsg,
+						"content_len": len(action.Content),
+					})
+					if currentTask != nil {
+						m.taskManager.UpdateStatus(currentTask.ID, "failed")
+					}
+					continue
+				}
 			}
 			// [P1] Diff预览：编辑前计算diff推送到前端
 			oldContent, _ := os.ReadFile(filepath.Join(m.workDir, action.Path))
@@ -4372,7 +4408,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				query = action.Tool
 			}
 			store := m.seProcessor.GetSnippetStore()
-			snippets := store.Search(query)
+			snippets := store.SearchSimple(query)
 			resultMsg := store.FormatResults(snippets)
 			m.seProcessor.AddResult(resultMsg)
 			m.emitWailsEvent("exec_done", map[string]interface{}{
@@ -4383,6 +4419,173 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"status":   "done",
 				"matches":  len(snippets),
 			})
+
+		case "add_snippet":
+			store := m.seProcessor.GetSnippetStore()
+			newSn := ai.Snippet{
+				Name:        action.Pattern, // name
+				Language:    action.Path,    // language
+				Description: action.Content, // description
+			}
+			// Parse tags from extra if available
+			if action.Extra != "" {
+				var extra struct {
+					Tags []string `json:"tags"`
+					Code string   `json:"code"`
+				}
+				if json.Unmarshal([]byte(action.Extra), &extra) == nil {
+					newSn.Tags = extra.Tags
+					newSn.Code = extra.Code
+				}
+			}
+			if err := store.Add(newSn); err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 添加片段失败: %v", err))
+			} else {
+				m.seProcessor.AddResult(fmt.Sprintf("✅ 片段已添加: %s (%s)", newSn.Name, newSn.Language))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "add_snippet",
+				"label": fmt.Sprintf("add_snippet('%s')", newSn.Name), "status": "done",
+			})
+
+		case "list_snippets":
+			store := m.seProcessor.GetSnippetStore()
+			lang := action.Pattern // optional language filter
+			list := store.List(lang)
+			resultMsg := store.FormatList(list)
+			m.seProcessor.AddResult(resultMsg)
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "list_snippets",
+				"label": "list_snippets()", "status": "done", "count": len(list),
+			})
+
+		case "delete_snippet":
+			store := m.seProcessor.GetSnippetStore()
+			snippetID := action.Pattern
+			if err := store.Delete(snippetID); err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 删除片段失败: %v", err))
+			} else {
+				m.seProcessor.AddResult(fmt.Sprintf("✅ 片段已删除: %s", snippetID))
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "delete_snippet",
+				"label": fmt.Sprintf("delete_snippet('%s')", snippetID), "status": "done",
+			})
+
+		case "analyze_code":
+			analyzer := ai.NewCodeAnalyzer(m.workDir)
+			opts := ai.AnalyzeOptions{
+				Path:     action.Path,
+				MaxIssues: 50,
+			}
+			// 解析 Extra 中的过滤参数
+			if action.Extra != "" {
+				var extra struct {
+					Categories []string `json:"categories"`
+					MinLevel   string   `json:"min_level"`
+					MaxIssues  int      `json:"max_issues"`
+				}
+				if json.Unmarshal([]byte(action.Extra), &extra) == nil {
+					opts.Categories = extra.Categories
+					opts.MinLevel = extra.MinLevel
+					if extra.MaxIssues > 0 {
+						opts.MaxIssues = extra.MaxIssues
+					}
+				}
+			}
+			result, err := analyzer.Analyze(opts)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ 代码分析失败: %v", err))
+			} else {
+				report := result.FormatResults()
+				m.seProcessor.AddResult(report)
+			}
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "analyze_code",
+				"label": fmt.Sprintf("analyze_code('%s')", action.Path), "status": "done",
+			})
+
+		case "auto_debug":
+			// 解析参数
+			maxIter := 3
+			mode := "full"
+			if action.Extra != "" {
+				var extra struct {
+					MaxIterations int    `json:"max_iterations"`
+					Mode          string `json:"mode"`
+				}
+				if json.Unmarshal([]byte(action.Extra), &extra) == nil {
+					if extra.MaxIterations > 0 && extra.MaxIterations <= 5 {
+						maxIter = extra.MaxIterations
+					}
+					if extra.Mode == "analyze" || extra.Mode == "full" {
+						mode = extra.Mode
+					}
+				}
+			}
+			testCmd := action.Command
+			if testCmd == "" {
+				testCmd = "go test -v -count=1"
+			}
+			target := action.Path // 测试目标包路径
+			if target != "" {
+				testCmd = fmt.Sprintf("%s %s", testCmd, target)
+			}
+
+			if mode == "analyze" {
+				// 仅分析模式：跑一次测试，AI分析错误但不动代码
+				output, err := m.seExecutor.Exec(testCmd, 60*time.Second)
+				if err != nil && output == "" {
+					m.seProcessor.AddResult(fmt.Sprintf("❌ 测试执行失败: %v", err))
+				} else {
+					debugger := ai.NewAutoDebugger(ai.DefaultAutoDebugConfig(m.workDir), m.seProcessor.GetClient(), m.seExecutor.Exec)
+					analysis, _, analyzeErr := debugger.AnalyzeOnly(context.Background(), output)
+					if analyzeErr != nil {
+						m.seProcessor.AddResult(fmt.Sprintf("❌ 分析失败: %v\n\n原始输出:\n%s", analyzeErr, ai.TruncateOutput(output, 3000)))
+					} else {
+						m.seProcessor.AddResult(fmt.Sprintf("📋 测试失败分析:\n%s\n\n原始输出:\n%s", analysis, ai.TruncateOutput(output, 2000)))
+					}
+				}
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "auto_debug",
+					"label": fmt.Sprintf("auto_debug(analyze '%s')", target), "status": "done",
+				})
+			} else {
+				// full 模式：跑测试 + AI分析 + 自动修复循环
+				config := ai.DefaultAutoDebugConfig(m.workDir)
+				config.MaxIterations = maxIter
+				if target != "" {
+					config.SpecificTests = target
+				}
+				config.TestCommand = "go test -v -count=1"
+				if testCmd != "" {
+					config.TestCommand = strings.TrimSuffix(testCmd, " "+target)
+				}
+
+				debugger := ai.NewAutoDebugger(config, m.seProcessor.GetClient(), m.seExecutor.Exec)
+				result, err := debugger.Run(context.Background())
+				if err != nil {
+					m.seProcessor.AddResult(fmt.Sprintf("❌ 自动调试失败: %v", err))
+				} else {
+					report := result.FormatResults()
+					m.seProcessor.AddResult(report)
+
+					// 如果有修复建议，记录到结果
+					if len(result.FixHistory) > 0 {
+						lastFix := result.FixHistory[len(result.FixHistory)-1]
+						if lastFix.FilePath != "" && lastFix.NewCode != "" {
+							m.seProcessor.AddResult(fmt.Sprintf("\n💡 最后修复建议 (%s):\n旧代码:\n```\n%s\n```\n新代码:\n```\n%s\n```",
+								lastFix.FilePath, lastFix.OldCode, lastFix.NewCode))
+						}
+					}
+				}
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "auto_debug",
+					"label": fmt.Sprintf("auto_debug('%s')", target), "status": "done",
+					"success": result != nil && result.Success,
+					"iterations": func() int { if result != nil { return result.Iterations }; return 0 }(),
+				})
+			}
 
 		case "show_diff":
 			absPath := filepath.Join(m.workDir, action.Path)
@@ -5306,7 +5509,8 @@ func isValidActionType(t string) bool {
 		"git_operation", "run_tests", "semantic_search", "web_search",
 		"undo_file", "list_changes",
 		"go_to_definition", "find_references", "hover_info", "diagnostics", "rename_symbol",
-		"analyze_image", "search_snippet", "show_diff", "debug_run", "spawn_subtask":
+		"analyze_image", "search_snippet", "show_diff", "debug_run", "spawn_subtask",
+		"analyze_code", "auto_debug":
 		return true
 	default:
 		return false
