@@ -4138,6 +4138,57 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			"exit_code": 0,
 		})
 
+	case "debug_run":
+		// 调试运行：自动加调试flag，格式化panic/trace，60s超时
+		if m.configManager != nil {
+			level, desc := m.configManager.CheckCommand(action.Command)
+			if level == types.CmdBlockDeny {
+				errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+				continue
+			}
+			_ = desc
+		}
+
+		// 智能增强Go命令
+		cmd := action.Command
+		if strings.HasPrefix(cmd, "go test") || strings.Contains(cmd, "go test") {
+			if !strings.Contains(cmd, "-v") {
+				cmd += " -v"
+			}
+			if !strings.Contains(cmd, "-count") {
+				cmd += " -count=1"
+			}
+		} else if strings.HasPrefix(cmd, "go run") || strings.HasPrefix(cmd, "go build") {
+			if !strings.Contains(cmd, "-race") {
+				cmd += " -race"
+			}
+		}
+		fmt.Printf("[DebugRun] 🔍 %s\n", cmd)
+
+		output, err := m.seExecutor.Exec(cmd, 60*time.Second)
+		if err != nil {
+			m.seProcessor.AddResult(fmt.Sprintf("❌ debug运行失败: %v\n输出: %s", err, output))
+			continue
+		}
+
+		// 格式化panic/trace为结构化展示
+		result := fmt.Sprintf("🔍 Debug输出:\n%s", output)
+		if strings.Contains(output, "panic:") {
+			result = fmt.Sprintf("🔍 💥 PANIC检测:\n%s\n\n📋 建议: 检查panic行号，注意nil指针、索引越界、类型断言", output)
+		} else if strings.Contains(output, "FAIL") || strings.Contains(output, "FAIL") {
+			result = fmt.Sprintf("🔍 ❌ 测试失败:\n%s\n\n📋 建议: 查看失败用例输出，检查断言和预期值", output)
+		}
+		m.seProcessor.AddResult(result)
+		m.emitWailsEvent("exec_done", map[string]interface{}{
+			"executor": "se", "index": i + 1, "type": "debug_run",
+			"label": actionLabel, "status": "done",
+		})
+		m.emitWailsEvent("exec_output", map[string]interface{}{
+			"executor": "se", "command": cmd,
+			"output": truncateSSEOutput(output, 500), "exit_code": 0,
+		})
+
 	case "exec_session":
 		// 持久化 shell 会话执行（保持 cd/env 状态）
 		if m.configManager != nil {
@@ -5134,7 +5185,7 @@ func isValidActionType(t string) bool {
 		"git_operation", "run_tests", "semantic_search", "web_search",
 		"undo_file", "list_changes",
 		"go_to_definition", "find_references", "hover_info", "diagnostics", "rename_symbol",
-		"analyze_image", "search_snippet", "show_diff":
+		"analyze_image", "search_snippet", "show_diff", "debug_run":
 		return true
 	default:
 		return false
