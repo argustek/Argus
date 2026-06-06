@@ -1,66 +1,74 @@
 # Argus SE AI 能力差距分析
 
 > 对比对象: Cursor / Claude Code / GitHub Copilot / Trae / Windsurf
-> 分析日期: 2026-06-05（基于 e31f7ac 重新扫描）
-> 方法: 逐文件代码扫描（非文档推断），经 2 次代码实测
-> 状态: ✅ 已更新 — P0/P1 Diff+LSP 已补齐，聚焦 P2 多Agent/调试/片段库完善
+> 分析日期: 2026-06-06（基于 e098cdb 重新扫描）
+> 方法: 逐文件代码扫描 → 代码验证对比，经 3 次代码实测 + 10轮回归测试
+> 状态: ✅ 已更新 — P0/P1 全补齐，P2 聚焦多Agent/动态调试
 
 ---
 
-## 一、工具集实测（23 个）
+## 一、工具集实测（31 个）
 
-### 1.1 基础文件/搜索（9个）
+### 1.1 基础文件/搜索（11个）
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
 | 1 | write_file | [manager.go:3478](internal/chat/manager.go#L3478) | 受保护文件检查 + 路径安全检查 + isPathInDir | ✅ |
 | 2 | edit_file | [manager.go:3510](internal/chat/manager.go#L3510) | old_str/new_str 精确替换，支持多行匹配 | ✅ |
-| 3 | read_file | [se_prompt.go:370](internal/ai/se_prompt.go#L370) | offset/limit 行范围，默认100行，带行号输出 | ✅ |
+| 3 | read_file | [se_prompt.go:570](internal/ai/se_prompt.go#L570) | offset/limit 行范围，默认100行，带行号输出 | ✅ |
 | 4 | delete_file | [manager.go:3665](internal/chat/manager.go#L3665) | 工作目录范围检查 + 安全拒绝 + isPathInDir | ✅ |
 | 5 | list_files | [se_prompt.go:398](internal/ai/se_prompt.go#L398) | 递归遍历 + glob 过滤 + ** 双星展开 + Walk 回退 | ✅ |
 | 6 | glob | [se_prompt.go:438](internal/ai/se_prompt.go#L438) | glob 模式匹配 + ** 双星展开 + Walk 回退 | ✅ |
 | 7 | search_files | [se_prompt.go:612](internal/ai/se_prompt.go#L612) | 正则 + 文件类型过滤 + 跳过 12 种忽略目录 + 上下文行 | ✅ |
-| 8 | semantic_search | [code_indexer.go](internal/ai/code_indexer.go#L1) (677行) | 倒排索引(函数/类型/注释/字段tag) + AI GenerateConcepts 双通道评分，跨 20+ 语言 | 🆕✅ |
-| 9 | web_search | [se_prompt.go:563](internal/ai/se_prompt.go#L563) | DuckDuckGo HTML 解析 + 来源URL，并行搜索 3 引擎（DuckDuckGo/Bing/Google），goroutine 并发取最快结果 | 🆕✅ |
+| 8 | semantic_search | [code_indexer.go:1](internal/ai/code_indexer.go#L1) (677行) | 倒排索引(函数/类型/注释/字段tag) + AI GenerateConcepts 双通道评分，跨 20+ 语言 | 🆕✅ |
+| 9 | web_search | [se_prompt.go:819](internal/ai/se_prompt.go#L819) | 并行 3 引擎（DuckDuckGo/Bing/Google），goroutine 并发取最快结果 | 🆕✅ |
+| 10 | show_diff | [se_prompt.go:2178](internal/ai/se_prompt.go#L2178) 🆕 | 预览文件编辑前后差异，不实际修改文件，生成 unified diff 供确认 | 🆕✅ |
+| 11 | fetch_url | [se_prompt.go:1798](internal/ai/se_prompt.go#L1798) | HTTP GET + 正文提取（去除 script/style/head 标签 + HTML → 纯文本 + 实体解码），2MB 限制，8000字符截断 | 🆕✅ |
 
-### 1.1b 网络抓取（1个）🆕
-
-| # | 工具 | 代码位置 | 实现细节 | 状态 |
-|---|------|---------|---------|------|
-| 10 | fetch_url | [se_prompt.go:921](internal/ai/se_prompt.go#L921) | HTTP GET + 正文提取（去除 script/style/head 标签 + HTML → 纯文本 + 实体解码），2MB 限制，8000字符截断 | 🆕✅ |
-
-### 1.2 执行/终端（3个）
+### 1.2 执行/终端（4个）
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
-| 11 | exec | [manager.go:3920](internal/chat/manager.go#L3920) | CMD独立进程，30s超时，sanitizeCommandPath 自动纠错 | ✅ |
-| 12 | exec_session | [shell_session.go](internal/executor/shell_session.go#L1) (287行) | 持久化 cmd.exe，cd/env 状态保持跨命令，60s 超时，10MB buffer | 🆕✅ |
-| 13 | run_tests | [manager.go:3760](internal/chat/manager.go#L3760) | go test，支持 pattern/coverage/verbose | ✅ |
+| 12 | exec | [manager.go:3920](internal/chat/manager.go#L3920) | CMD独立进程，30s超时，sanitizeCommandPath 自动纠错 | ✅ |
+| 13 | exec_session | [shell_session.go:1](internal/executor/shell_session.go#L1) (287行) | 持久化 cmd.exe，cd/env 状态保持跨命令，60s 超时，10MB buffer | 🆕✅ |
+| 14 | run_tests | [manager.go:3760](internal/chat/manager.go#L3760) | go test，支持 pattern/coverage/verbose | ✅ |
+| 15 | debug_run | [se_prompt.go:2197](internal/ai/se_prompt.go#L2197) 🆕 | 自动加调试flag（-v -race -count=1），panic/trace结构化展示，60s超时 | 🆕✅ |
 
 ### 1.3 版本控制/任务（2个）
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
-| 14 | git_operation | [manager.go:3686](internal/chat/manager.go#L3686) | status/diff/commit/push/pull/log/branch/show 8 种操作 | ✅ |
-| 15 | complete_task | [se_prompt.go:490](internal/ai/se_prompt.go#L490) | 文件清单 + 摘要 + 状态标记 + CheckSemanticComplete 验证 | ✅ |
+| 16 | git_operation | [manager.go:3686](internal/chat/manager.go#L3686) | status/diff/commit/push/pull/log/branch/show 8 种操作 | ✅ |
+| 17 | complete_task | [se_prompt.go:490](internal/ai/se_prompt.go#L490) | 文件清单 + 摘要 + 状态标记 + CheckSemanticComplete 验证 | ✅ |
 
 ### 1.4 LSP 代码理解（5个）🆕
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
-| 16 | go_to_definition | [lsp_client.go:319](internal/ai/lsp_client.go#L319) | gopls daemon → textDocument/definition JSON-RPC；返回 LocationList | 🆕✅ |
-| 17 | find_references | [lsp_client.go:346](internal/ai/lsp_client.go#L346) | gopls daemon → textDocument/references；支持 includeDeclaration；按文件分组展示 | 🆕✅ |
-| 18 | hover_info | [lsp_client.go:379](internal/ai/lsp_client.go#L379) | gopls daemon → textDocument/hover；获取类型签名/文档注释；支持 plaintext/markdown | 🆕✅ |
-| 19 | diagnostics | [lsp_client.go:406](internal/ai/lsp_client.go#L406) | gopls daemon → textDocument/diagnostic (pull API)；打开文件后主动拉取编译诊断，回退兼容旧版 gopls | 🆕✅ |
-| 20 | rename_symbol | [lsp_client.go:440](internal/ai/lsp_client.go#L440) | gopls daemon → textDocument/rename → WorkspaceEdit；ApplyWorkspaceEdit 从后往前应用文本编辑避免位置偏移 | 🆕✅ |
+| 18 | go_to_definition | [lsp_client.go:319](internal/ai/lsp_client.go#L319) | gopls daemon → textDocument/definition JSON-RPC；返回 LocationList | 🆕✅ |
+| 19 | find_references | [lsp_client.go:346](internal/ai/lsp_client.go#L346) | gopls daemon → textDocument/references；支持 includeDeclaration；按文件分组展示 | 🆕✅ |
+| 20 | hover_info | [lsp_client.go:379](internal/ai/lsp_client.go#L379) | gopls daemon → textDocument/hover；获取类型签名/文档注释；支持 plaintext/markdown | 🆕✅ |
+| 21 | diagnostics | [lsp_client.go:406](internal/ai/lsp_client.go#L406) | gopls daemon → textDocument/diagnostic (pull API)；打开文件后主动拉取编译诊断，回退兼容旧版 gopls | 🆕✅ |
+| 22 | rename_symbol | [lsp_client.go:440](internal/ai/lsp_client.go#L440) | gopls daemon → textDocument/rename → WorkspaceEdit；ApplyWorkspaceEdit 从后往前应用文本编辑避免位置偏移 | 🆕✅ |
 
 ### 1.5 多模态/撤销（3个）🆕
 
 | # | 工具 | 代码位置 | 实现细节 | 状态 |
 |---|------|---------|---------|------|
-| 21 | analyze_image | [vision.go:1](internal/ai/vision.go#L1) (272行) | PNG/JPG/GIF/WebP/BMP/PDF → base64 data URI → vision LLM；支持 HTTP URL/本地路径；IsVisionModel() 自动检测模型能力；5 种场景预设提示词 | 🆕✅ |
-| 22 | undo_file | [file_tracker.go:112](internal/executor/file_tracker.go#L112) | RollbackLast() 回滚到编辑前快照；自动回滚已集成到 write/edit 失败路径（[manager.go:3584](manager.go#L3584) + [manager.go:3687](manager.go#L3687)）；最近 20 步 | 🆕✅ |
-| 23 | list_changes | [file_tracker.go:149](internal/executor/file_tracker.go#L149) | GetRecentChanges() 列出最近 N 步变更（按时间倒序）；Stats() 展示文件追踪统计（总快照数/文件数/操作类型分布） | 🆕✅ |
+| 23 | analyze_image | [vision.go:1](internal/ai/vision.go#L1) (272行) | PNG/JPG/GIF/WebP/BMP/PDF → base64 data URI → vision LLM；支持 HTTP URL/本地路径；IsVisionModel() 自动检测模型能力；5 种场景预设提示词 | 🆕✅ |
+| 24 | undo_file | [file_tracker.go:112](internal/executor/file_tracker.go#L112) | RollbackLast() 回滚到编辑前快照；自动回滚已集成到 write/edit 失败路径；最近 20 步 | 🆕✅ |
+| 25 | list_changes | [file_tracker.go:149](internal/executor/file_tracker.go#L149) | GetRecentChanges() 列出最近 N 步变更（按时间倒序）；Stats() 展示文件追踪统计 | 🆕✅ |
+
+### 1.6 代码片段/分析/调试（6个）🆕
+
+| # | 工具 | 代码位置 | 实现细节 | 状态 |
+|---|------|---------|---------|------|
+| 26 | search_snippet | [snippets.go:1](internal/ai/snippets.go#L1) (837行) | 按语言/标签/评分搜索代码片段库，9个内置模板+自定义 | 🆕✅ |
+| 27 | add_snippet | [snippets.go:1](internal/ai/snippets.go#L1) | 添加自定义代码片段（持久化到 .argus/snippets.json） | 🆕✅ |
+| 28 | list_snippets | [snippets.go:1](internal/ai/snippets.go#L1) | 列出所有片段，支持语言过滤 | 🆕✅ |
+| 29 | delete_snippet | [snippets.go:1](internal/ai/snippets.go#L1) | 删除自定义片段（内置模板受保护不可删除） | 🆕✅ |
+| 30 | analyze_code | [se_prompt.go:2121](internal/ai/se_prompt.go#L2121) | 静态代码分析，22条规则，9类检测（nil安全/资源泄漏/并发安全/弱加密等） | 🆕✅ |
+| 31 | auto_debug | [se_prompt.go:2152](internal/ai/se_prompt.go#L2152) | Test-Fix自动调试循环，最多5次迭代，自动分析错误并生成修复 | 🆕✅ |
 
 ---
 
@@ -167,7 +175,7 @@ CategoryPermanent  = "permanent"  // 权限/致命错误 → 不重试
 
 ### 2.7 LSP 代码理解引擎 🆕
 
-[LSPClient](internal/ai/lsp_client.go#L1)（560行）— 通过 gopls daemon 子进程实现 5 个语言服务器协议操作：
+[LSPClient](internal/ai/lsp_client.go#L1)（641行）— 通过 gopls daemon 子进程实现 5 个语言服务器协议操作：
 
 ```go
 // 初始化流程
@@ -222,7 +230,7 @@ IsVisionModel() 自动检测模型名称是否包含 vision 关键词（gpt-4o /
 
 ### 2.9 文件变更追踪 + 撤销系统 🆕
 
-[FileChangeTracker](internal/executor/file_tracker.go#L1)（181行）— 三重能力：
+[FileChangeTracker](internal/executor/file_tracker.go#L1)（255行）— 三重能力：
 
 ```
 1. Snapshot(path, action) — 编辑前自动快照
@@ -301,18 +309,18 @@ Search(query)
 
 | # | 能力 | 之前状态 | 实现 | 评估 |
 |---|------|----------|------|------|
-| 1 | **LSP 代码理解** | ❌ 零 LSP 集成 | [lsp_client.go](internal/ai/lsp_client.go#L1) 560行 — gopls daemon 子进程，5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename）全部可用 | ✅ **已补齐** |
+| 1 | **LSP 代码理解** | ❌ 零 LSP 集成 | [lsp_client.go](internal/ai/lsp_client.go#L1) 641行 — gopls daemon 子进程，5个操作（GoToDef/FindRefs/Hover/Diagnostics/Rename）全部可用 | ✅ **已补齐** |
 | 2 | **多模态输入** | ❌ 无 vision 能力 | [vision.go](internal/ai/vision.go#L1) 272行 — base64 data URI → vision LLM，5种场景预设提示词，支持PNG/JPG/GIF/WebP/BMP/PDF | ✅ **已补齐** |
-| 3 | **撤销/回滚** | ❌ 无 undo 机制 | [file_tracker.go](internal/executor/file_tracker.go#L1) 181行 — Snapshot → RollbackLast 双层回滚，失败自动回滚集成到 write/edit 路径 | ✅ **已补齐** |
+| 3 | **撤销/回滚** | ❌ 无 undo 机制 | [file_tracker.go](internal/executor/file_tracker.go#L1) 255行 — Snapshot → RollbackLast 双层回滚，失败自动回滚集成到 write/edit 路径 | ✅ **已补齐** |
 
 ### P1 — 实际差距（代码扫描后修订）
 
 | # | 能力 | Argus 实测 | 差距评估 |
 |---|------|-----------|---------|
 | 4 | **多 Agent 协作** | ❌ 单 SE agent，无任务拆分 | 复杂全栈任务效率低 |
-| 5 | **增量 Diff 预览** | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") 已实现；前端 DiffPreviewDialog 弹窗（unified diff 语法高亮 + 批准/拒绝/自动批准）已接入 | 用户可预审修改再确认写入 |
+| 5 | **增量 Diff 预览** | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") + 前端 DiffPreviewDialog + SE工具 show_diff 已注册 | 用户可预审修改再确认写入 |
 | 6 | **静态代码分析** | ✅ analyze_code 已实现（AST+正则，22条规则，9类检测） | 🔴 动态调试（DAP/Delve集成）仍缺口 |
-| 7 | **代码模板/片段库** | ✅ 完整版：9个内置模板 + 持久化(JSON) + CRUD(Add/Update/Delete/List) + 增强搜索(语言/标签/评分) + SE工具(add/list/delete/search) | 已完善 |
+| 7 | **代码模板/片段库** | ✅ 完整版：9个内置模板 + 持久化(JSON) + CRUD + 增强搜索 + 4个SE工具 | 已完善 |
 | 8 | **agent 调试可视化** | ❌ 无执行过程可视化 | 用户看不到 agent 思考过程 |
 
 ### P2 — 长期优化
@@ -321,7 +329,7 @@ Search(query)
 |---|------|------|
 | 9 | 多语言 LSP | ✅ 已支持 7 语言：Go(gopls) / TS-JS(typescript-language-server) / Python(pylsp) / Rust(rust-analyzer) / C-CPP(clangd)；lspServerMap + NewLSPClientForLang() 按语言自动选择 |
 | 10 | 分布式 Agent | 单机运行 |
-| 11 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana |
+| 11 | 监控/指标 | 有健康自愈，无 Prometheus/Grafana（桌面应用不需要） |
 
 ---
 
@@ -335,15 +343,16 @@ Search(query)
 | **撤销/回滚** | write/edit 前自动 Snapshot（最多20步）；RollbackLast 双层回滚到前一个快照；失败自动回滚已集成到 write/edit 路径 | [file_tracker.go](internal/executor/file_tracker.go#L1) (181行) | ✅ |
 | **多模态基础** | base64 data URI → vision LLM；5种场景预设提示词；HTTP URL/本地路径双支持；IsVisionModel 自动检测 | [vision.go](internal/ai/vision.go#L1) (272行) | ✅ |
 
-### Phase 2 — P1 增强（2026-06-05 执行中）
+### Phase 2 — P1 增强（2026-06-06 全部完成）
 
 | # | 项目 | 方案 | 状态 |
 |---|------|------|------|
 | **2.1** | **web_search 增强** | 并行 3 引擎（DuckDuckGo/Bing/Google）goroutine 竞速取最快返回 + fetch_url 网页抓取正文提取 | ✅ |
-| **2.2** | **Agent 智能终止** | CheckSemanticComplete 升级：关键词信号 + complete_task 验证 + 动作收敛检测 + 置信度评分 (0-1.0) | ✅ （远程已实现） |
-| **2.3** | **上下文管理升级** | compressHistory 分层：①保留 user/system 指令 ②压缩 tool result ③保留最近3轮 ④token 计数 + 二次压缩保护 | ✅ （远程已实现） |
-| **2.4** | **Diff 预览** | edit/write 前计算 unified diff；SSE 推送前端用户确认 | ✅ 后端 ComputeDiff + emitWailsEvent("diff_preview") + 前端 DiffPreviewDialog（语法高亮/批准/拒绝/自动批准） |
+| **2.2** | **Agent 智能终止** | CheckSemanticComplete 升级：关键词信号 + complete_task 验证 + 动作收敛检测 + 置信度评分 (0-1.0) | ✅ |
+| **2.3** | **上下文管理升级** | compressHistory 分层：①保留 user/system 指令 ②压缩 tool result ③保留最近3轮 ④token 计数 + 二次压缩保护 | ✅ |
+| **2.4** | **Diff 预览** | edit/write 前计算 unified diff；SSE 推送前端用户确认 + SE 工具 show_diff 注册 | ✅ |
 | **2.5** | **多语言 LSP** | 扩展 LSPClient → typescript-language-server / rust-analyzer / pyright | ✅ lspServerMap 已支持7语言(gopls/ts/pylsp/rust-analyzer/clangd) + NewLSPClientForLang() |
+| **2.6** | **调试运行** | debug_run 工具注册：自动加 -v -race -count=1，panic/trace 结构化展示，60s超时 | ✅ 🆕 |
 
 ### Phase 3 — 体验打磨（P2）
 
@@ -399,10 +408,12 @@ Search(query)
 
 | 指标 | 数值 |
 |------|------|
-| 工具总数 | 23 |
-| AddResult 反馈点 | 30+ |
+| 工具总数 | 31 |
+| AddResult 反馈点 | 15+ |
 | web_search 引擎数 | 3 (并行) |
 | fetch_url | 正文提取 + 2MB/8000字符限制 |
+| show_diff | ✅ unified diff 预览（已注册SE工具） |
+| debug_run | ✅ 自动加 -v -race -count=1，panic/trace 结构化 |
 | 防死循环层数 | 7 |
 | ErrorType 种类 | 9 |
 | ClassifyError Category | 3 |
@@ -416,9 +427,16 @@ Search(query)
 | compressHistory 保留条数 | 15 |
 | LSP 操作数 | 5 (gopls) + 7语言支持(TS/JS/Python/Rust/C/C++) |
 | Undo 栈深度 | 20 步 |
-| Diff 预览 | ✅ ComputeDiff(unified) + DiffPreviewDialog(前端弹窗) |
+| Snippet 内置模板 | 9 |
+| Diff 预览 | ✅ ComputeDiff(unified) + DiffPreviewDialog(前端弹窗) + show_diff工具 |
 | 支持图片格式 | 6 (PNG/JPG/GIF/WebP/BMP/PDF) |
 | ShellSession buffer | 10 MB |
 | ShellSession 超时 | 60 s |
 | exec 超时 | 30 s |
-| manager.go 总行数 | ~7500 |
+| lsp_client.go 行数 | 641 |
+| file_tracker.go 行数 | 255 |
+| code_indexer.go 行数 | 677 |
+| snippets.go 行数 | 837 |
+| se_prompt.go 行数 | 2214 |
+| manager.go 行数 | 7435 |
+| PM 健康检测 | 连续失败≥3次(60s内) → 清理会话 |

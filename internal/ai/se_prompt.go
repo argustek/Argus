@@ -558,6 +558,19 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			}
 		}
 		action.Type = "auto_debug"
+	case "show_diff":
+		if v, ok := args["path"].(string); ok {
+			action.Path = v
+		}
+		if v, ok := args["content"].(string); ok {
+			action.Content = v
+		}
+		action.Type = "show_diff"
+	case "debug_run":
+		if v, ok := args["command"].(string); ok {
+			action.Command = v
+		}
+		action.Type = "debug_run"
 	}
 
 	return action
@@ -2171,6 +2184,46 @@ var SETools = []Tool{
 						"description": "模式: 'full'（跑测试+自动修复循环）或 'analyze'（仅分析，不修改代码），默认 full",
 					},
 				},
+			},
+		},
+	},
+	// ========== Diff预览工具 ==========
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "show_diff",
+			Description: "预览文件编辑前后的差异。不实际修改文件，仅生成 unified diff 供确认。建议在执行 edit_file 前先调用此工具预览变更。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "要预览差异的文件路径（相对于工作目录）",
+					},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "修改后的新内容（用于与当前文件内容对比）",
+					},
+				},
+				"required": []string{"path", "content"},
+			},
+		},
+	},
+	// ========== 调试运行工具 ==========
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_run",
+			Description: "调试运行：自动为 Go 命令添加调试 flag（go test 自动加 -v -count=1，go run/build 自动加 -race），60s 超时。检测并结构化展示 panic/trace/测试失败。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "要调试运行的命令（如 go test ./...、go run main.go、go build）",
+					},
+				},
+				"required": []string{"command"},
 			},
 		},
 	},
