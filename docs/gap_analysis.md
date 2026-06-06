@@ -78,7 +78,7 @@
 
 每个工具执行后结果通过 `AddResult()` 注入 SE 对话历史。SE 基于实际执行结果决定下一步。
 
-**实测 AddResult 调用点（30+ 处）：**
+**实测 AddResult 调用点（15+ 处）：**
 
 | 工具 | 反馈内容 | 位置 |
 |------|---------|------|
@@ -303,7 +303,7 @@ Search(query)
 
 ---
 
-## 三、竞品差距（代码实测，2026-06-05 更新）
+## 三、竞品差距（代码实测，2026-06-06 更新）
 
 ### P0 — 已全部补齐 ✅
 
@@ -339,8 +339,8 @@ Search(query)
 
 | 项目 | 方案 | 代码 | 状态 |
 |------|------|------|------|
-| **LSP 集成** | 启动 gopls daemon 子进程；JSON-RPC 2.0 协议；GoToDef/FindRefs/Hover/Diagnostics/Rename 5个能力；diagnostics 注入 Tool Result Feedback | [lsp_client.go](internal/ai/lsp_client.go#L1) (560行) | ✅ |
-| **撤销/回滚** | write/edit 前自动 Snapshot（最多20步）；RollbackLast 双层回滚到前一个快照；失败自动回滚已集成到 write/edit 路径 | [file_tracker.go](internal/executor/file_tracker.go#L1) (181行) | ✅ |
+| **LSP 集成** | 启动 gopls daemon 子进程；JSON-RPC 2.0 协议；GoToDef/FindRefs/Hover/Diagnostics/Rename 5个能力；diagnostics 注入 Tool Result Feedback | [lsp_client.go](internal/ai/lsp_client.go#L1) (641行) | ✅ |
+| **撤销/回滚** | write/edit 前自动 Snapshot（最多20步）；RollbackLast 双层回滚到前一个快照；失败自动回滚已集成到 write/edit 路径 | [file_tracker.go](internal/executor/file_tracker.go#L1) (255行) | ✅ |
 | **多模态基础** | base64 data URI → vision LLM；5种场景预设提示词；HTTP URL/本地路径双支持；IsVisionModel 自动检测 | [vision.go](internal/ai/vision.go#L1) (272行) | ✅ |
 
 ### Phase 2 — P1 增强（2026-06-06 全部完成）
@@ -354,13 +354,15 @@ Search(query)
 | **2.5** | **多语言 LSP** | 扩展 LSPClient → typescript-language-server / rust-analyzer / pyright | ✅ lspServerMap 已支持7语言(gopls/ts/pylsp/rust-analyzer/clangd) + NewLSPClientForLang() |
 | **2.6** | **调试运行** | debug_run 工具注册：自动加 -v -race -count=1，panic/trace 结构化展示，60s超时 | ✅ 🆕 |
 
-### Phase 3 — 体验打磨（P2）
+### Phase 3 — 体验打磨（P2）🆕
 
-| # | 项目 | 状态 |
-|---|------|------|
-| 3.1 | 代码片段库（JSON/YAML + semantic_search 匹配） | ✅ 已完成：持久化存储(.argus/snippets.json) + 完整CRUD + 增强搜索 + 4个SE工具 |
-| 3.2 | 交互式调试 | ⚠️ 静态分析+auto_debug已完成（analyze_code: 22条规则/9类检测 + auto_debug: Test-Fix循环），动态调试（Delve集成）待做 |
-| 3.3 | 多 Agent 协作（前端/后端/DB 并行子 agent） | 🔴 |
+| # | 项目 | 难度 | 状态 |
+|---|------|------|------|
+| 3.1 | 代码片段库 | ⭐ 已完成 | ✅ 持久化(.argus/snippets.json) + 完整CRUD + 4个SE工具 |
+| 3.2 | 多 Agent 协作（前端/后端/DB 并行子 agent） | ⭐⭐⭐⭐ 架构级 | 🔴 待做：任务拆分 + 并行协调 + 结果合并 |
+| 3.3 | 动态调试（Delve/DAP 集成） | ⭐⭐⭐ 新模块 | 🔴 待做：断点/单步/变量检查/调用栈 |
+| 3.4 | Agent 调试可视化（思考链展示） | ⭐⭐ 前端为主 | 🔴 待做：后端 SSE 数据已有，前端 Dashboard 即可 |
+| 3.5 | Shell Session 空闲自动清理 | ⭐ 几行代码 | 🔴 待做：文档写了60s自动清理但代码未实现，需加 idle timer goroutine |
 
 ---
 
@@ -371,7 +373,7 @@ Search(query)
 
 以下能力经代码验证正常工作，后续迭代应保持：
 
-1. **Tool Result Feedback Loop** — 工具执行结果注入 SE 对话历史，SE 基于实际输出（非猜测）决定下一步。30+ 处 AddResult 调用点。
+1. **Tool Result Feedback Loop** — 工具执行结果注入 SE 对话历史，SE 基于实际输出（非猜测）决定下一步。15+ 处 AddResult 调用点。
 2. **Auto-Fix 三级降级** — SE自修 → SE继续尝试 → PM介入，每级有次数上限和超时保护。
 3. **7层防死循环** — L1空actions → L2 JSON重试 → L3 continue次数 → L4 语义兜底 → L5 PM轮次 → L6 SE求助上限 → L7 超时清理。
 4. **9类错误分析 + 3类重试分类** — AnalyzeError + ClassifyError + ExecuteWithRetry(指数退避)，精确到 File:Line:Column + SuggestedFix + ExampleFix。
