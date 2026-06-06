@@ -28,6 +28,7 @@ type RoleState struct {
 
 type AICaller interface {
 	ChatStream(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error)
+	ChatWithTools(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, tools []ai.Tool) (*ai.ChatResponse, error)
 }
 
 type Phase int
@@ -258,6 +259,62 @@ func mapRoleToStandard(role Role) string {
 	}
 }
 
+// callSEWithTools 使用Tool Call方式调用SE（替代callAI的纯文本模式）
+// 返回JSON格actions字符串，与parseSEResponse兼容
+func (c *ArgusCore) callSEWithTools(taskDesc, memoryContext string) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("AICaller is nil")
+	}
+
+	systemPrompt := c.prompts.Get(RoleSE)
+	history := buildHistoryFromMemory(c.memory.GetAll())
+
+	fullPrompt := taskDesc
+	if memoryContext != "" {
+		fullPrompt = fmt.Sprintf("[Context from previous phases]\n%s\n\n[Current Task]\n%s", memoryContext, taskDesc)
+	}
+
+	start := time.Now()
+	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
+
+	resp, err := c.client.ChatWithTools(callCtx, systemPrompt, history, fullPrompt, ai.SETools)
+	callCancel()
+
+	duration := time.Since(start)
+	fmt.Printf("[Core:SE-TOOL] Tool Call completed in %v (err=%v)\n", duration, err)
+
+	if err != nil {
+		return "", err
+	}
+
+	// 将ToolCalls转换为JSON actions格式（与parseSEResponse兼容）
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from AI")
+	}
+
+	msg := resp.Choices[0].Message
+	fmt.Printf("[Core:SE-TOOL] ToolCalls=%d ContentLen=%d\n", len(msg.ToolCalls), len(msg.Content))
+
+	if len(msg.ToolCalls) == 0 {
+		// 没有ToolCall，返回content（可能LLM直接返回了JSON）
+		return msg.Content, nil
+	}
+
+	// 构建actions数组
+	var actions []map[string]interface{}
+	for _, tc := range msg.ToolCalls {
+		var args map[string]interface{}
+		if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
+			args = map[string]interface{}{"raw": tc.Function.Arguments}
+		}
+		args["type"] = tc.Function.Name
+		actions = append(actions, args)
+	}
+
+	result, _ := json.Marshal(map[string]interface{}{"actions": actions})
+	return string(result), nil
+}
+
 func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	totalStart := time.Now()
 	result := &ProcessResult{
@@ -316,7 +373,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.emitStatus("execute", "se", "busy")
 
 	seCtx := c.memory.FormatForPrompt()
-	seResponse, seErr := c.callAI(RoleSE, taskDesc, seCtx)
+	seResponse, seErr := c.callAI(RoleSE, taskDesc, seCtx) // [REVERT] 恢复文本模式，Tool Call模式待完善
 	phaseSE := PhaseResult{
 		Phase:    PhaseExecute,
 		Role:     RoleSE,
@@ -882,7 +939,13 @@ func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
 	var execCmd string
 	switch {
 	case strings.HasSuffix(lastGoFile, ".go"):
-		execCmd = fmt.Sprintf("go run %s", lastGoFile)
+		if strings.HasSuffix(lastGoFile, "_test.go") {
+			base := strings.TrimSuffix(filepath.Base(lastGoFile), "_test.go")
+			tmpFile := base + "_tmp.go"
+			execCmd = fmt.Sprintf("copy /y %s %s && go run %s && del %s", lastGoFile, tmpFile, tmpFile, tmpFile)
+		} else {
+			execCmd = fmt.Sprintf("go run %s", lastGoFile)
+		}
 	case strings.HasSuffix(lastGoFile, ".py"):
 		execCmd = fmt.Sprintf("python %s", lastGoFile)
 	case strings.HasSuffix(lastGoFile, ".js"), strings.HasSuffix(lastGoFile, ".ts"):

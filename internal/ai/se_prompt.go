@@ -75,6 +75,7 @@ type SEProcessor struct {
 	envMemory     string
 	indexer       *CodeIndexer
 	snippetStore  *SnippetStore
+	debugLog      func(string) // 调试日志回调（写入conversation.log）
 }
 
 func NewSEProcessor(client *Client, workDir string) *SEProcessor {
@@ -138,6 +139,20 @@ func (s *SEProcessor) SetContext(ctx context.Context) {
 	s.ctx = ctx
 }
 
+// SetDebugLog 设置调试日志回调（由manager传入writeRouteLog）
+func (s *SEProcessor) SetDebugLog(fn func(string)) {
+	s.debugLog = fn
+}
+
+// seLog 同时输出到终端和日志文件
+func (s *SEProcessor) seLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Print(msg)
+	if s.debugLog != nil {
+		s.debugLog(msg)
+	}
+}
+
 func (s *SEProcessor) getCtx() context.Context {
 	if s.ctx == nil {
 		return context.Background()
@@ -146,7 +161,7 @@ func (s *SEProcessor) getCtx() context.Context {
 }
 
 func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta string)) (*SEResponse, error) {
-	fmt.Printf("[SE Tools] Starting task: %s\n", taskDesc[:min(60, len(taskDesc))])
+	s.seLog("[SE Tools] Starting task: %s\n", taskDesc[:min(60, len(taskDesc))])
 
 	if s.client == nil {
 		return nil, fmt.Errorf("SEProcessor.client is nil")
@@ -183,7 +198,7 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 		}
 
 		if len(msg.ToolCalls) == 0 {
-			fmt.Printf("[SE Tools] Round %d: no tool calls, ending\n", round)
+			s.seLog("[SE Tools] Round %d: no tool calls, ending\n", round)
 			break
 		}
 
@@ -195,7 +210,7 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 
 			if tc.Function.Name == "complete_task" {
 				formatCompleteFromAction(action, completeResult)
-				fmt.Printf("[SE Tools] complete_task called: files=%v summary=%s\n",
+				s.seLog("[SE Tools] complete_task called: files=%v summary=%s\n",
 					completeFilesFromAction(action), completeSummaryFromAction(action))
 				goto done
 			}
@@ -282,7 +297,7 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 	argsStr := tc.Function.Arguments
 
 	// [G-DEBUG] 记录原始ToolCall参数，排查JSON解析问题
-	fmt.Printf("[SE-RAW] tool=%q | args_len=%d | raw=%s\n", tc.Function.Name, len(argsStr),
+	s.seLog("[SE-RAW] tool=%q | args_len=%d | raw=%s\n", tc.Function.Name, len(argsStr),
 		func() string {
 			if len(argsStr) > 300 { return argsStr[:300] + "..." }
 			return argsStr
@@ -290,14 +305,14 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 
 	var args map[string]interface{}
 	if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-		fmt.Printf("[SE Tools] failed to parse tool args: %v, attempting repair...\n", err)
+		s.seLog("[SE Tools] failed to parse tool args: %v, attempting repair...\n", err)
 		// 尝试修复后再解析
 		repaired := repairJSONArgs(argsStr)
 		if err2 := json.Unmarshal([]byte(repaired), &args); err2 != nil {
-			fmt.Printf("[SE Tools] repair also failed: %v\n", err2)
+			s.seLog("[SE Tools] repair also failed: %v\n", err2)
 			return action
 		}
-		fmt.Printf("[SE Tools] ✅ JSON repair succeeded\n")
+		s.seLog("[SE Tools] ✅ JSON repair succeeded\n")
 	}
 
 	switch tc.Function.Name {
@@ -309,7 +324,7 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			action.Content = v
 		}
 		// [G-DEBUG] 显示解析结果
-		fmt.Printf("[SE-PARSED] write_file → path=%q (%d chars) | content=%d chars\n",
+		s.seLog("[SE-PARSED] write_file → path=%q (%d chars) | content=%d chars\n",
 			action.Path, len(action.Path), len(action.Content))
 		// [TRUNCATION-DETECT] 检测内容是否被异常截断
 		// 代码文件(.go/.py/.js/.ts等)内容少于30字节几乎肯定是截断
@@ -317,7 +332,7 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			ext := strings.ToLower(filepath.Ext(action.Path))
 			codeExts := map[string]bool{".go": true, ".py": true, ".js": true, ".ts": true, ".java": true, ".c": true, ".cpp": true, ".rs": true, ".rb": true, ".php": true}
 			if codeExts[ext] {
-				fmt.Printf("[SE-WARN] ⚠️ 可疑截断: write_file %s content仅 %d bytes! raw_args前200字符: %s\n",
+				s.seLog("[SE-WARN] ⚠️ 可疑截断: write_file %s content仅 %d bytes! raw_args前200字符: %s\n",
 					action.Path, len(action.Content), func() string {
 						if len(argsStr) > 200 { return argsStr[:200] + "..." }
 						return argsStr

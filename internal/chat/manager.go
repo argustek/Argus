@@ -392,6 +392,14 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	// 启动后台对话日志监控循环（永不退出）
 	go manager.startConversationMonitor()
 
+	// [关键] 设置所有Client+SE的debugLog回调（首次初始化必须，否则G-DEBUG/SE-RAW日志丢失）
+	manager.aiClient.SetDebugLog(manager.seDebugLog)
+	if manager.pmClient != nil { manager.pmClient.SetDebugLog(manager.seDebugLog) }
+	if manager.seClient != nil { manager.seClient.SetDebugLog(manager.seDebugLog) }
+	if manager.apClient != nil { manager.apClient.SetDebugLog(manager.seDebugLog) }
+	manager.seProcessor.SetDebugLog(manager.seDebugLog)
+	manager.seDebugLog("[INIT] ALL debugLog OK, configDir=" + configDir)
+
 	// 启动自动定期保存（15秒间隔，类似C监控的兜底机制）
 	if manager.memoryManager != nil {
 		go manager.memoryManager.StartAutoSave(func() (string, string, string, []types.Message) {
@@ -433,9 +441,14 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 
 	m.config.APIConfig = apiConfig
 	m.aiClient = ai.NewClient(apiConfig)
+	m.aiClient.SetDebugLog(m.seDebugLog) // Client层G-DEBUG日志写入conversation.log
 
 	// 重建各角色独立客户端（如果配置了）
 	m.rebuildRoleClients()
+	// 重建后必须重新设置debugLog（新Client对象）
+	if m.pmClient != nil { m.pmClient.SetDebugLog(m.seDebugLog) }
+	if m.seClient != nil { m.seClient.SetDebugLog(m.seDebugLog) }
+	if m.apClient != nil { m.apClient.SetDebugLog(m.seDebugLog) }
 
 	// PM
 	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
@@ -448,6 +461,8 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	})
 	// SE
 	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
+	m.seProcessor.SetDebugLog(m.seDebugLog) // 关键日志写入conversation.log
+	m.seDebugLog("[INIT] SE debugLog connected, configDir=" + m.configDir) // 验证回调是否生效
 	// AP
 	m.apProcessor = ai.NewAPProcessor(m.getAPClient(), m.workDir)
 
@@ -536,6 +551,7 @@ func (m *Manager) UpdateSEConfig(seConfig types.APIConfig) {
 	m.config.SEConfig = seConfig
 	m.rebuildRoleClients()
 	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
+	m.seProcessor.SetDebugLog(m.seDebugLog)
 	m.seProcessor.ReplyLanguage = m.ReplyLanguage
 	fmt.Printf("[Manager] SE配置已更新: Model=%s\n", seConfig.Model)
 }
@@ -776,6 +792,7 @@ func (m *Manager) initCMonitor() {
 		fmt.Println("[PM] 正在重启...")
 		// 重建AI客户端（支持每角色独立模型）
 		m.aiClient = ai.NewClient(m.config.APIConfig)
+		m.aiClient.SetDebugLog(m.seDebugLog)
 		m.rebuildRoleClients()
 		// 重新初始化PM处理器
 		m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
@@ -5517,21 +5534,29 @@ func isValidActionType(t string) bool {
 	}
 }
 
-// writeRouteLog 路由调试日志（永久保留，排查消息路由问题用）
-// 日志位置: {configDir}/../logs/route.log
-// 用途: 追踪 @SE/@PM 消息解析结果、SE任务来源(from)、轮转拦截情况
-// 查看: Get-Content {configDir}/../logs/route.log -Tail 30
-func (m *Manager) writeRouteLog(msg string) {
+// seDebugLog 写SE/Client关键日志到conversation.log（与WriteDebugLog同文件）
+func (m *Manager) seDebugLog(msg string) {
 	logDir := filepath.Join(m.configDir, "..", "logs")
+	logPath := filepath.Join(logDir, "conversation.log")
 	os.MkdirAll(logDir, 0755)
-	logPath := filepath.Join(logDir, "route.log")
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		fmt.Printf("[seDebugLog] ERROR: open %s failed: %v\n", logPath, err)
 		return
 	}
 	defer f.Close()
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, msg))
+	line := fmt.Sprintf("[%s] DEBUG: %s\n", timestamp, msg)
+	f.WriteString(line)
+	// 终端也打一份关键标记
+	if strings.Contains(msg, "[INIT]") || strings.Contains(msg, "G-DEBUG") || strings.Contains(msg, "SE-RAW") {
+		fmt.Printf("[seDebugLog-OK] %s", line)
+	}
+}
+
+// writeRouteLog 路由调试日志（永久保留，排查消息路由问题用）
+func (m *Manager) writeRouteLog(msg string) {
+	m.seDebugLog(msg)
 }
 
 // writeConversationLog 写入对话日志文件（调试用途，存放在IDE系统目录的logs/下）

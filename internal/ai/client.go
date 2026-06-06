@@ -78,6 +78,7 @@ type Client struct {
 	circuitBreaker *limiter.CircuitBreaker
 	rateLimiter    *limiter.RateLimiter
 	mu             sync.Mutex
+	debugLog       func(string) // 调试日志回调（写入conversation.log）
 }
 
 // NewClient 创建AI客户端
@@ -136,6 +137,20 @@ func (c *Client) recordFailure() {
 	c.circuitBreaker.RecordFailure(apiCallOpType)
 }
 
+// SetDebugLog 设置调试日志回调
+func (c *Client) SetDebugLog(fn func(string)) {
+	c.debugLog = fn
+}
+
+// cLog 同时输出到终端和日志文件
+func (c *Client) cLog(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	fmt.Print(msg)
+	if c.debugLog != nil {
+		c.debugLog(msg)
+	}
+}
+
 // Message 消息结构
 type Message struct {
 	Role             string     `json:"role"`
@@ -145,17 +160,17 @@ type Message struct {
 	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
+// FunctionCall 函数调用
+type FunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 // ToolCall 工具调用
 type ToolCall struct {
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function FunctionCall `json:"function"`
-}
-
-// FunctionCall 函数调用
-type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
 }
 
 // Tool 工具定义
@@ -175,8 +190,9 @@ type ToolFunction struct {
 type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
-	Tools    []Tool    `json:"tools,omitempty"`
+	Stream     bool      `json:"stream"`
+	Tools      []Tool    `json:"tools,omitempty"`
+	ToolChoice string    `json:"tool_choice,omitempty"` // "auto"(默认) / "required" / "none"
 }
 
 // ChatResponse 聊天响应
@@ -288,13 +304,16 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, rep
 	return msgContent, nil
 }
 
+// Delta SSE 流式 delta 内容（提取为命名类型，供 parseDelta 策略方法使用）
+type Delta struct {
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
 // StreamChunk 流式响应片段
 type StreamChunk struct {
 	Choices []struct {
-		Delta struct {
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content,omitempty"`
-		} `json:"delta"`
+		Delta       Delta   `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 }
@@ -395,12 +414,19 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 
 	var fullContent string
 	var displayContent string
+	var contentChunkCount int // [诊断] 记录含content的chunk序号
 	reader := io.Reader(resp.Body)
 	buf := make([]byte, 4096)
-	leftover := ""
 
 	lastChunkTime := time.Now()
 	streamTimeout := 30 * time.Second
+
+	// [修复] 保留 splitLines + 累积修复截断 JSON
+	// 根因：DeepSeek SSE chunk 可能 >4KB，被 io.Read(buf) 切成两半
+	// 旧逻辑：JSON 不完整 → 直接 discard（丢失95%内容）
+	// 新逻辑：JSON 不完整 → 缓存到 pendingJSON，等下一批数据拼接后再解析
+	var leftover string
+	var pendingJSON string // 累积不完整的 JSON 片段
 
 	for {
 		select {
@@ -418,7 +444,8 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			lastChunkTime = time.Now()
-			chunk := leftover + string(buf[:n])
+			chunk := pendingJSON + string(buf[:n])
+			pendingJSON = "" // 重置，本轮处理完后如果还有残留会重新赋值
 			lines := splitLines(chunk)
 
 			for i, line := range lines {
@@ -434,23 +461,41 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 
 				var streamChunk StreamChunk
 				if err := json.Unmarshal([]byte(line), &streamChunk); err != nil {
+					// [修复] JSON 不完整时不丢弃，缓存起来跟下一批数据拼接
+					// 常见情况：大 JSON 被 4096 字节 buffer 切成两半
+					pendingJSON = line
+					if contentChunkCount > 0 && contentChunkCount <= 3 {
+						c.cLog("[SSE-ERR] JSON incomplete (cached) | len=%d | err=%s\n",
+							len(line), err.Error())
+					}
 					continue
 				}
 
 				if len(streamChunk.Choices) > 0 {
-					delta := streamChunk.Choices[0].Delta.Content
-					reasoningDelta := streamChunk.Choices[0].Delta.ReasoningContent
-
-					if delta != "" {
-						fullContent += delta
-						displayContent += delta
-						if onChunk != nil {
-							onChunk(delta)
+					delta := streamChunk.Choices[0].Delta
+					if delta.Content != "" && contentChunkCount < 5 {
+						contentChunkCount++
+						c.cLog("[SSE-RAW] #%d reason=%d content=%q\n",
+							contentChunkCount, len(delta.ReasoningContent), delta.Content)
+					}
+					for _, event := range c.parseDelta(delta) {
+						switch event.Type {
+						case StreamEventThinking:
+							fullContent += event.Data
+						case StreamEventContent:
+							fullContent += event.Data
+							displayContent += event.Data
+							if onChunk != nil {
+								onChunk(event.Data)
+							}
 						}
-					} else if reasoningDelta != "" {
-						fullContent += reasoningDelta
 					}
 				}
+			}
+			// 如果有 leftover，也加入 pendingJSON（下一轮继续拼接）
+			if leftover != "" {
+				pendingJSON += leftover
+				leftover = ""
 			}
 		}
 
@@ -466,6 +511,15 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 	if displayContent == "" && fullContent == "" {
 		c.recordFailure()
 		return "", fmt.Errorf("empty response from AI")
+	}
+
+	// [诊断] 记录最终内容长度对比（排查截断问题）
+	if contentChunkCount > 0 {
+		c.cLog("[SSE-STAT] total_chunks=%d | full_len=%d | display_len=%d | diff=%d\n",
+			contentChunkCount, len(fullContent), len(displayContent), len(fullContent)-len(displayContent))
+		if len(displayContent) < len(fullContent) && len(displayContent) > 0 {
+			c.cLog("[SSE-DIFF] first_missing=%q\n", fullContent[:min(50, len(fullContent))])
+		}
 	}
 
 	c.recordSuccess()
@@ -533,10 +587,11 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	messages = append(messages, Message{Role: "user", Content: userContent})
 
 	req := ChatRequest{
-		Model:    c.config.Model,
-		Messages: messages,
-		Stream:   false,
-		Tools:    tools,
+		Model:      c.config.Model,
+		Messages:   messages,
+		Stream:     false,
+		Tools:      tools,
+		ToolChoice: "auto", // "auto"兼容思考模式(DeepSeek等)；"required"会报错
 	}
 
 	data, err := json.Marshal(req)
@@ -595,14 +650,14 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	if len(chatResp.Choices) > 0 {
 		msg := chatResp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 && chatResp.ToolsDefined > 0 {
-			fmt.Printf("[G-DEBUG] ⚠️ LLM返回ToolCalls=0 (已发送%d个tools) | content_len=%d | model=%s\n",
+			c.cLog("[G-DEBUG] ⚠️ LLM返回ToolCalls=0 (已发送%d个tools) | content_len=%d | model=%s\n",
 				chatResp.ToolsDefined, len(msg.Content), c.config.Model)
 			// 只截取前200字符避免日志爆炸
 			preview := msg.Content
 			if len(preview) > 200 { preview = preview[:200] + "..." }
-			fmt.Printf("[G-DEBUG] content_preview: %s\n", preview)
+			c.cLog("[G-DEBUG] content_preview: %s\n", preview)
 		} else if len(msg.ToolCalls) > 0 {
-			fmt.Printf("[G-DEBUG] ✅ LLM返回ToolCalls=%d\n", len(msg.ToolCalls))
+			c.cLog("[G-DEBUG] ✅ LLM返回ToolCalls=%d\n", len(msg.ToolCalls))
 		}
 	}
 
