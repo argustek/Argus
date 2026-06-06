@@ -51,6 +51,7 @@
         :messages="messages"
         :ai-thinking="aiThinking"
         :supports-multimodal="supportsMultimodal"
+        :thought-events="thoughtEvents"
         @send-message="handleSendMessage"
         @expand-thinking="toggleThinking"
         @upload-file="handleUploadFile"
@@ -263,6 +264,15 @@ const messages = ref<Array<{
 
 const aiThinking = ref(false)
 const supportsMultimodal = ref(false)
+
+// [3.4] Agent思考链事件（Dashboard可视化）
+const thoughtEvents = ref<Array<{
+  type: string
+  role: string
+  content: string
+  timestamp: number
+  meta?: Record<string, any>
+}>>([])
 
 const seenMsgIds = new Set<number>()
 const streamingRole = ref('')
@@ -533,6 +543,7 @@ onMounted(async () => {
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
+    thoughtEvents.value = []
     console.log('[PROBE] 🗑️ cleared done! after: 0')
   })
 
@@ -772,7 +783,28 @@ onMounted(async () => {
   EventsOn('ai-thinking', (data: boolean | { _msgId?: string }) => {
     const msgId = (data as any)?._msgId
     if (msgId) ackMessage(msgId)
-    aiThinking = typeof data === 'boolean' ? data : !!data
+    aiThinking.value = typeof data === 'boolean' ? data : !!data
+  })
+
+  // [3.4] Agent思考链 → Dashboard
+  EventsOn('agent-thought', (raw: any) => {
+    const msgId = raw?._msgId
+    if (msgId) ackMessage(msgId)
+    // MessageBus 可能传 JSON 字符串或已解析对象
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (data && (data.type || data.content)) {
+      thoughtEvents.value.push({
+        type: data.type || 'unknown',
+        role: data.role || 'unknown',
+        content: data.content || '',
+        timestamp: data.timestamp || Math.floor(Date.now() / 1000),
+        meta: data.meta,
+      })
+      // 保留最近200条，防止内存泄漏
+      if (thoughtEvents.value.length > 200) {
+        thoughtEvents.value = thoughtEvents.value.slice(-150)
+      }
+    }
   })
 
   EventsOn('reset-completed', (data: { _msgId?: string }) => {
@@ -785,6 +817,7 @@ onMounted(async () => {
     messages.value = []
     seenMsgIds.clear()
     streamingRole.value = ''
+    thoughtEvents.value = []
 
     const { ClearMessages } = require('../wailsjs/go/main/App')
     ClearMessages().then(() => {

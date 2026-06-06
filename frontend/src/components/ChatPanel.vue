@@ -21,6 +21,28 @@
     </div>
 
     <div class="messages" ref="messagesRef">
+      <!-- [3.4] AI 思考链区域（嵌入对话区内部） -->
+      <div v-if="thoughtEvents.length > 0" class="thinking-section" :class="{ collapsed: thinkingCollapsed }">
+        <div class="thinking-header" @click="thinkingCollapsed = !thinkingCollapsed">
+          <span class="thinking-icon">🧠</span>
+          <span class="thinking-title">AI Thinking</span>
+          <span class="thinking-count">{{ thoughtEvents.length }}</span>
+          <span class="thinking-toggle">{{ thinkingCollapsed ? '▶' : '▼' }}</span>
+        </div>
+        <div v-if="!thinkingCollapsed" class="thinking-body" ref="thinkingBodyRef">
+          <div
+            v-for="(evt, idx) in displayThoughts"
+            :key="'t-' + idx"
+            class="thinking-event"
+            :class="[evt.type, 'role-' + (evt.role || 'unknown')]"
+          >
+            <span class="t-role">{{ (evt.role || '').toUpperCase() }}</span>
+            <span class="t-content" :title="evt.content">{{ thinkingPreview(evt) }}</span>
+            <span class="t-time">{{ formatTime(evt.timestamp) }}</span>
+          </div>
+        </div>
+      </div>
+
       <div 
         v-for="(msg, index) in filteredMessages" 
         :key="'msg-' + index"
@@ -346,12 +368,22 @@ const props = defineProps<{
   }>
   aiThinking: boolean
   supportsMultimodal?: boolean
+  thoughtEvents?: Array<{
+    type: string
+    role: string
+    content: string
+    timestamp: number
+    meta?: Record<string, any>
+  }>
 }>()
 
 const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message', 'open-file-in-editor', 'run-in-terminal'])
 
 const inputMessage = ref('')
 const globalTasks = ref<GlobalTask[]>([])
+
+// [3.4] AI 思考链状态
+const thinkingCollapsed = ref(true) // 默认折叠，不占空间
 
 // 前端调试日志函数
 const LogPrint = (msg: string) => {
@@ -364,6 +396,7 @@ const clarifyQuestions = ref<Array<{ text: string; type: string; options?: any[]
 const clarifyFollowUp = ref(false)
 const clarifyRef = ref<any>(null)
 const messagesRef = ref<HTMLElement>()
+const thinkingBodyRef = ref<HTMLElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
 const debugInfo = ref('')
 const expandedMessages = ref(new Set<number>())
@@ -1084,6 +1117,35 @@ function formatFullTime(timestamp?: number | string): string {
   return new Date(ts * 1000).toLocaleString('zh-CN')
 }
 
+// [3.4] 思考链：只显示最近20条，合并同角色连续 thinking
+const displayThoughts = computed(() => {
+  const events = props.thoughtEvents || []
+  if (events.length === 0) return []
+  // 取最近20条
+  const recent = events.slice(-20)
+  // 合并连续的 thinking（同一角色的相邻 thinking 合为一条）
+  const merged: typeof recent = []
+  for (const evt of recent) {
+    if (evt.type === 'thinking' && merged.length > 0) {
+      const last = merged[merged.length - 1]
+      if (last.type === 'thinking' && last.role === evt.role) {
+        last.content += evt.content
+        continue
+      }
+    }
+    merged.push({ ...evt })
+  }
+  return merged
+})
+
+function thinkingPreview(evt: { type: string; content: string }): string {
+  if (!evt.content) return ''
+  if (evt.type === 'step') return evt.content
+  // thinking 类型截断显示
+  const text = evt.content.replace(/\s+/g, ' ').trim()
+  return text.length > 80 ? text.slice(0, 80) + '...' : text
+}
+
 // #6 搜索功能
 const filteredMessages = computed(() => props.messages)
 
@@ -1164,6 +1226,16 @@ watch(() => props.messages.length, () => {
   nextTick(() => {
     if (messagesRef.value) {
       messagesRef.value.scrollTop = messagesRef.value.scrollHeight
+    }
+  })
+})
+
+// 思考链自动滚动到底部
+watch(() => props.thoughtEvents?.length, () => {
+  if (thinkingCollapsed.value) return
+  nextTick(() => {
+    if (thinkingBodyRef.value) {
+      thinkingBodyRef.value.scrollTop = thinkingBodyRef.value.scrollHeight
     }
   })
 })
@@ -1251,6 +1323,75 @@ defineExpose({ toggleSearch })
   border-radius: 3px;
 }
 .search-close-btn:hover { background: rgba(255,59,48,0.2); color: #ff3b30; }
+
+/* ===== [3.4] AI 思考链区域 ===== */
+.thinking-section {
+  background: rgb(25, 20, 38);
+  border: 1px solid rgba(100, 100, 255, 0.2);
+  border-radius: 8px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  font-size: 11px;
+  /* 固定在消息列表顶部，不随消息滚动 */
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.thinking-section.collapsed .thinking-body { display: none; }
+.thinking-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  background: rgba(60, 50, 90, 0.4);
+  transition: background 0.15s;
+}
+.thinking-header:hover { background: rgba(80, 70, 120, 0.5); }
+.thinking-icon { font-size: 13px; }
+.thinking-title { font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.5px; }
+.thinking-count {
+  background: #4a9eff;
+  color: #000;
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+.thinking-toggle { margin-left: auto; font-size: 9px; opacity: 0.5; }
+.thinking-body {
+  padding: 6px 10px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.thinking-body::-webkit-scrollbar { width: 2px; }
+.thinking-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 1px; }
+.thinking-event {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  line-height: 1.5;
+  border-left: 2px solid transparent;
+}
+.thinking-event.role-pm { border-left-color: #f59e0b; }
+.thinking-event.role-se { border-left-color: #3b82f6; }
+.thinking-event.role-ap { border-left-color: #10b981; }
+.t-role {
+  font-weight: 700;
+  font-size: 9px;
+  min-width: 24px;
+  padding: 0 3px;
+  border-radius: 3px;
+  text-align: center;
+}
+.role-pm .t-role { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.role-se .t-role { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.role-ap .t-role { background: rgba(16,185,129,0.15); color: #10b981; }
+.t-content { flex: 1; min-width: 0; word-break: break-all; white-space: pre-wrap; opacity: 0.75; font-style: italic; }
+.thinking-event.step .t-content { font-style: normal; font-weight: 600; opacity: 1; }
+.t-time { color: rgba(255,255,255,0.2); font-size: 9px; min-width: 42px; text-align: right; }
 
 /* ===== 消息列表 ===== */
 .messages {

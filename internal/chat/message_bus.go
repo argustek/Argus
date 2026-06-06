@@ -197,12 +197,11 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	// 发送给前端
 	mb.emitToFrontend(eventName, msgId, role, path, tag, sourceLoc, data)
 
-	trackingMark := "📢(no-track)"
-	if needTracking {
-		trackingMark = "⏳"
-	}
-	fmt.Printf("[💧MSG%s] id=%s role=%s event=%s path=%s len=%d source=%s\n",
-		trackingMark, msgId, role, eventName, path, len(content), sourceLoc)
+	// 高频日志已降级（每条消息都打会导致刷屏），需要调试时取消注释
+	// trackingMark := "📢(no-track)"
+	// if needTracking { trackingMark = "⏳" }
+	// fmt.Printf("[💧MSG%s] id=%s role=%s event=%s path=%s len=%d source=%s\n",
+	// 	trackingMark, msgId, role, eventName, path, len(content), sourceLoc)
 
 	return msgId
 }
@@ -214,7 +213,8 @@ func (mb *MessageBus) emitToFrontend(eventName, msgId, role string, path Message
 		return
 	}
 
-	fmt.Printf("[💧MSG] 📡 Emitting to frontend: event=%s msgId=%s path=%s\n", eventName, msgId, path)
+	// 高频日志已降级（每条消息都打会导致刷屏）
+	// fmt.Printf("[💧MSG] 📡 Emitting to frontend: event=%s msgId=%s path=%s\n", eventName, msgId, path)
 
 	enrichedData := map[string]interface{}{
 		"_msgId":    msgId,
@@ -374,7 +374,15 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 
 	switch path {
 	case PathCoreOutput:
-		return false
+		return false // ⚠️ TECH-DEBT: 高频通道不能追踪！
+			// 2026-06 血的教训：PathStatus 改为 return true 后，
+			// pendingQueue 爆炸 → 前端完全卡死，AI 全部不动。
+			// 根因：高频事件（status/chunk/thought）每秒几十条进 pendingQueue，
+			// CheckPending O(n) 扫描 + 超时检测把 CPU 吃满。
+			// TODO: 方案A) pendingQueue 改为 ring buffer + 异步清理
+			//       方案B) 高频路径采样追踪（每N条追1条）
+			//       方案C) shouldTrack 加频率限制（同路径 >QPS阈值自动降级）
+			// 临时方案：重要事件（如 agent-thought）改用 PathSystem 发送
 
 	case PathPMStream, PathSEStream:
 		// 流式消息：全部入批缓冲（不单独追踪），由批量机制统一管理
@@ -422,7 +430,8 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 	
 	pending, exists := mb.pendingQueue[msgId]
 	if !exists {
-		fmt.Printf("[✅MSG] ACK重复或未知: id=%s\n", msgId)
+		// 高频日志已降级
+		// fmt.Printf("[✅MSG] ACK重复或未知: id=%s\n", msgId)
 		return false
 	}
 	
@@ -444,15 +453,17 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 		info := batchInfo[0]
 		expected := info.EndSeq - info.StartSeq + 1
 		gap := expected - info.AckCount
-		status := "✅"
 		if gap > 0 {
-			status = fmt.Sprintf("⚠️ 缺%d条", gap)
+			fmt.Printf("[🥤MSG] 🍚 Batch ACK 缺失! id=%s seq=%d~%d expect=%d got=%d\n",
+				msgId, info.StartSeq, info.EndSeq, expected, info.AckCount)
 		}
-		fmt.Printf("[🥤MSG] 🍚 Batch ACK id=%s seq=%d~%d expect=%d got=%d %s latency=%.0fms\n",
-			msgId, info.StartSeq, info.EndSeq, expected, info.AckCount, status, latency.Seconds()*1000)
+		// 高频日志已降级（正常确认不打印）
+		// fmt.Printf("[🥤MSG] 🍚 Batch ACK id=%s seq=%d~%d expect=%d got=%d %s latency=%.0fms\n",
+		// 	msgId, info.StartSeq, info.EndSeq, expected, info.AckCount, status, latency.Seconds()*1000)
 	} else {
-		fmt.Printf("[🥤MSG] 收到确认 id=%s role=%s latency=%.0fms pending=%d\n",
-			msgId, pending.Role, latency.Seconds()*1000, len(mb.pendingQueue))
+		// 高频日志已降级
+		// fmt.Printf("[🥤MSG] 收到确认 id=%s role=%s latency=%.0fms pending=%d\n",
+		// 	msgId, pending.Role, latency.Seconds()*1000, len(mb.pendingQueue))
 	}
 	
 	mb.receivedMap[msgId] = received

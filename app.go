@@ -626,6 +626,23 @@ func (a *App) initChatManager() {
 		}
 	})
 
+	// Git 操作走事件总线（非阻塞）：前端 EventsEmit 请求 → 后端 goroutine 执行 → EventsEmit 推送结果
+	// 解决：await GetGitStatus() 阻塞 JS 主线程 → 消息确认超时误报"消息丢失"
+	runtime.EventsOn(a.ctx, "git:request-status", func(optionalData ...interface{}) {
+		go func() {
+			data := git.GetStatus(a.getProjectDir())
+			jsonData, _ := json.Marshal(data)
+			runtime.EventsEmit(a.ctx, "git:status", string(jsonData))
+		}()
+	})
+	runtime.EventsOn(a.ctx, "git:request-repo-info", func(optionalData ...interface{}) {
+		go func() {
+			info := git.GetRepoInfo(a.getProjectDir())
+			jsonData, _ := json.Marshal(info)
+			runtime.EventsEmit(a.ctx, "git:repo-info", string(jsonData))
+		}()
+	})
+
 	// ✅ 通知初始化完成（允许 --send 发送消息）
 	close(a.readyChan)
 	fmt.Println("[initChatManager] ✅ 初始化完成，已关闭 readyChan")

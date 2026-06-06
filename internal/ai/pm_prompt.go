@@ -440,7 +440,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		}
 	}
 
-	response, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, userInput, p.ReplyLanguage, onChunk)
+	response, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, userInput, p.ReplyLanguage, onChunk, nil)
 	if err != nil {
 		fmt.Printf("[PM Stream] AI call failed: %v\n", err)
 		return nil, err

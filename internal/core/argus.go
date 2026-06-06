@@ -26,8 +26,17 @@ type RoleState struct {
 	UpdatedAt int64  `json:"updated_at"`          // 时间戳
 }
 
+// ThoughtEvent AI思考链事件（用于前端Dashboard展示）
+type ThoughtEvent struct {
+	Type      string                 `json:"type"`               // "thinking" | "step" | "tool_start" | "tool_done"
+	Role      string                 `json:"role"`               // "pm" | "se" | "ap"
+	Content   string                 `json:"content,omitempty"`  // 思考内容/步骤描述/工具输出
+	Timestamp int64                  `json:"timestamp"`          // Unix秒
+	Metadata  map[string]interface{} `json:"meta,omitempty"`      // 扩展(工具名/步骤号/耗时等)
+}
+
 type AICaller interface {
-	ChatStream(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error)
+	ChatStream(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error)
 	ChatWithTools(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, tools []ai.Tool) (*ai.ChatResponse, error)
 }
 
@@ -85,6 +94,7 @@ type ArgusCore struct {
 
 	onMessage      func(source, content string)
 	onChunk        func(delta string)
+	onThought      func(evt map[string]interface{}) // 思考链回调（Dashboard可视化）
 	onStateChange  func(RoleState)
 	onActionEvent  func(eventName string, data interface{})
 
@@ -132,6 +142,31 @@ func (c *ArgusCore) SetOnChunk(fn func(delta string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onChunk = fn
+}
+
+func (c *ArgusCore) SetOnThought(fn func(evt map[string]interface{})) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onThought = fn
+}
+
+// emitThought 发送思考链事件到前端Dashboard
+func (c *ArgusCore) emitThought(evtType, role, content string, meta map[string]interface{}) {
+	if c.onThought == nil {
+		return
+	}
+	evt := map[string]interface{}{
+		"type":      evtType,
+		"role":      role,
+		"content":   content,
+		"timestamp": time.Now().Unix(),
+	}
+	if meta != nil {
+		for k, v := range meta {
+			evt[k] = v
+		}
+	}
+	c.onThought(evt)
 }
 
 func (c *ArgusCore) SetContext(ctx context.Context) {
@@ -217,19 +252,58 @@ func (c *ArgusCore) callAIWithPrompt(systemPrompt, roleLabel, prompt, memoryCont
 		fullPrompt = fmt.Sprintf("[Context from previous phases]\n%s\n\n[Current Task]\n%s", memoryContext, prompt)
 	}
 
+	// 发送步骤开始事件到Dashboard
+	c.emitThought("step", roleLabel, fmt.Sprintf("开始 %s 分析...", strings.ToUpper(roleLabel)), map[string]interface{}{"phase": roleLabel})
+
 	start := time.Now()
 
 	var response string
 	var err error
+	// reasoning_content 聚合缓冲区（避免逐chunk高频发射导致前端疯狂滚屏）
+	var thinkingBuf strings.Builder
+	var lastThinkEmit time.Time
 
 	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
-	response, err = c.client.ChatStream(callCtx, systemPrompt, history, fullPrompt, c.language, func(delta string) {
-		c.emitChunk(delta)
-	})
+	response, err = c.client.ChatStream(callCtx, systemPrompt, history, fullPrompt, c.language,
+		func(delta string) {
+			c.emitChunk(delta)
+		},
+		func(evt map[string]interface{}) {
+			evtType, _ := evt["type"].(string)
+			evtContent, _ := evt["content"].(string)
+
+			if evtType == "thinking" && evtContent != "" {
+				// 聚合 reasoning_content，每 3 秒或 step 结束时批量发一次
+				thinkingBuf.WriteString(evtContent)
+				if time.Since(lastThinkEmit) > 3*time.Second {
+					c.emitThought("thinking", roleLabel, thinkingBuf.String(), nil)
+					thinkingBuf.Reset()
+					lastThinkEmit = time.Now()
+				}
+			} else if evtType == "step" {
+				// step 事件直接转发（低频）
+				c.emitThought(evtType, roleLabel, evtContent, nil)
+			}
+		})
 	callCancel()
+
+	// flush 剩余的 thinking 缓冲
+	if thinkingBuf.Len() > 0 {
+		c.emitThought("thinking", roleLabel, thinkingBuf.String(), nil)
+	}
 
 	duration := time.Since(start)
 	fmt.Printf("[Core:%s] AI call completed in %v (len=%d, err=%v)\n", roleLabel, duration, len(response), err)
+
+	// 发送步骤完成事件
+	status := "done"
+	if err != nil {
+		status = "error"
+	}
+	c.emitThought("step", roleLabel, fmt.Sprintf("%s %s (%v, %d chars)",
+		map[string]string{"done": "✅", "error": "❌"}[status],
+		strings.ToUpper(roleLabel), duration, len(response)),
+		map[string]interface{}{"phase": roleLabel, "duration_ms": duration.Milliseconds(), "chars": len(response)})
 
 	return response, err
 }

@@ -319,7 +319,7 @@ type StreamChunk struct {
 }
 
 // ChatStream 流式聊天请求，每收到文本片段调用 onChunk，返回累积的完整文本
-func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
+func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error) {
 	maxRetries := 3  // Increased from 1 to handle unstable LLM API connections
 	var lastErr error
 
@@ -334,7 +334,7 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 			time.Sleep(waitTime)
 		}
 
-		result, err := c.chatStreamOnce(ctx, systemPrompt, history, userContent, replyLanguage, onChunk)
+		result, err := c.chatStreamOnce(ctx, systemPrompt, history, userContent, replyLanguage, onChunk, onThought)
 		if err == nil {
 			c.recordSuccess()
 			return result, nil
@@ -354,7 +354,7 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 	return "", fmt.Errorf("%s: %w", i18n.T("err.api_retry_failed", maxRetries), lastErr)
 }
 
-func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string)) (string, error) {
+func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error) {
 	func() {
 		f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_se_entry_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if f != nil {
@@ -482,6 +482,14 @@ func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, histor
 						switch event.Type {
 						case StreamEventThinking:
 							fullContent += event.Data
+							// 发射思考链事件（reasoning_content）到Dashboard
+							if onThought != nil && event.Data != "" {
+								onThought(map[string]interface{}{
+									"type":      "thinking",
+									"content":   event.Data,
+									"timestamp": time.Now().Unix(),
+								})
+							}
 						case StreamEventContent:
 							fullContent += event.Data
 							displayContent += event.Data

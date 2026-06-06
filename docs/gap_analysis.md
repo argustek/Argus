@@ -361,8 +361,42 @@ Search(query)
 | 3.1 | 代码片段库 | ⭐ 已完成 | ✅ 持久化(.argus/snippets.json) + 完整CRUD + 4个SE工具 |
 | 3.2 | 多 Agent 协作（前端/后端/DB 并行子 agent） | ⭐⭐⭐⭐ 架构级 | 🔴 待做：任务拆分 + 并行协调 + 结果合并 |
 | 3.3 | 动态调试（Delve/DAP 集成） | ⭐⭐⭐ 新模块 | 🔴 待做：断点/单步/变量检查/调用栈 |
-| 3.4 | Agent 调试可视化（思考链展示） | ⭐⭐ 前端为主 | 🔴 待做：后端 SSE 数据已有，前端 Dashboard 即可 |
-| 3.5 | Shell Session 空闲自动清理 | ⭐ 几行代码 | 🔴 待做：文档写了60s自动清理但代码未实现，需加 idle timer goroutine |
+| 3.4 | Agent 调试可视化（思考链展示） | ⭐⭐ 前端为主 | ✅ **已完成**：AgentDashboard.vue组件 + 后端ThoughtEvent通过MessageBus发射(reasoning_content/step/tool事件) |
+| 3.5 | Shell Session 空闲自动清理 | ⭐ 几行代码 | ✅ **已完成**：idleChecker goroutine，10s ticker检测，60s超时自动关闭 |
+
+---
+
+## 四、已知技术债务（每次开发前必须扫一眼！）
+
+> **📌 完整记录见 [KNOWN_BUGS.md](KNOWN_BUGS.md) — 重大 Bug 独立文档，含根因分析和修复方案**
+>
+> **规则：改 message_bus.go 追踪策略前，先读 KNOWN_BUGS.md 的 TD-1。**
+
+| # | 问题 | 严重度 | 状态 | 临时方案 |
+|---|------|--------|------|---------|
+| TD-1 | **MessageBus 高频路径追踪导致前端卡死** | 🔴 致命 | 🔴 未解决 | PathCoreOutput/PathStatus 保持 NO_TRACK；重要事件改用 PathSystem |
+| TD-2 | **pendingQueue 无容量上限，高频事件可撑爆内存** | 🟠 高 | 🔴 未解决 | 同上（根因与TD-1相同） |
+| TD-3 | **CheckPending O(n) 全扫描，消息量大时 CPU 飙升** | 🟠 高 | 🔴 未解决 | 同上 |
+
+### TD-1 详细记录（2026-06-06）
+
+**现象**：`shouldTrack()` 中 `PathStatus` 改为 `return true` 后，前端完全无响应，AI 全部卡死不动。
+
+**根因链**：
+```
+PathStatus 追踪 → 每秒几十条 status 事件进 pendingQueue
+  → CheckPending O(n) 扫描全队列 + 超时检测
+  → CPU 100% 卡在 pendingQueue 操作
+  → 前端事件循环阻塞 → UI 冻结
+  → AI 回调也走前端通道 → 整个系统死锁
+```
+
+**正确解法方向**（待实现）：
+- 方案A：pendingQueue 改 ring buffer + 异步清理线程
+- 方案B：高频路径采样追踪（每 N 条追 1 条）
+- 方案C：shouldTrack 加 QPS 频率限制（超阈值自动降级 NO_TRACK）
+
+**谁会提醒你**：`message_bus.go:374` 的 `⚠️ TECH-DEBT` 注释。每次改 shouldTrack 都会看到。
 
 ---
 
@@ -433,7 +467,7 @@ Search(query)
 | Diff 预览 | ✅ ComputeDiff(unified) + DiffPreviewDialog(前端弹窗) + show_diff工具 |
 | 支持图片格式 | 6 (PNG/JPG/GIF/WebP/BMP/PDF) |
 | ShellSession buffer | 10 MB |
-| ShellSession 超时 | 60 s |
+| ShellSession 超时 | 60 s (命令) / 60s (空闲自动清理) |
 | exec 超时 | 30 s |
 | lsp_client.go 行数 | 641 |
 | file_tracker.go 行数 | 255 |

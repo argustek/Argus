@@ -14,31 +14,38 @@ import (
 
 // ShellSession 持久化 shell 会话，保持工作目录和环境变量跨命令
 type ShellSession struct {
-	mu         sync.Mutex
-	workDir    string
-	cmd        *exec.Cmd
-	stdin      io.WriteCloser
-	stdout     io.ReadCloser
-	stdoutBuf  *bufio.Scanner
-	envVars    map[string]string
-	cwd        string
-	outputEnd  string // 输出结束标记
-	running    bool
-	stopCh     chan struct{}
+	mu           sync.Mutex
+	workDir      string
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       io.ReadCloser
+	stdoutBuf    *bufio.Scanner
+	envVars      map[string]string
+	cwd          string
+	outputEnd    string // 输出结束标记
+	running      bool
+	stopCh       chan struct{}
+	lastActive   time.Time // 最后活跃时间，用于空闲清理
+	idleTimeout  time.Duration // 空闲超时，默认60秒
 }
 
 // NewShellSession 创建持久化 shell 会话
 func NewShellSession(workDir string) (*ShellSession, error) {
 	ss := &ShellSession{
-		workDir:   workDir,
-		envVars:   make(map[string]string),
-		outputEnd: "___ARGUS_CMD_END___",
-		stopCh:    make(chan struct{}),
+		workDir:     workDir,
+		envVars:     make(map[string]string),
+		outputEnd:   "___ARGUS_CMD_END___",
+		stopCh:      make(chan struct{}),
+		idleTimeout: 60 * time.Second,
+		lastActive:  time.Now(),
 	}
 
 	if err := ss.start(); err != nil {
 		return nil, fmt.Errorf("启动 shell 失败: %w", err)
 	}
+
+	// 启动空闲清理 goroutine
+	go ss.idleChecker()
 
 	return ss, nil
 }
@@ -91,10 +98,35 @@ func (ss *ShellSession) start() error {
 	return nil
 }
 
+// idleChecker 空闲清理 goroutine：超过 idleTimeout 无操作则自动关闭
+func (ss *ShellSession) idleChecker() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ss.stopCh:
+			return
+		case <-ticker.C:
+			ss.mu.Lock()
+			idle := time.Since(ss.lastActive)
+			isRunning := ss.running
+			ss.mu.Unlock()
+
+			if isRunning && idle > ss.idleTimeout {
+				fmt.Printf("[ShellSession] 🧹 空闲超时 (%v > %v)，自动关闭\n", idle, ss.idleTimeout)
+				ss.Close()
+				return
+			}
+		}
+	}
+}
+
 // Exec 在持久化 shell 中执行命令，返回输出
 func (ss *ShellSession) Exec(command string, timeout time.Duration) (string, error) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	ss.lastActive = time.Now() // 更新活跃时间，阻止空闲清理
 
 	if !ss.running {
 		if err := ss.start(); err != nil {
@@ -284,4 +316,11 @@ func (ss *ShellSession) IsRunning() bool {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	return ss.running
+}
+
+// SetIdleTimeout 设置空闲超时时间
+func (ss *ShellSession) SetIdleTimeout(d time.Duration) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.idleTimeout = d
 }

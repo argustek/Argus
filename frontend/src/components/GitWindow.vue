@@ -231,6 +231,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch, onErrorCaptured } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useDraggable } from '../composables/useDraggable'
+import { EventsEmit, EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
 const { t } = useI18n()
 
@@ -275,6 +276,10 @@ const commitDiffLines = computed(() => {
 const branches = ref<any[]>([])
 const remotes = ref<any[]>([])
 
+// 防抖：避免频繁调用 Git IPC 导致前端主线程阻塞（触发消息丢失误报）
+let gitRefreshTimer: ReturnType<typeof setTimeout> | null = null
+const GIT_DEBOUNCE_MS = 800
+
 const showCloneDialog = ref(false)
 const showInitDialog = ref(false)
 const cloneUrl = ref('')
@@ -306,6 +311,14 @@ function getDiffLineClass(line: string) {
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
+  // 注册 Git 结果监听器（后端 goroutine 执行完后推送结果，不阻塞前端）
+  EventsOn('git:repo-info', (raw: string) => {
+    try { const info = JSON.parse(raw); if (info) Object.assign(repoInfo, info) } catch {}
+  })
+  EventsOn('git:status', (raw: string) => {
+    try { entries.value = JSON.parse(raw) || [] } catch {}
+    loading.value = false
+  })
   refreshAll()
   refreshTimer = setInterval(() => {
     refreshAll()
@@ -313,10 +326,9 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+  EventsOff('git:repo-info')
+  EventsOff('git:status')
 })
 
 onErrorCaptured((err: any) => {
@@ -326,6 +338,14 @@ onErrorCaptured((err: any) => {
 })
 
 async function refreshAll() {
+  // 防抖：合并短时间内多次调用，避免阻塞前端主线程
+  if (gitRefreshTimer) { clearTimeout(gitRefreshTimer) }
+  gitRefreshTimer = setTimeout(async () => {
+    await doRefreshAll()
+  }, GIT_DEBOUNCE_MS)
+}
+
+async function doRefreshAll() {
   const hadExpanded = expandedFile.value
   if (!hadExpanded) {
     fileDiff.value = null
@@ -346,31 +366,16 @@ async function refreshAll() {
 }
 
 async function loadRepoInfo() {
-  try {
-    const { GetRepoInfo } = await import('../../wailsjs/go/main/App')
-    const info = await GetRepoInfo()
-    if (info) {
-      Object.assign(repoInfo, info)
-    }
-  } catch (err: any) {
-    console.error('[GitWindow] loadRepoInfo 失败:', err)
-  }
+  // 非阻塞：通过事件总线请求，后端 goroutine 执行后推送结果
+  try { EventsEmit('git:request-repo-info') } catch {}
 }
 
 async function loadStatus() {
   if (!repoInfo.is_repo) return
   loading.value = true
   error.value = ''
-  try {
-    const { GetGitStatus } = await import('../../wailsjs/go/main/App')
-    const data = await GetGitStatus()
-    entries.value = data || []
-  } catch (err: any) {
-    error.value = String(err)
-    entries.value = []
-  } finally {
-    loading.value = false
-  }
+  // 非阻塞：通过事件总线请求，后端 goroutine 执行后推送结果
+  try { EventsEmit('git:request-status') } catch {}
 }
 
 async function loadHistory() {

@@ -300,7 +300,7 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 		}
 
 		fmt.Printf("[AP ChatStream] 降级模式，round=%d\n", round+1)
-		content, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, p.ReplyLanguage, onChunk)
+		content, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, p.ReplyLanguage, onChunk, nil)
 		if err != nil {
 			fmt.Printf("[AP ChatStream] ❌ error=%v\n", err)
 			return nil, fmt.Errorf("AP review failed: %w", err)
@@ -358,7 +358,7 @@ func (p *APProcessor) ProcessReviewNoTools(reviewMsg string, history []ChatMessa
 	}
 
 	fmt.Printf("[AP ReviewNoTools] 调用 ChatStream...\n")
-	content, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, p.ReplyLanguage, onChunk)
+	content, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, reviewMsg, p.ReplyLanguage, onChunk, nil)
 	if err != nil {
 		fmt.Printf("[AP ReviewNoTools] ❌ error=%v\n", err)
 		return nil, fmt.Errorf("AP no-tools review failed: %w", err)

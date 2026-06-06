@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Br
 	b.argus.SetContext(ctx)
 	b.argus.SetOnMessage(b.onCoreMessage)
 	b.argus.SetOnChunk(b.onCoreChunk)
+	b.argus.SetOnThought(b.onCoreThought) // 思考链 → MessageBus → 前端Dashboard
 
 	return b
 }
@@ -129,6 +131,19 @@ func (b *Bridge) onCoreChunk(delta string) {
 	if b.onChunk != nil && delta != "" {
 		b.onChunk(delta)
 	}
+}
+
+// onCoreThought 思考链回调 → MessageBus → 前端Dashboard
+// 用 PathSystem（可追踪）而非 PathCoreOutput（高频NO_TRACK，追踪会卡死前端）
+func (b *Bridge) onCoreThought(evt map[string]interface{}) {
+	if b.msgBus == nil || b.ctx == nil {
+		return
+	}
+	dataJSON, err := json.Marshal(evt)
+	if err != nil {
+		return
+	}
+	b.msgBus.Send("system", string(dataJSON), "agent-thought", PathSystem, "Bridge:onCoreThought", evt)
 }
 
 func (b *Bridge) roleFromSource(source string) string {
