@@ -677,6 +677,11 @@ Output ONLY this exact JSON structure:
 		seResponse, seErr = c.callAI(RoleSE, feedbackPrompt, c.memory.FormatForPrompt())
 		if seErr != nil {
 			c.emit("se_to_pm", fmt.Sprintf("⚠️ Self-fix call failed: %v", seErr))
+			// 熔断器打开后继续重试无意义，立即终止
+			if strings.Contains(seErr.Error(), "circuit breaker") {
+				result.Error = fmt.Errorf("circuit breaker open after %d attempts: %w", selfAttempt+1, seErr)
+				break
+			}
 			continue
 		}
 		c.memory.Add(RoleSE, fmt.Sprintf("SE self-fix #%d", selfAttempt+1))
@@ -695,7 +700,35 @@ Output ONLY this exact JSON structure:
 	result.Outputs = execResults
 	result.Actions = actions
 
+	// --- Post-Execution Summary ---
+	// 如果 SE 原始响应只有 JSON action 没有自然语言总结，注入执行结果让 AI 补充
 	seDisplay := c.extractDisplayText(seResponse)
+	if len(strings.TrimSpace(seDisplay)) < 20 && len(execResults) > 0 {
+		c.emit("se_to_pm", "📝 SE 正在生成执行结果总结...")
+		summaryPrompt := fmt.Sprintf(`你刚刚完成了以下操作，结果如下：
+
+【用户原始请求】%s
+【执行的 Actions】%v
+【执行结果】%s
+
+请用简洁的自然语言向用户汇报：
+1. 你做了什么（文件名/命令）
+2. 执行结果（成功/失败/内容摘要）
+3. 如果是读取文件类任务，请总结文件要点（不要全文粘贴）
+
+直接输出总结即可，不要输出 JSON。`, userMsg, actions, strings.Join(execResults, "\n"))
+		summaryResp, summaryErr := c.callAI(RoleSE, summaryPrompt, c.memory.FormatForPrompt())
+		if summaryErr == nil && len(summaryResp) > 10 {
+			seDisplay = c.extractDisplayText(summaryResp)
+			c.memory.Add(RoleSE, fmt.Sprintf("SE post-execution summary generated (len=%d)", len(seDisplay)))
+			fmt.Printf("[Core:SE] Post-execution summary: %d chars\n", len(seDisplay))
+		} else {
+			fmt.Printf("[Core:SE] Post-execution summary skipped: err=%v\n", summaryErr)
+			// fallback: 用执行结果的拼接作为显示文本
+			seDisplay = fmt.Sprintf("✅ 执行完成 (%d 个操作):\n%s\n", len(actions), strings.Join(execResults, "\n"))
+		}
+	}
+
 	c.emit("se_to_pm", seDisplay)
 
 	if result.Error != nil {
@@ -1174,20 +1207,29 @@ func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
 	if len(results) == 0 {
 		return false
 	}
-	// Must have at least one successful exec result
-	hasExecSuccess := false
+	// Must have at least one successful operation (any tool type)
+	successPrefixes := []string{"✅ exec", "✅ read_file", "✅ write_file", "✅ edit_file",
+		"✅ read_pdf", "✅ read_docx", "✅ write_docx", "✅ compare_docs",
+		"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ list_files"}
+	hasSuccess := false
 	for _, r := range results {
-		if strings.HasPrefix(r, "✅ exec") {
-			hasExecSuccess = true
+		for _, prefix := range successPrefixes {
+			if strings.HasPrefix(r, prefix) {
+				hasSuccess = true
+				break
+			}
+		}
+		if hasSuccess {
 			break
 		}
 	}
-	if !hasExecSuccess {
+	if !hasSuccess {
 		return false
 	}
-	// Also must not have any exec failures
+	// Also must not have any hard failures
 	for _, r := range results {
-		if strings.Contains(r, "❌ exec") || strings.Contains(r, "syntax error") ||
+		if strings.Contains(r, "❌ exec") || strings.Contains(r, "❌ read_file") ||
+			strings.Contains(r, "syntax error") ||
 			strings.Contains(r, "exit status") || strings.Contains(r, "command failed") {
 			return false
 		}
@@ -1601,6 +1643,15 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		var err error
 
 		switch action.Type {
+		case "read_file":
+			absPath := c.resolvePath(action.Path)
+			content, readErr := c.executor.ReadFile(absPath)
+			if readErr != nil {
+				output = fmt.Sprintf("❌ read_file error: %v", readErr)
+			} else {
+				output = fmt.Sprintf("✅ read_file %s (%d bytes)\n%s",
+					action.Path, len(content), truncateContent(content, 8000))
+			}
 		case "write_file":
 			err = c.executor.WriteFile(action.Path, action.Content)
 			if err == nil {
@@ -1655,6 +1706,89 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 					output += fmt.Sprintf("  %s (%d bytes)\n", f.Path, f.Size)
 				}
 			}
+		// ========== 文档处理工具 ==========
+		case "read_pdf":
+			absPath := c.resolvePath(action.Path)
+			result, docErr := ai.ReadPDF(absPath, action.UseOCR)
+			if docErr != nil {
+				output = fmt.Sprintf("❌ read_pdf error: %v", docErr)
+			} else {
+				output = fmt.Sprintf("✅ read_pdf %s (pages:%d words:%d)\n%s",
+					action.Path, result.Meta.Pages, result.Meta.WordCount,
+					truncateContent(result.Content, 8000))
+			}
+		case "read_docx":
+			absPath := c.resolvePath(action.Path)
+			result, docErr := ai.ReadDocx(absPath)
+			if docErr != nil {
+				output = fmt.Sprintf("❌ read_docx error: %v", docErr)
+			} else {
+				output = fmt.Sprintf("✅ read_docx %s (tables:%d words:%d)\n%s",
+					action.Path, result.Meta.Tables, result.Meta.WordCount,
+					truncateContent(result.Content, 8000))
+			}
+		case "write_docx":
+			absPath := c.resolvePath(action.Path)
+			result, docErr := ai.WriteDocx(absPath, action.DocContent)
+			if docErr != nil {
+				output = fmt.Sprintf("❌ write_docx error: %v", docErr)
+			} else {
+				output = fmt.Sprintf("✅ write_docx %s (%d bytes)", action.Path, result.Meta.Size)
+			}
+		case "compare_docs":
+			pathA := c.resolvePath(action.Path)
+			pathB := c.resolvePath(action.ComparePathB)
+			result, docErr := ai.CompareDocs(pathA, pathB)
+			if docErr != nil {
+				output = fmt.Sprintf("❌ compare_docs error: %v", docErr)
+			} else {
+				output = fmt.Sprintf("✅ compare_docs %s vs %s\n%s",
+					action.Path, action.ComparePathB,
+					truncateContent(result.Content, 10000))
+			}
+		// ========== 工具自举 ==========
+		case "ensure_tool":
+			toolName := action.ToolName
+			if toolName == "" {
+				toolName = "read_pdf"
+			}
+			ready, missing, _ := ai.EnsureTool(toolName)
+			if ready {
+				output = fmt.Sprintf("✅ ensure_tool '%s' — 所有依赖已就绪", toolName)
+			} else {
+				success, installLog := ai.AutoInstallDeps(toolName)
+				if success {
+					output = fmt.Sprintf("✅ ensure_tool '%s' — 依赖已自动安装:\n%s", toolName, installLog)
+				} else {
+					output = fmt.Sprintf("⚠️ ensure_tool '%s' — 缺失: %s\n%s\n请手动安装后重试",
+						toolName, strings.Join(missing, ", "), installLog)
+				}
+			}
+		case "install_pkg":
+			pkgManager := action.PkgManager
+			if pkgManager == "" {
+				pkgManager = "pip"
+			}
+			pkgName := action.PkgName
+			var installCmd string
+			switch pkgManager {
+			case "pip":
+				installCmd = fmt.Sprintf("pip install %s", pkgName)
+			case "npm":
+				installCmd = fmt.Sprintf("npm install -g %s", pkgName)
+			case "cargo":
+				installCmd = fmt.Sprintf("cargo install %s", pkgName)
+			case "go":
+				installCmd = fmt.Sprintf("go install %s@latest", pkgName)
+			default:
+				installCmd = fmt.Sprintf("pip install %s", pkgName)
+			}
+			output, err = c.executor.Exec(installCmd, 120*time.Second)
+			if err != nil {
+				output = fmt.Sprintf("❌ install_pkg '%s' via %s error: %v\noutput: %s", pkgName, pkgManager, err, output)
+			} else {
+				output = fmt.Sprintf("✅ install_pkg '%s' via %s succeeded\n%s", pkgName, pkgManager, truncateContent(output, 2000))
+			}
 		default:
 			err = fmt.Errorf("unknown action type: %s", action.Type)
 			output = fmt.Sprintf("❌ unknown action: %s", action.Type)
@@ -1692,6 +1826,22 @@ func (c *ArgusCore) emitAction(eventName string, data interface{}) {
 	if c.onActionEvent != nil {
 		c.onActionEvent(eventName, data)
 	}
+}
+
+// resolvePath 将相对路径解析为绝对路径（基于工作目录）
+func (c *ArgusCore) resolvePath(relPath string) string {
+	if filepath.IsAbs(relPath) {
+		return relPath
+	}
+	return filepath.Join(c.workDir, relPath)
+}
+
+// truncateContent 截断内容到指定长度，避免撑爆上下文
+func truncateContent(content string, maxLen int) string {
+	if len(content) <= maxLen {
+		return content
+	}
+	return content[:maxLen] + fmt.Sprintf("\n... [截断，共 %d 字符]", len(content))
 }
 
 func (c *ArgusCore) extractDisplayText(response string) string {

@@ -3621,25 +3621,25 @@ func (a *App) isDangerousWorkDir(dir string) bool {
 		"\\internal\\",
 		"\\frontend\\",
 	}
-	
+
 	for _, pattern := range dangerousPatterns {
 		if strings.Contains(dir, pattern) {
 			return true
 		}
 	}
-	
+
 	currentExe, _ := os.Executable()
 	if currentExe != "" {
 		exeDir := filepath.Dir(currentExe)
 		absDir, _ := filepath.Abs(dir)
 		absExeDir, _ := filepath.Abs(exeDir)
-		
+
 		if strings.HasPrefix(absDir, absExeDir+string(os.PathSeparator)) ||
-		   absDir == absExeDir {
+			absDir == absExeDir {
 			return true
 		}
 	}
-	
+
 	return false
 }
 

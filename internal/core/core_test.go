@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -195,6 +196,123 @@ func TestFindMatchingBracket(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+// ========== Post-Execution Summary Tests ==========
+
+func TestExtractDisplayText_JsonOnly(t *testing.T) {
+	core := &ArgusCore{}
+
+	// 测试只有JSON的响应
+	jsonResponse := `{"actions":[{"type":"read_file","path":"test.txt"}]}`
+	display := core.extractDisplayText(jsonResponse)
+	if len(strings.TrimSpace(display)) != 0 {
+		t.Errorf("JSON-only response should return empty display, got: %s", display)
+	}
+}
+
+func TestExtractDisplayText_MixedContent(t *testing.T) {
+	core := &ArgusCore{}
+
+	// 测试混合内容：JSON + 自然语言
+	mixedResponse := `{"actions":[{"type":"read_file","path":"test.txt"}]}
+✅ 已成功读取文件 test.txt，内容包括3个要点...`
+
+	display := core.extractDisplayText(mixedResponse)
+	if !strings.Contains(display, "已成功读取") {
+		t.Errorf("Should extract natural language text, got: %s", display)
+	}
+	if strings.Contains(display, "actions") {
+		t.Error("Should filter out JSON content")
+	}
+}
+
+func TestExtractDisplayText_FiltersSEDirectives(t *testing.T) {
+	core := &ArgusCore{}
+
+	// 测试过滤@SE指令
+	responseWithDirective := `@SE 请执行以下操作
+{"type":"exec","command":"dir"}
+这是执行结果`
+
+	display := core.extractDisplayText(responseWithDirective)
+	if strings.Contains(display, "@SE") {
+		t.Error("Should filter out @SE directives")
+	}
+	if !strings.Contains(display, "这是执行结果") {
+		t.Error("Should keep normal content")
+	}
+}
+
+func TestExtractDisplayText_PreservesUSRContent(t *testing.T) {
+	core := &ArgusCore{}
+
+	// 测试保留@USR后面的内容
+	responseWithUSR := `@USR 文件已创建完成
+包含3个功能点：
+1. 读取文件
+2. 处理数据
+3. 输出结果`
+
+	display := core.extractDisplayText(responseWithUSR)
+	if !strings.Contains(display, "文件已创建完成") {
+		t.Errorf("Should preserve @USR content, got: %s", display)
+	}
+}
+
+func TestExtractDisplayText_ShortOutput(t *testing.T) {
+	core := &ArgusCore{}
+
+	// 测试短文本（<20字符）应该触发summary
+	shortResponse := `OK`
+	display := core.extractDisplayText(shortResponse)
+	if len(strings.TrimSpace(display)) >= 20 {
+		t.Errorf("Short response should be less than 20 chars, got %d chars", len(display))
+	}
+}
+
+func TestPostExecutionSummary_ShouldTrigger(t *testing.T) {
+	// 模拟场景：SE返回只有JSON，需要触发summary
+	seResponse := `{"actions":[{"type":"read_file","path":"docs/test_summary.txt"}]}`
+	execResults := []string{"✅ read_file: 成功读取文件，内容包含测试要点"}
+
+	// 提取显示文本
+	core := &ArgusCore{}
+	seDisplay := core.extractDisplayText(seResponse)
+
+	// 验证：JSON-only响应应该产生短display文本
+	if len(strings.TrimSpace(seDisplay)) >= 20 {
+		t.Errorf("JSON response should produce short display (<20 chars), got: %d chars", len(seDisplay))
+	}
+
+	// 验证：有执行结果时应该触发summary生成
+	if len(execResults) > 0 && len(strings.TrimSpace(seDisplay)) < 20 {
+		t.Log("✅ Correctly identified need for post-execution summary")
+	}
+}
+
+func TestPostExecutionSummary_AlreadyHasSummary(t *testing.T) {
+	// 模拟场景：SE已经包含自然语言总结，不需要再生成
+	seResponse := `{"actions":[{"type":"read_file","path":"test.txt"}]}
+
+✅ 已成功读取 test.txt 文件，主要内容包括：
+- 测试要点1：验证SE执行能力
+- 测试要点2：检查PM Review流程
+- 测试要点3：确认用户体验
+
+文件共123行，核心逻辑清晰。`
+
+	core := &ArgusCore{}
+	seDisplay := core.extractDisplayText(seResponse)
+
+	// 验证：已有足够长的自然语言文本，不应该触发summary
+	if len(strings.TrimSpace(seDisplay)) < 20 {
+		t.Error("Response with summary should have display >= 20 chars")
+	}
+
+	if !strings.Contains(seDisplay, "已成功读取") {
+		t.Error("Should preserve existing summary")
+	}
 }
 
 func containsHelper(s, substr string) bool {

@@ -206,6 +206,23 @@ Message Source Identification (IMPORTANT):
 2. 输出任务JSON（放在回复最后一行）启动SE
 3. SE完成后进入审核流程（见上方）
 
+## 📄 文档处理任务（非编码任务）
+
+当用户提出文档相关需求时（如"比较PDF和Word"、"从PDF提取数据生成报表"、"OCR识别扫描件"）：
+1. **直接@SE**，让SE使用文档工具完成
+2. SE拥有以下文档能力（无需你操心依赖安装，SE会自动处理）：
+   - read_pdf: 读取PDF（支持OCR）
+   - read_docx: 读取Word
+   - write_docx: 生成Word
+   - compare_docs: 比较两个文档差异
+3. 如果需要OCR或特殊库，SE会自动调用 ensure_tool 安装依赖
+4. 审核方式：用 read_file 查看生成的文件，或要求SE展示结果摘要
+
+示例任务分配：
+- "@请比较 docs/contract.pdf 和 docs/contract_v2.docx 的差异"
+- "@请读取 report.pdf 的内容并生成一份 Word 摘要"
+- "@请对 scanned.pdf 做 OCR 提取文字"
+
 任务JSON格式：
 {"current_task":"创建一个hello.go文件，输出Hello World","current_step":1,"total_steps":2,"status":"pending"}
 
