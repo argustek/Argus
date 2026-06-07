@@ -6679,6 +6679,16 @@ func (m *Manager) forceProjectDone() {
 	m.apReviewCount = 0
 	m.apMode = RoleModeIdle
 
+	// 发射角色状态为idle（解决前端状态灯残留问题）
+	if m.msgBus != nil {
+		m.msgBus.EmitState(RoleState{
+			Phase: "done",
+			PM:    "idle",
+			SE:    "idle",
+			AP:    "idle",
+		})
+	}
+
 	if m.ctx != nil {
 		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "completed"})
 	}

@@ -476,3 +476,235 @@ PathStatus 追踪 → 每秒几十条 status 事件进 pendingQueue
 | se_prompt.go 行数 | 2214 |
 | manager.go 行数 | 7435 |
 | PM 健康检测 | 连续失败≥3次(60s内) → 清理会话 |
+
+---
+
+## 五、三层环境防御体系 🆕 (2026-06-07)
+
+> **设计目标**: 解决 SE 执行时因缺少编译器/解释器导致的"静默失败"问题
+> **竞品参考**: Claude Code (`claude doctor` + cli-tools插件) / Cursor (MCP工具链声明)
+> **实现状态**: ✅ Layer 1+2 已完成，Layer 3 待用户确认
+
+### 5.1 问题背景
+
+**原始问题（2026-06-07 发现）：**
+
+```
+用户请求: "Write Rust program main.rs"
+  ↓
+PM 分析: 确认是编程任务，提取 .rs 扩展名
+  ↓
+SE 执行: write_file main.rs ✅ 成功
+  ↓
+SE 执行: exec 'rustc main.rs' ❌ 失败!
+  输出: 'rustc' 不是内部或外部命令
+  ↓
+Self-Fix 循环 (5次):
+  #1 API调用超时(120s) ← 浪费时间!
+  #2-5 circuit breaker open ← 全部失败!
+  ↓
+最终: phase:error, 用户等待 2 分钟后看到错误
+```
+
+**痛点分析：**
+
+| 痛点 | 影响 | 用户反馈 |
+|------|------|----------|
+| 缺少预检 | PM 明知缺 Rust 还让 SE 干活 | "为啥还让se干活呢？" |
+| 无安装提示 | 错误信息不友好 | "怎么久出错了 停了 不吭气了" |
+| Self-Fix浪费 | 5次重试 × 2分钟 = 10分钟浪费 | "等鸡毛呢" |
+| 状态灯残留 | error 后 PM 仍显示 busy | "pm显示忙碌呢" |
+
+### 5.2 三层架构设计
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 1: 预检 (Pre-Flight Check)                             │
+│ 触发时机: PM 分析完成后，SE 执行前                            │
+│ 核心逻辑: checkToolAvailability(detectedLang)                │
+│ 检测方式: where/which 命令查找编译器路径                      │
+│ 行为模式: 阻断式 — 缺失则暂停流程，询问用户                  │
+│                                                              │
+│ 支持语言映射表:                                               │
+│   go       → {go}                                           │
+│   python   → {python, python3}                              │
+│   rust     → {rustc, cargo}                                 │
+│   nodejs   → {node, npm}                                    │
+│   java     → {javac, java}                                  │
+│   c/c++    → {gcc, g++, clang}                              │
+│   ruby     → {ruby}                                         │
+│   php      → {php}                                          │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 2: 智能错误分类 (Smart Error Classification)            │
+│ 触发时机: SE exec 失败时                                     │
+│ 核心逻辑: classifyExecutionError()                          │
+│ 分类维度:                                                    │
+│   ErrorType (9种): syntax/runtime/test/import/type/...       │
+│   Category (3种): transient/fixable/permanent                │
+│ 新增检测: command not found / 不是内部或外部命令              │
+│ 行为模式: 结构化错误提示 + 安装指导                           │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 3: 自愈选项 (Auto-Recovery) [待实现]                   │
+│ 触发时机: 用户确认后                                         │
+│ 方案 A: 自动安装 (winget/brew/apt)                          │
+│ 方案 B: AI 重写任务为替代语言                                │
+│ 方案 C: 取消任务 + 清理资源                                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 5.3 实现细节
+
+#### 5.3.1 Layer 1: checkToolAvailability()
+
+**代码位置**: [argus.go:1042-1116](internal/core/argus.go#L1042-L1116)
+
+```go
+func (c *ArgusCore) checkToolAvailability(language string) (
+    available []string,   // 已安装的工具列表
+    missing   []string,   // 缺失的工具列表
+    hints     []string,   // 安装建议
+) {
+    // 1. 语言→工具映射表查询
+    // 2. 循环执行 where/which 检测每个工具
+    // 3. 缺失工具生成平台相关安装提示
+    // 4. 返回三元组供上层决策
+}
+```
+
+**关键设计决策：**
+
+| 决策点 | 选择 | 原因 |
+|--------|------|------|
+| 检测方式 | `where` (Windows) / `which` (Unix) | 跨平台兼容 |
+| 阻断 vs 警告 | **阻断式** (return result) | 避免 SE 无谓执行 |
+| 语言识别 | 文件扩展名匹配 (.go/.py/.rs) | PM 响应中包含文件名 |
+
+**实际输出示例（Rust 缺失时）：**
+
+```
+🛑 **环境阻断**: 目标语言 [rust] 缺少必要工具!
+
+❌ 缺失工具: rustc, cargo
+✅ 已有工具:
+
+**请选择处理方式:**
+1️⃣ 自动安装 (运行: winget install Rustlang.Rust.MSVC)
+2️⃣ 改用其他语言 (如Python/Go)
+3️⃣ 取消任务
+```
+
+#### 5.3.2 Layer 2: classifyExecutionError() 增强
+
+**新增环境检测分支**：
+
+```go
+if strings.Contains(errLower, "不是内部或外部命令") ||
+   strings.Contains(errLower, "not recognized") ||
+   strings.Contains(errLower, "command not found") {
+
+    cmdName := extractCommandName(errOutput)
+    installHint := getInstallHint(cmdName)
+
+    analysis = append(analysis, fmt.Sprintf(
+        "❌ MISSING COMPILER/RUNTIME: %s\n%s",
+        cmdName, installHint,
+    ))
+}
+```
+
+**支持的平台错误模式：**
+
+| 平台 | 错误特征 | 示例 |
+|------|----------|------|
+| Windows | `不是内部或外部命令` | `'rustc' 不是内部或外部命令` |
+| Unix | `command not found` | `bash: rustc: command not found` |
+
+#### 5.3.3 emitStatus() 状态修复
+
+**代码位置**: [argus.go:196-231](internal/core/argus.go#L196-L231)
+
+**问题**: 原实现在 `phase=error` 时只重置传入的 role：
+```
+emitStatus("error", "se", "idle")  → 只重置 SE, PM/AP 仍 busy!
+```
+
+**修复**: done/error 阶段**无条件重置所有角色**：
+
+```go
+if phase == "done" || phase == "error" {
+    c.state.PM = "idle"
+    c.state.SE = "idle"
+    c.state.AP = "idle"
+}
+```
+
+### 5.4 测试验证结果
+
+| 测试用例 | 预期行为 | 实际结果 | 状态 |
+|----------|----------|----------|------|
+| **Test 1: Rust (缺失)** | Layer 1 阻断 + 提示安装 | ✅ 检测到缺失并阻断 | ✅ 通过 |
+| **Test 2: Python (可用)** | 正常执行全流程 | ✅ 25秒完成全流程 | ✅ 通过 |
+| **状态灯重置** | done/error 后全部 idle | ✅ phase:done\|role:none\|status:idle | ✅ 修复 |
+
+**Test 2 日志时间线（25秒总耗时）：**
+
+```
+[01:48:35] USER: Test2: Write Python script hello_test2.py...
+[01:48:35] SYSTEM: phase:start|pm|busy
+[01:48:43] SE: ✅ write_file hello_test2.py (26 bytes)
+[01:48:44] SE: ✅ exec 'python hello_test2.py' → Hello from Test2!
+[01:48:44] SYSTEM: phase:review|pm|busy
+[01:48:54] PM: Code Review APPROVED
+[01:48:54] SYSTEM: phase:approve|ap|busy
+[01:49:00] AP: Approval PASSED
+[01:49:00] SYSTEM: phase:done|none|idle  ← 全部重置! ✅
+```
+
+### 5.5 与竞品对比
+
+| 能力 | Argus | Claude Code | Cursor | Windsurf |
+|------|-------|-------------|--------|----------|
+| **预检机制** | ✅ Layer 1 阻断式 | ⚠️ `/doctor` 手动 | ❌ 无 | ❌ 无 |
+| **自动安装** | 🔄 Layer 3 待实现 | ✅ cli-tools 插件 | ❌ 无 | ❌ 无 |
+| **语言切换建议** | ✅ 智能推荐 | ❌ 无 | ❌ 无 | ❌ 无 |
+| **状态灯同步** | ✅ 强制全量重置 | N/A (CLI) | ⚠️ 有时不同步 | ⚠️ 有时不同步 |
+
+**核心优势:**
+1. **唯一实现预检阻断的AI IDE**
+2. **智能语言推荐** — 检测已安装工具链并推荐替代方案
+3. **零等待体验** — 不浪费在注定失败的 Self-Fix 循环
+
+### 5.6 未来扩展路线图
+
+#### Phase 1: v1.0 (当前) — ✅ 已发布
+
+- [x] Layer 1: checkToolAvailability() 预检
+- [x] Layer 2: classifyExecutionError() 环境检测增强
+- [x] emitStatus() done/error 全量重置
+- [x] 阻断式用户交互（SSE消息 + 三选一）
+
+#### Phase 2: v1.1 — 自动安装集成
+
+- [ ] Windows winget / macOS brew / Linux apt 自动安装
+- [ ] 安装进度条 + 超时控制
+- [ ] 安装失败回退到 Layer 2 提示
+
+#### Phase 3: v1.2 — 智能语言切换
+
+- [ ] AI 自动重写任务为替代语言
+- [ ] 工具链依赖图（Node.js 项目需要 npm）
+- [ ] Docker/云端编译服务集成
+
+### 5.7 关键代码文件清单
+
+| 文件 | 功能 |
+|------|------|
+| [argus.go:196-231](internal/core/argus.go#L196-L231) | emitStatus() 状态管理修复 |
+| [argus.go:442-515](internal/core/argus.go#L442-L515) | Process() 中 Layer 1 预检集成 |
+| [argus.go:1042-1116](internal/core/argus.go#L1042-L1116) | checkToolAvailability() 工具检测 |
+| [App.vue](frontend/src/App.vue) | 前端 role-state 事件监听 |
+| [manager.go](internal/chat/manager.go) | forceProjectDone() 状态发射 |
+
+---
+
+## 六、优先修复路线图

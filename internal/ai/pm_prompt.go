@@ -5,9 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -25,6 +29,13 @@ const PMPrompt = `你是Argus的项目经理(PM)兼QA工程师。
 2. QA工程师（质量保证）：必须亲自验证SE的工作成果，不能轻信汇报！
 
 当前工作目录: %s
+
+🔑 **最高原则：不理解就问，绝不瞎猜！（优先级高于一切）**
+- 用户指令模糊、有歧义、有多种理解时 → **先 @USR，禁止猜一个意思直接@SE**
+- 不确定任务范围、方式、目标时 → **先用 list_files/web_search 了解现状**
+- 可以给用户选项：@USR 你的意思是 A)删除测试文件 B)整理代码结构 C)git clean？
+- 问清楚再安排，比你猜错后重来快 10 倍
+- **猜错的代价远大于多问一句的时间**
 
 ⚠️ 最高优先级规则（必须遵守）：
 - USR（用户）是最高决策者，所有指令必须听从
@@ -100,7 +111,19 @@ Message Source Identification (IMPORTANT):
    - ❌ 错误格式: "@USR @SE"、"@USR SE"、"@SE @USR"
    - ⚠️ **一个消息只能有一个@，且必须是@SE！**
    - 任务描述后面直接跟一行JSON启动SE
-4. 🆕 [FIX-20260529] **严格区分闲聊与任务：**
+4. 🆕 [FIX-20260607] **不会就问！不理解不瞎猜！（最高优先级规则）**
+   - ⚠️ 当用户指令**不明确、模糊、有多种理解**时：
+     - **绝对禁止自己猜测意图然后直接@SE** — 猜错代价巨大！
+     - **先 @USR 向用户确认**: 用简洁问题澄清 (如 "@USR 你说的'清理'是指删除测试文件，还是整理代码结构？")
+     - **可以用 web_search 工具搜索不理解的术语或任务**
+     - **可以用 list_files 工具先了解当前状态，再决定怎么做**
+   - ⚠️ 常见会误解的模糊指令举例：
+     - "清理" → 删除文件？整理代码？格式化？git clean？
+     - "改一下" → 改什么？怎么改？哪个文件？
+     - "检查" → 检查什么？编译？测试？安全？
+   - ✅ 正确流程：不理解 → @USR 确认 → 理解后 @SE 安排
+   - ❌ 错误流程：不理解 → 瞎猜 → @SE（浪费时间！）
+5. 🆕 [FIX-20260529] **严格区分闲聊与任务：**
    - ✅ 纯闲聊（天气/问候/闲扯）→ 直接回复@USR
    - ❌ **任何涉及以下关键词的请求，绝对禁止直接回复！必须@SE分配任务：**
      - 创建/新建/写/生成 文件 (create/make/write/generate file)
@@ -382,6 +405,78 @@ var PMTools = []Tool{
 					},
 				},
 				"required": []string{"id", "status"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "web_search",
+			Description: "搜索网络获取最新信息。当你遇到不理解的术语、技术概念、或者需要查文档、查最佳实践时使用。比如：'清理工作目录 最佳实践'、'go mod tidy vs clean'、'PowerShell批量删除文件通配符'等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "搜索查询语句",
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "fetch_url",
+			Description: "抓取URL内容。用于获取网页文档、API文档等详细资料。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "要抓取的URL地址",
+					},
+				},
+				"required": []string{"url"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "grep_content",
+			Description: "搜索文件内容（支持正则表达式）。在项目中搜索包含特定模式的文件，用于理解代码库结构、找函数定义、查引用等。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern": map[string]interface{}{
+						"type":        "string",
+						"description": "要搜索的正则表达式模式（如 'func.*Login'）",
+					},
+					"glob": map[string]interface{}{
+						"type":        "string",
+						"description": "文件筛选模式（如 '*.go'），可选",
+					},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "find_files",
+			Description: "按文件名模式查找文件（支持通配符如 **/*.go, src/**/*.ts）。用于了解项目中有哪些文件。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"pattern": map[string]interface{}{
+						"type":        "string",
+						"description": "文件名模式（如 '**/*.go', 'test_*.go'）",
+					},
+				},
+				"required": []string{"pattern"},
 			},
 		},
 	},
@@ -916,6 +1011,43 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			return fmt.Sprintf("待办 %s 状态已更新为 %s", args.ID, args.Status)
 		}
 		return "TODO功能未配置"
+	case "grep_content":
+		var args struct {
+			Pattern string `json:"pattern"`
+			Glob    string `json:"glob"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.Pattern == "" {
+			return "错误: pattern参数为空"
+		}
+		return pmGrep(p.workDir, args.Pattern, args.Glob)
+	case "find_files":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.Pattern == "" {
+			return "错误: pattern参数为空"
+		}
+		return pmGlob(p.workDir, args.Pattern)
+	case "web_search":
+		var args struct {
+			Query string `json:"query"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.Query == "" {
+			return "错误: query参数为空"
+		}
+		return pmWebSearch(args.Query)
+	case "fetch_url":
+		var args struct {
+			URL string `json:"url"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.URL == "" {
+			return "错误: url参数为空"
+		}
+		return pmWebFetch(args.URL)
 	default:
 		return fmt.Sprintf("未知工具: %s", name)
 	}
@@ -1084,4 +1216,279 @@ func (p *PMProcessor) HandleSEFailure(taskDesc, errorMsg string) (string, error)
 4. 给出新的任务计划（如果需要）`, taskDesc, errorMsg)
 
 	return p.client.Chat(p.getCtx(), prompt, "请分析失败原因并给出建议", p.ReplyLanguage)
+}
+
+// pmWebSearch PM可用的网络搜索（并行DuckDuckGo/Bing/Google）
+func pmWebSearch(query string) string {
+	client := &http.Client{Timeout: 15 * time.Second}
+	engines := []struct {
+		name string
+		url  string
+	}{
+		{"DuckDuckGo", fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(query))},
+		{"Bing", fmt.Sprintf("https://www.bing.com/search?q=%s", url.QueryEscape(query))},
+	}
+
+	type result struct {
+		name string
+		text string
+	}
+	ch := make(chan result, len(engines))
+
+	for _, eng := range engines {
+		go func(name, u string) {
+			text := fetchAndExtractText(client, u, name)
+			if text != "" {
+				ch <- result{name, text}
+			}
+		}(eng.name, eng.url)
+	}
+
+	timer := time.NewTimer(8 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case r := <-ch:
+		return fmt.Sprintf("🔍 搜索: %s (via %s)\n%s", query, r.name, r.text)
+	case <-timer.C:
+		return fmt.Sprintf("🔍 搜索: %s\n⚠️ 所有搜索引擎超时，建议用 fetch_url 直接访问文档URL", query)
+	}
+}
+
+// pmWebFetch PM可用的URL抓取
+func pmWebFetch(urlStr string) string {
+	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
+		return "错误: URL必须以 http:// 或 https:// 开头"
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, _ := http.NewRequest("GET", urlStr, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ArgusPM/1.0)")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Sprintf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 50000))
+	text := htmlToText(string(body))
+
+	if len(text) > 4000 {
+		text = text[:4000] + "\n...(truncated)"
+	}
+	return fmt.Sprintf("📄 %s (%d bytes)\n%s", urlStr, resp.StatusCode, text)
+}
+
+// fetchAndExtractText 抓取URL并提取纯文本
+func fetchAndExtractText(client *http.Client, urlStr, engineName string) string {
+	req, _ := http.NewRequest("GET", urlStr, nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ArgusPM/1.0)")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 50000))
+	text := htmlToText(string(body))
+
+	// 简单提取前几行有意义的内容
+	lines := strings.Split(text, "\n")
+	var meaningful []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len(line) > 20 && !strings.HasPrefix(line, "http") {
+			meaningful = append(meaningful, line)
+			if len(meaningful) >= 8 {
+				break
+			}
+		}
+	}
+	if len(meaningful) == 0 {
+		return ""
+	}
+	return strings.Join(meaningful, "\n")
+}
+
+// htmlToText 简单HTML→纯文本转换
+func htmlToText(html string) string {
+	// 移除script/style标签内容
+	re := regexp.MustCompile(`(?is)<(script|style|noscript)[^>]*>.*?</\1>`)
+	text := re.ReplaceAllString(html, "")
+
+	// 移除HTML标签
+	re = regexp.MustCompile(`<[^>]+>`)
+	text = re.ReplaceAllString(text, " ")
+
+	// 处理实体
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+
+	// 合并多余空白
+	re = regexp.MustCompile(`\s+`)
+	text = re.ReplaceAllString(text, " ")
+	text = strings.TrimSpace(text)
+
+	return text
+}
+
+// pmGrep PM可用的内容搜索（模仿Trae的Grep工具）
+func pmGrep(workDir, pattern, globPattern string) string {
+	// 构建ripgrep命令
+	args := []string{"-n", "--no-heading", "--color=never", "-e", pattern, workDir}
+	if globPattern != "" {
+		args = append(args, "--glob", globPattern)
+	}
+
+	cmd := exec.Command("rg", args...)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "HOME="+os.Getenv("USERPROFILE"))
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Start()
+	if err != nil {
+		// ripgrep不可用时，回退到Go原生实现
+		return pmGrepFallback(workDir, pattern, globPattern)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill()
+		return "搜索超时(10秒)"
+	case <-done:
+	}
+
+	output := stdout.String()
+	if output == "" && stderr.Len() > 0 {
+		return fmt.Sprintf("搜索出借: %s", stderr.String())
+	}
+	if output == "" {
+		return fmt.Sprintf("未找到匹配 '%s' 的内容", pattern)
+	}
+
+	// 限制输出行数
+	lines := strings.Split(output, "\n")
+	if len(lines) > 30 {
+		lines = lines[:30]
+		lines = append(lines, fmt.Sprintf("...(共%d行匹配，展示前30行)", len(strings.Split(output, "\n"))))
+	}
+
+	return fmt.Sprintf("搜索结果 (pattern=%s):\n%s", pattern, strings.Join(lines, "\n"))
+}
+
+// pmGrepFallback Go原生文件内容搜索（当ripgrep不可用时）
+func pmGrepFallback(workDir, pattern, globPattern string) string {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return fmt.Sprintf("正则表达式无效: %v", err)
+	}
+
+	var results []string
+	count := 0
+
+	filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.Contains(path, ".git") || strings.Contains(path, "node_modules") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if globPattern != "" {
+			matched, _ := filepath.Match(globPattern, info.Name())
+			// 也支持 **/*.go 风格简化为 *.go
+			if !matched && !strings.HasSuffix(globPattern, filepath.Ext(info.Name())) {
+				return nil
+			}
+		}
+		if count >= 30 {
+			return filepath.SkipAll
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		lines := strings.Split(string(content), "\n")
+		relPath, _ := filepath.Rel(workDir, path)
+		for i, line := range lines {
+			if re.MatchString(line) {
+				results = append(results, fmt.Sprintf("%s:%d: %s", relPath, i+1, strings.TrimSpace(line)))
+				count++
+				if count >= 30 {
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+
+	if len(results) == 0 {
+		return fmt.Sprintf("未找到匹配 '%s' 的内容", pattern)
+	}
+	return fmt.Sprintf("搜索结果 (pattern=%s):\n%s", pattern, strings.Join(results, "\n"))
+}
+
+// pmGlob PM可用的文件名模式查找
+func pmGlob(workDir, pattern string) string {
+	var results []string
+
+	// 处理 ** 递归通配
+	if strings.Contains(pattern, "**") {
+		parts := strings.SplitN(pattern, "**", 2)
+		prefix := strings.TrimSuffix(parts[0], "/")
+		suffix := strings.TrimPrefix(parts[1], "/")
+		searchRoot := filepath.Join(workDir, prefix)
+		filepath.Walk(searchRoot, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() && (info.Name() == ".git" || info.Name() == "node_modules") {
+				return filepath.SkipDir
+			}
+			if !info.IsDir() {
+				rel, _ := filepath.Rel(workDir, path)
+				if matched, _ := filepath.Match(suffix, info.Name()); matched || suffix == "*" || suffix == "*.*" {
+					if len(results) < 50 {
+						results = append(results, rel)
+					}
+				}
+			}
+			return nil
+		})
+	} else {
+		matches, _ := filepath.Glob(filepath.Join(workDir, pattern))
+		for _, m := range matches {
+			rel, _ := filepath.Rel(workDir, m)
+			results = append(results, rel)
+		}
+	}
+
+	if len(results) == 0 {
+		return fmt.Sprintf("未找到匹配 '%s' 的文件", pattern)
+	}
+
+	output := fmt.Sprintf("文件查找结果 (pattern=%s, 共%d个):\n", pattern, len(results))
+	for i, r := range results {
+		output += fmt.Sprintf("  %d. %s\n", i+1, r)
+		if i >= 50 {
+			output += fmt.Sprintf("  ...(还有%d个文件未显示)\n", len(results)-50)
+			break
+		}
+	}
+	return output
 }

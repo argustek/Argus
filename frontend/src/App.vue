@@ -1025,32 +1025,12 @@ onMounted(async () => {
     console.error(t('app.loadConfigFailed'), e)
   }
   
-  // LabVIEW式状态同步：以MessageBus事件为主，轮询为兜底
-  let lastStateUpdate = Date.now()
-  const STATE_STALE_MS = 3000
+  // LabVIEW式状态同步：统一使用MessageBus事件驱动（单线程模式可靠）
+  // 移除定时轮询：避免与role-state事件冲突导致状态闪烁/多灯同亮
+  // 后端通过emitStatus保证每个角色状态变更都会推送事件
 
-  setInterval(async () => {
-    try {
-      const stale = (Date.now() - lastStateUpdate) > STATE_STALE_MS
-      if (!stale) return
-
-      const pmThinking = await IsPMThinking()
-      const cRunning = await IsCRunning()
-      const seRunning = await IsSERunning()
-      const apThinking = await IsAPThinking()
-
-      aiStatus.pmStatus = pmThinking ? 'busy' : 'idle'
-      aiStatus.cRunning = cRunning
-      aiStatus.seStatus = seRunning ? 'busy' : 'idle'
-      aiStatus.apStatus = apThinking ? 'busy' : 'idle'
-      aiThinking.value = pmThinking || apThinking
-    } catch (e) {
-      console.error(t('app.checkAIStatusFailed'), e)
-    }
-  }, 1000)
-
-  // 暴露给 role-state 事件更新时间戳
-  ;(window as any).__stateUpdated = () => { lastStateUpdate = Date.now() }
+  // 暴露给 role-state 事件更新时间戳（保留用于调试）
+  ;(window as any).__stateUpdated = () => { /* 事件驱动模式，无需stale检测 */ }
 
   // 定期刷新 Git 状态计数
   setInterval(async () => {

@@ -236,8 +236,9 @@ type App struct {
 	emittedMsgIDs map[int64]bool
 
 	// SendMessage 并发保护
-	sendMu      sync.Mutex
-	isSending   bool
+	sendMu       sync.Mutex
+	isSending    bool
+	messageQueue []string // 排队消息
 }
 
 // ChangeRecord 改动记录
@@ -3134,8 +3135,11 @@ func (a *App) SetLang(lang string) {
 func (a *App) SendMessage(content string) error {
 	a.sendMu.Lock()
 	if a.isSending {
+		// 忙 → 排队，不拒绝
+		a.messageQueue = append(a.messageQueue, content)
 		a.sendMu.Unlock()
-		return fmt.Errorf("busy processing another message")
+		fmt.Printf("[SendMessage] 📥 排队: %s (队列长度=%d)\n", truncate(content, 50), len(a.messageQueue))
+		return nil
 	}
 	a.isSending = true
 	a.sendMu.Unlock()
@@ -3143,7 +3147,17 @@ func (a *App) SendMessage(content string) error {
 	defer func() {
 		a.sendMu.Lock()
 		a.isSending = false
+		// 消费队列中的下一条（在释放 isSending 之后）
+		next := ""
+		if len(a.messageQueue) > 0 {
+			next = a.messageQueue[0]
+			a.messageQueue = a.messageQueue[1:]
+		}
 		a.sendMu.Unlock()
+		if next != "" {
+			fmt.Printf("[SendMessage] 📤 从队列取出: %s (剩余%d条)\n", truncate(next, 50), len(a.messageQueue))
+			_ = a.SendMessage(next)
+		}
 	}()
 
 	a.writeDebugLog(fmt.Sprintf("[SendMessage] CALLED content=%s", truncate(content, 50)))

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -197,13 +199,22 @@ func (c *ArgusCore) emitStatus(phase, role, status string) {
 
 	c.state.Phase = phase
 	c.state.Task = phase
-	switch role {
-	case "pm":
-		c.state.PM = status
-	case "se":
-		c.state.SE = status
-	case "ap":
-		c.state.AP = status
+
+	// 🔧 关键修复：done/error阶段强制重置所有角色状态（无论传入的role是什么）
+	if phase == "done" || phase == "error" {
+		c.state.PM = "idle"
+		c.state.SE = "idle"
+		c.state.AP = "idle"
+	} else {
+		// 正常运行阶段：按角色单独设置
+		switch role {
+		case "pm":
+			c.state.PM = status
+		case "se":
+			c.state.SE = status
+		case "ap":
+			c.state.AP = status
+		}
 	}
 
 	statusStr := fmt.Sprintf("phase:%s|role:%s|status:%s", phase, role, status)
@@ -420,17 +431,26 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		return result
 	}
 
-	isProgramming, taskDesc := c.parsePMResponse(pmResponse)
 	c.memory.Add(RolePM, pmResponse)
 
 	displayText := c.extractDisplayText(pmResponse)
 	c.emit("pm_to_user", displayText)
 
-	if !isProgramming {
-		c.emitStatus("done", "none", "idle")
+	// PM 是聪明人，不是分类器。看 PM 的 @ 指令决定流向
+	hasSE := strings.Contains(pmResponse, "@SE")
+
+	if !hasSE {
+		if strings.Contains(pmResponse, "@USR") {
+			// PM 在问用户问题，别结束，等人回答
+			c.emitStatus("question", "none", "idle")
+		} else {
+			// 纯聊天 / 直接回答，完事
+			c.emitStatus("done", "none", "idle")
+		}
 		result.Success = true
 		return result
 	}
+	// PM 安排了工作，继续走 SE 流程
 
 	// 📋 TODO: PM分析完成，设置初始任务列表
 	c.todo.Clear()
@@ -443,15 +463,63 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	c.todo.UpdateByPhase("pipeline", TodoDone) // PM已完成
 	c.todo.MarkCurrentDoing() // 标记SE为doing
 
-	c.emit("pm_to_se", taskDesc)
+	// [Layer 1] 工具链预检：在SE执行前检测编译器/解释器是否可用
+	// 从PM响应中提取目标语言（基于文件扩展名）
+	var detectedLang string
+	for _, ext := range []string{".go", ".py", ".rs", ".js", ".ts", ".java", ".c", ".cpp"} {
+		if strings.Contains(pmResponse, ext) {
+			switch ext {
+				case ".go":
+					detectedLang = "go"
+				case ".py":
+					detectedLang = "python"
+				case ".rs":
+					detectedLang = "rust"
+				case ".js", ".ts":
+					detectedLang = "nodejs"
+				case ".java":
+					detectedLang = "java"
+				case ".c", ".cpp":
+					detectedLang = "c/c++"
+				}
+				break
+			}
+		}
+
+		if detectedLang != "" {
+			available, missing, hints := c.checkToolAvailability(detectedLang)
+			if len(missing) > 0 {
+				// 🔧 关键改进：检测到环境缺失时，暂停流程并询问用户
+				blockMsg := fmt.Sprintf("🛑 **环境阻断**: 目标语言 [%s] 缺少必要工具!\n\n❌ 缺失工具: %s\n✅ 已有工具: %s\n\n**请选择处理方式:**\n1️⃣ 自动安装 (运行: %s)\n2️⃣ 改用其他语言 (如Python/Go)\n3️⃣ 取消任务\n\n回复数字选择或输入新指令。",
+					detectedLang,
+					strings.Join(missing, ", "),
+					strings.Join(available, ", "),
+					strings.Join(hints, "\n   或 "))
+				c.emit("pm_to_user", blockMsg)
+				c.emitStatus("env-blocked", "none", "idle") // 特殊状态：环境阻断
+				result.Phases = append(result.Phases, PhaseResult{
+					Phase:    PhaseAnalyze,
+					Role:     RolePM,
+					Input:    userMsg,
+					Output:   blockMsg,
+					Raw:      blockMsg,
+					Duration: time.Since(totalStart),
+				})
+				return result // 🔑 阻断！不继续执行SE
+			} else {
+				fmt.Printf("[Core:EnvCheck] ✅ %s toolchain OK: %s\n", detectedLang, strings.Join(available, ", "))
+			}
+		}
+
+	c.emit("pm_to_se", pmResponse)
 	c.emitStatus("execute", "se", "busy")
 
 	seCtx := c.memory.FormatForPrompt()
-	seResponse, seErr := c.callAI(RoleSE, taskDesc, seCtx) // [REVERT] 恢复文本模式，Tool Call模式待完善
+	seResponse, seErr := c.callAI(RoleSE, pmResponse, seCtx)
 	phaseSE := PhaseResult{
 		Phase:    PhaseExecute,
 		Role:     RoleSE,
-		Input:    taskDesc,
+		Input:    pmResponse,
 		Output:   seResponse,
 		Raw:      seResponse,
 		Duration: 0,
@@ -541,9 +609,13 @@ Results:
 Task: %s
 
 COMMON FIXES:
-- Syntax error? Rewrite the COMPLETE file with correct Go syntax
+- Syntax error? Rewrite the COMPLETE file with correct syntax
 - Missing exec? Add {"type":"exec","command":"go run filename.go"}
 - Wrong path? Use relative path only (just filename, not full path)
+- **Compiler/Interpreter not found?** Check error message for "不是内部或外部命令" or "command not found"
+  - If Rust needed → suggest user install from https://rustup.rs/
+  - If Go/Python/Node available → switch language instead of retrying same command
+  - NEVER retry exec if compiler is missing (will fail 5 times uselessly)
 
 Output corrected JSON:
 {"actions":[...]}`, feedbackErr, actions, execResults, userMsg)
@@ -1032,6 +1104,72 @@ func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
 	return actions
 }
 
+// checkToolAvailability 检测工具链是否可用（Layer 1预检）
+// 返回：可用工具列表 + 缺失工具列表 + 安装建议
+func (c *ArgusCore) checkToolAvailability(language string) (available []string, missing []string, hints []string) {
+	// 常见语言→编译器/解释器映射
+	toolMap := map[string][]string{
+		"go":       {"go"},
+		"python":   {"python", "python3"},
+		"rust":     {"rustc", "cargo"},
+		"nodejs":   {"node", "npm"},
+		"java":     {"javac", "java"},
+		"c/c++":    {"gcc", "g++", "clang"},
+		"ruby":     {"ruby"},
+		"php":      {"php"},
+	}
+
+	lowerLang := strings.ToLower(language)
+	var tools []string
+	if toolsList, ok := toolMap[lowerLang]; ok {
+		tools = toolsList
+	} else {
+		// 未知语言，尝试从常见映射中查找
+		for lang, tl := range toolMap {
+			if strings.Contains(lowerLang, lang) || strings.Contains(lang, lowerLang) {
+				tools = tl
+				break
+			}
+		}
+	}
+
+	if len(tools) == 0 {
+		// 无法识别的语言，假设用户知道自己在做什么
+		return nil, nil, nil
+	}
+
+	for _, tool := range tools {
+		cmd := exec.Command("where", tool) // Windows
+		if runtime.GOOS != "windows" {
+			cmd = exec.Command("which", tool)
+		}
+		err := cmd.Run()
+		if err != nil {
+			missing = append(missing, tool)
+
+			// 生成安装提示
+			switch tool {
+			case "rustc", "cargo":
+				hints = append(hints, fmt.Sprintf("🔧 Install Rust: https://rustup.rs/ or `winget install Rustlang.Rust.MSVC`"))
+			case "go":
+				hints = append(hints, fmt.Sprintf("🔧 Install Go: https://go.dev/dl/ or `winget install GoLang.Go`"))
+			case "python", "python3":
+				hints = append(hints, fmt.Sprintf("🔧 Install Python: https://python.org or `winget install Python.Python.3.12`"))
+			case "node", "npm":
+				hints = append(hints, fmt.Sprintf("🔧 Install Node.js: https://nodejs.org or `winget install OpenJS.NodeJS`"))
+			case "gcc", "g++", "clang":
+				hints = append(hints, fmt.Sprintf("🔧 Install C/C++ compiler: Visual Studio Build Tools or MinGW-w64"))
+			default:
+				hints = append(hints, fmt.Sprintf("🔧 Install %s: check official website", tool))
+			}
+		} else {
+			available = append(available, tool)
+		}
+	}
+
+	return available, missing, hints
+}
+
 func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
 	if len(results) == 0 {
 		return false
@@ -1078,6 +1216,40 @@ func (c *ArgusCore) analyzeExecError(errMsg string) string {
 	}
 	if strings.Contains(errLower, "unknown action") || strings.Contains(errLower, "invalid action") {
 		analysis = append(analysis, "❌ Invalid JSON action format - check your actions structure")
+	}
+	// [P0] 环境检测：编译器/解释器未安装
+	if strings.Contains(errLower, "不是内部或外部命令") ||
+		strings.Contains(errLower, "not recognized") ||
+		strings.Contains(errLower, "command not found") ||
+		strings.Contains(errLower, "no such file or directory") {
+
+		// 提取缺失的命令名
+		cmdName := ""
+		if idx := strings.Index(errLower, "'"); idx != -1 {
+			endIdx := strings.Index(errLower[idx+1:], "'")
+			if endIdx != -1 {
+				cmdName = errLower[idx+1 : idx+1+endIdx]
+			}
+		}
+
+		var installHint string
+		switch cmdName {
+		case "rustc", "cargo":
+			installHint = "🔧 Install Rust: https://rustup.rs/ or `winget install Rustlang.Rust.MSVC`"
+		case "go":
+			installHint = "🔧 Install Go: https://go.dev/dl/ or `winget install GoLang.Go`"
+		case "python", "python3", "pip":
+			installHint = "🔧 Install Python: https://python.org or `winget install Python.Python.3.12`"
+		case "node", "npm":
+			installHint = "🔧 Install Node.js: https://nodejs.org or `winget install OpenJS.NodeJS`"
+		case "gcc", "g++", "clang", "make":
+			installHint = "🔧 Install C/C++ compiler: Visual Studio Build Tools or MinGW-w64"
+		default:
+			installHint = fmt.Sprintf("🔧 Install required tool: %s", cmdName)
+		}
+
+		analysis = append(analysis, fmt.Sprintf("❌ MISSING COMPILER/RUNTIME: %s\n%s", cmdName, installHint))
+		analysis = append(analysis, "💡 Suggestion: Switch to an available language (Go/Python/Node.js) OR install the missing tool")
 	}
 
 	if len(analysis) == 0 {
@@ -1466,6 +1638,23 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 					output += "\n  - " + f.Path
 				}
 			}
+		case "delete_file":
+			err = c.executor.DeleteFile(action.Path)
+			if err == nil {
+				output = fmt.Sprintf("✅ delete_file %s", action.Path)
+			} else {
+				output = fmt.Sprintf("❌ delete_file %s error: %v", action.Path, err)
+			}
+		case "list_files":
+			files, listErr := c.executor.ListFiles()
+			if listErr != nil {
+				output = fmt.Sprintf("❌ list_files error: %v", listErr)
+			} else {
+				output = fmt.Sprintf("📁 %d files:\n", len(files))
+				for _, f := range files {
+					output += fmt.Sprintf("  %s (%d bytes)\n", f.Path, f.Size)
+				}
+			}
 		default:
 			err = fmt.Errorf("unknown action type: %s", action.Type)
 			output = fmt.Sprintf("❌ unknown action: %s", action.Type)
@@ -1516,16 +1705,17 @@ func (c *ArgusCore) extractDisplayText(response string) string {
 		if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "```json") || strings.Contains(line, `"is_programming"`) || strings.Contains(line, `"task":`) {
 			continue
 		}
-		if strings.HasPrefix(line, "@") {
-			continue
+		if strings.HasPrefix(line, "@SE") {
+			continue // SE指令不显示给用户
+		}
+		if strings.HasPrefix(line, "@USR") {
+			// 保留 @USR 后面的用户可见内容
+			line = strings.TrimSpace(strings.TrimPrefix(line, "@USR"))
 		}
 		if strings.HasPrefix(line, "```") {
 			continue
 		}
 		displayLines = append(displayLines, line)
-		if len(displayLines) >= 3 {
-			break
-		}
 	}
 	return strings.Join(displayLines, "\n")
 }
