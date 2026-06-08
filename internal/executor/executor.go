@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -11,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -1090,10 +1093,16 @@ type TestConfig struct {
 }
 
 type TestCase struct {
-	Name     string `json:"name"`     // 测试名（如 TestEditFile_BasicReplace）
-	Status   string `json:"status"`   // pass / fail / skip / panic
-	Duration string `json:"duration"` // 耗时（如 "0.05s"）
-	Error    string `json:"error,omitempty"` // 失败时的错误信息
+	Name          string `json:"name"`            // 测试名（如 TestEditFile_BasicReplace）
+	Status        string `json:"status"`          // pass / fail / skip / panic
+	Duration      string `json:"duration"`        // 耗时（如 "0.05s"）
+	Error         string `json:"error,omitempty"` // 失败时的完整错误信息
+	// [v0.7.1] JSON 解析增强字段
+	File          string `json:"file,omitempty"`          // 失败所在文件（从 output 行提取）
+	Line          int    `json:"line,omitempty"`          // 失败所在行号
+	Expected      string `json:"expected,omitempty"`      // 期望值（从断言提取）
+	Actual        string `json:"actual,omitempty"`        // 实际值（从断言提取）
+	AssertionType string `json:"assertion_type,omitempty"` // 断言类型（Equal/NotEqual/True/False/Nil/NotNil 等）
 }
 
 type TestReport struct {
@@ -1118,6 +1127,8 @@ func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
 		config.Timeout = 60
 	}
 	args = append(args, fmt.Sprintf("-timeout=%ds", config.Timeout))
+	// [v0.7.1] 优先使用 JSON 模式获取结构化输出
+	args = append(args, "-json")
 	if config.Verbose {
 		args = append(args, "-v")
 	}
@@ -1133,7 +1144,8 @@ func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = e.workDir
 	output, err := cmd.CombinedOutput()
-	report.Output = strings.TrimSpace(toUTF8(output))
+	rawOutput := strings.TrimSpace(toUTF8(output))
+	report.Output = rawOutput
 
 	if err != nil {
 		fmt.Printf("[Executor] RunTests ❌ exit=%d\n", 1)
@@ -1141,7 +1153,15 @@ func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
 		fmt.Printf("[Executor] RunTests ✅ (output %d chars)\n", len(report.Output))
 	}
 
-	report.Cases = parseGoTestOutput(report.Output)
+	// [v0.7.1] 优先尝试 JSON 解析，失败则回退到文本正则解析
+	jsonCases := parseGoTestJSONOutput(rawOutput)
+	if len(jsonCases) > 0 {
+		report.Cases = jsonCases
+		fmt.Printf("[Executor] RunTests JSON 解析成功: %d 个用例\n", len(jsonCases))
+	} else {
+		report.Cases = parseGoTestOutput(rawOutput)
+		fmt.Printf("[Executor] RunTests 回退到文本解析: %d 个用例\n", len(report.Cases))
+	}
 	for _, tc := range report.Cases {
 		switch tc.Status {
 		case "pass":
@@ -1224,6 +1244,142 @@ func parseGoTestOutput(output string) []TestCase {
 		}
 
 		cases = append(cases, tc)
+	}
+
+	return cases
+}
+
+// [v0.7.1] goTestJSONEvent go test -json 输出的单条事件
+type goTestJSONEvent struct {
+	Time    string `json:"Time"`              // ISO 时间戳
+	Action  string `json:"Action"`            // run/pass/fail/skip/panic/output/cont
+	Package string `json:"Package"`           // 包路径
+	Test    string `json:"Test"`             // 测试名（空=包级别事件）
+	Elapsed float64 `json:"Elapsed,omitempty"` // 耗时（秒）
+	Output  string `json:"Output,omitempty"`  // 输出文本
+}
+
+// parseGoTestAssertion 从测试失败输出中提取断言信息
+// 匹配模式: "Error: expected <200> got <401>" / "Expected: X, Got: Y" 等
+func parseGoTestAssertion(output string) (expected, actual, assertionType string) {
+	// 标准库 testing.T.Errorf / Errorf 模式
+	patterns := []struct {
+		re       *regexp.Regexp
+		expIdx   int
+		actIdx   int
+		typeName string
+	}{
+		// "expected <X>, got <Y>" / "Expected <X>, got <Y>"
+		{regexp.MustCompile(`(?i)(?:expected|期望)[s]?\s*[:=<]\s*(.+?)\s*,\s*(?:got|实际|but got)[:\s<]+(.+)`), 1, 2, "Equal"},
+		// "want <X>, got <Y>"
+		{regexp.MustCompile(`(?i)want[s]?\s*[:=]\s*(.+?)\s*,\s*got\s*[:=]\s*(.+)`), 1, 2, "Equal"},
+		// "<X> != <Y>" / "<X> ≠ <Y>"
+		{regexp.MustCompile(`(.+?)\s*[!≠!=]+\s*(.+)`), 1, 2, "NotEqual"},
+		// "should be <X>" / "should equal <X>"
+		{regexp.MustCompile(`(?i)should\s+(?:be|equal)\s*[:=\s<]*(.+)`), 1, -1, "True"},
+		// "nil" / "not nil"
+		{regexp.MustCompile(`(?i)(?:expected\s+)?(nil|null)\s*,\s*(?:got\s+)?(?:non[- ]?nil|not nil|non-null)`), 1, -1, "Nil"},
+		{regexp.MustCompile(`(?i)(?:got\s+)?(nil|null)\s*,\s*(?:expected\s+)?(?:non[- ]?nil|not nil)`), -1, 1, "NotNil"},
+	}
+
+	for _, p := range patterns {
+		m := p.re.FindStringSubmatch(output)
+		if m != nil {
+			if p.expIdx > 0 && len(m) > p.expIdx {
+				expected = strings.TrimSpace(m[p.expIdx])
+			}
+			if p.actIdx > 0 && len(m) > p.actIdx {
+				actual = strings.TrimSpace(m[p.actIdx])
+			}
+			assertionType = p.typeName
+			return
+		}
+	}
+	return
+}
+
+// extractFileLineFromTestOutput 从测试输出中提取文件:行号
+func extractFileLineFromTestOutput(output string) (file string, line int) {
+	// Go 测试输出格式: "    main_test.go:23: Expected <200>, got <401>"
+	// 或: "    /path/to/file_test.go:45: some error"
+	re := regexp.MustCompile(`(\S+\.go):(\d+):`)
+	m := re.FindStringSubmatch(output)
+	if len(m) == 3 {
+		file = m[1]
+		line, _ = strconv.Atoi(m[2])
+	}
+	return
+}
+
+// parseGoTestJSONOutput 解析 go test -json 的 NDJSON 输出
+// 返回结构化的 TestCase 列表，包含 expected/actual/assertion_type/file/line
+func parseGoTestJSONOutput(rawOutput string) []TestCase {
+	cases := make([]TestCase, 0)
+
+	// 按 test 名跟踪当前正在解析的用例
+	type testState struct {
+		name   string
+		output strings.Builder // 收集该测试的所有 output 行
+	}
+	active := make(map[string]*testState)
+
+	scanner := bufio.NewScanner(strings.NewReader(rawOutput))
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		var evt goTestJSONEvent
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue // 跳过非 JSON 行（可能是混合 -v 输出的前缀）
+		}
+
+		switch evt.Action {
+		case "run":
+			// 新测试开始
+			active[evt.Test] = &testState{name: evt.Test}
+
+		case "output":
+			// 收集 output 行（含错误详情）
+			if state, ok := active[evt.Test]; ok && evt.Test != "" {
+				state.output.WriteString(evt.Output)
+				state.output.WriteString("\n")
+			}
+
+		case "pass", "fail", "skip", "panic":
+			state, ok := active[evt.Test]
+			if !ok || evt.Test == "" {
+				break
+			}
+
+			tc := TestCase{
+				Name:     evt.Test,
+				Status:   evt.Action,
+				Duration: fmt.Sprintf("%.3fs", evt.Elapsed),
+			}
+
+			// 对失败的测试，从收集的 output 中提取结构化信息
+			if evt.Action == "fail" || evt.Action == "panic" {
+				errOutput := state.output.String()
+				tc.Error = strings.TrimSpace(errOutput)
+
+				// 提取文件和行号
+				f, l := extractFileLineFromTestOutput(errOutput)
+				tc.File = f
+				tc.Line = l
+
+				// 提取断言信息
+				exp, act, atype := parseGoTestAssertion(errOutput)
+				tc.Expected = exp
+				tc.Actual = act
+				tc.AssertionType = atype
+			}
+
+			cases = append(cases, tc)
+			delete(active, evt.Test) // 清理已完成的测试
+		}
 	}
 
 	return cases
