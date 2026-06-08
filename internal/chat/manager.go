@@ -19,6 +19,7 @@ import (
 	"argus/internal/dingtalk"
 	"argus/internal/executor"
 	"argus/internal/i18n"
+	"argus/internal/mcp"
 	"argus/internal/monitor"
 	"argus/internal/task"
 	"argus/internal/types"
@@ -84,6 +85,11 @@ func (m *Manager) isDingTalkEnabled() bool {
 func (m *Manager) SetDingTalkEnabled(enabled bool) {
 	fmt.Fprintln(os.Stderr, "[dingtalk] SetDingTalkEnabled:", m.dingTalkEnabled, "->", enabled)
 	m.dingTalkEnabled = enabled
+}
+
+// [v0.7.1] SetMCPManager 设置 MCP Manager（供 App 初始化后注入）
+func (m *Manager) SetMCPManager(mgr *mcp.Manager) {
+	m.mcpManager = mgr
 }
 
 func (m *Manager) sendToDingTalk(msg string) {
@@ -216,6 +222,11 @@ type Manager struct {
 
 	richBuilder *RichMessageBuilder
 	msgBus      *MessageBus // [G63] MessageBus双向消息总线（前后一致性保障）
+
+	// [v0.7.1] MCP Manager（SE 工具桥接用）
+	mcpManager interface {
+		CallTool(serverName, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error)
+	}
 }
 
 type TodoItem struct {
@@ -1056,7 +1067,9 @@ func (m *Manager) injectTimeContext() {
 		return
 	}
 
-	ctx := monitor.GenerateTimeContext(lastTime)
+	firstTime, _ := m.cMonitor.GetFirstInteractionTime() // 可能为 0（首次交互时）
+
+	ctx := monitor.GenerateTimeContext(lastTime, firstTime)
 
 	timeInfo := fmt.Sprintf(`## ⏰ 时间感知（重要！）
 当前时间: %s
@@ -4114,7 +4127,14 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					} else if tc.Status == "skip" {
 						icon = "⏭️"
 					}
-					resultMsg += fmt.Sprintf("  %s %s (%s)\n", icon, tc.Name, tc.Duration)
+					resultMsg += fmt.Sprintf("  %s %s (%s)", icon, tc.Name, tc.Duration)
+
+					// [v0.7.1] 结构化失败信息
+					if (tc.Status == "fail" || tc.Status == "panic") && tc.File != "" {
+						resultMsg += fmt.Sprintf(" [%s:%d]", tc.File, tc.Line)
+					}
+					resultMsg += "\n"
+
 					if tc.Error != "" {
 						errLines := strings.Split(tc.Error, "\n")
 						if len(errLines) > 3 {
@@ -4124,6 +4144,18 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 								resultMsg += fmt.Sprintf("      %s\n", el)
 							}
 						}
+					}
+
+					// [v0.7.1] 显示断言详情
+					if tc.AssertionType != "" {
+						resultMsg += fmt.Sprintf("      断言: %s", tc.AssertionType)
+						if tc.Expected != "" {
+							resultMsg += fmt.Sprintf(" | 期望: %s", tc.Expected)
+						}
+						if tc.Actual != "" {
+							resultMsg += fmt.Sprintf(" | 实际: %s", tc.Actual)
+						}
+						resultMsg += "\n"
 					}
 				}
 			}
@@ -4860,6 +4892,55 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			})
 
 		default:
+			// [v0.7.1] MCP 工具桥接：mcp__serverName__toolName 格式
+			if strings.HasPrefix(action.Type, "mcp__") && m.mcpManager != nil {
+				parts := strings.SplitN(strings.TrimPrefix(action.Type, "mcp__"), "__", 2)
+				if len(parts) == 2 {
+					serverName, toolName := parts[0], parts[1]
+					// 从 Command 字段解析 JSON 参数
+					var args map[string]interface{}
+					if action.Command != "" {
+						json.Unmarshal([]byte(action.Command), &args)
+					}
+					mcpResult, mcpErr := m.mcpManager.CallTool(serverName, toolName, args)
+					if mcpErr != nil {
+						mcpResultMsg := fmt.Sprintf("❌ MCP [%s:%s] 失败: %v\n", serverName, toolName, mcpErr)
+						m.seProcessor.AddResult(mcpResultMsg)
+						m.emitWailsEvent("exec_done", map[string]interface{}{
+							"executor": "se", "index": i + 1, "type": "mcp_call",
+							"label": fmt.Sprintf("MCP: %s.%s", serverName, toolName),
+							"status": "error",
+							"error":   mcpErr.Error(),
+						})
+					} else {
+						var textParts []string
+						for _, block := range mcpResult.Content {
+							if block.Type == "text" && block.Text != "" {
+								textParts = append(textParts, block.Text)
+							}
+						}
+						icon := "✅"
+						if mcpResult.IsError {
+							icon = "⚠️"
+						}
+						mcpResultMsg := fmt.Sprintf("%s MCP [%s:%s]\n", icon, serverName, toolName)
+						for _, t := range textParts {
+							// 截断超长输出
+							if len(t) > 2000 {
+								t = t[:2000] + "... (truncated)"
+							}
+							mcpResultMsg += fmt.Sprintf("  %s\n", t)
+						}
+						m.seProcessor.AddResult(mcpResultMsg)
+						m.emitWailsEvent("exec_done", map[string]interface{}{
+							"executor": "se", "index": i + 1, "type": "mcp_call",
+							"label": fmt.Sprintf("MCP: %s.%s", serverName, toolName),
+							"status": func() string { if mcpResult.IsError { return "error" }; return "done" }(),
+						})
+					}
+					break // 跳出 switch，继续下一个 action
+				}
+			}
 			return fmt.Errorf("unknown action type: %s", action.Type)
 		}
 		

@@ -46,10 +46,20 @@
             @keydown.enter="sendCommand"
             @keydown.up.prevent="historyUp"
             @keydown.down.prevent="historyDown"
+            @keydown.tab.prevent="handleTabComplete"
             @focus="onInputFocus"
             @blur="onInputBlur"
           />
         </div>
+      </div>
+      <!-- Tab 补全候选列表 -->
+      <div v-show="tabCandidates.length > 0" class="tab-complete-dropdown">
+        <div
+          v-for="(cand, idx) in tabCandidates"
+          :key="idx"
+          :class="['tab-candidate', { active: tabCandidateIdx === idx }]"
+          @mousedown.prevent="selectTabCandidate(idx)"
+        >{{ cand }}</div>
       </div>
     </div>
 
@@ -118,6 +128,11 @@ const defaultEncoding = locale.value.startsWith('zh') ? 'gbk' : 'utf-8'
 const encoding = ref(defaultEncoding)
 let autoScrollEnabled = true
 let lastCommand = ''
+
+// [v0.7.1] Tab 补全状态
+const tabCandidates = ref<string[]>([])
+const tabCandidateIdx = ref(0)
+let tabCycleIndex = 0 // Tab 循环索引（多次按 Tab 切换候选）
 
 let outputBuffer = ''
 let bufferTimer: ReturnType<typeof setTimeout> | null = null
@@ -251,7 +266,10 @@ function closeTab(tabId: string) {
 
 async function sendCommand() {
   const cmd = currentInput.value.trim()
-  if (!cmd) {
+  // 重置 Tab 补全
+  tabCandidates.value = []
+  tabCycleIndex = 0
+  if (cmd == '') {
     WriteToTerminal('\r\n').catch(() => {})
     currentInput.value = ''
     return
@@ -297,6 +315,38 @@ function historyDown() {
     data.historyIndex = data.history.length
     currentInput.value = ''
   }
+}
+
+// [v0.7.1] Tab 补全
+async function handleTabComplete() {
+  try {
+    const resp = await fetch(`/api/v1/tool/tab-complete?input=${encodeURIComponent(currentInput.value)}`)
+    const data = await resp.json()
+    const candidates: string[] = data.candidates || []
+    if (candidates.length === 0) {
+      tabCandidates.value = []
+      return
+    }
+    // 首次按 Tab 或新输入：显示候选列表
+    if (tabCandidates.value.length === 0 || tabCycleIndex === 0) {
+      tabCandidates.value = candidates
+      tabCycleIndex = 0
+    }
+    tabCycleIndex++
+    // 循环选择候选
+    tabCandidateIdx.value = (tabCycleIndex - 1) % candidates.length
+    currentInput.value = candidates[tabCandidateIdx.value]
+  } catch {
+    tabCandidates.value = []
+  }
+}
+
+function selectTabCandidate(idx: number) {
+  tabCandidateIdx.value = idx
+  currentInput.value = tabCandidates.value[idx]
+  tabCandidates.value = []
+  tabCycleIndex = 0
+  inputRef.value?.focus()
 }
 
 let selectionActive = false
@@ -601,6 +651,7 @@ onUnmounted(() => {
   align-items: center;
   min-height: 20px;
   margin-top: 2px;
+  position: relative; /* [v0.7.1] Tab 补全下拉定位 */
 }
 
 .prompt-text {
@@ -676,5 +727,34 @@ onUnmounted(() => {
   height: 1px;
   background: #444;
   margin: 4px 8px;
+}
+
+/* [v0.7.1] Tab 补全候选列表 */
+.tab-complete-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.tab-candidate {
+  padding: 5px 12px;
+  font-size: 13px;
+  color: #d4d4d4;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+}
+.tab-candidate:hover, .tab-candidate.active {
+  background: #094771;
+  color: #fff;
 }
 </style>

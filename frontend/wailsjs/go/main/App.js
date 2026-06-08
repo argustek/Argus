@@ -170,6 +170,10 @@ export function GetLogs() {
   return window['go']['main']['App']['GetLogs']();
 }
 
+export function GetMCPManager() {
+  return window['go']['main']['App']['GetMCPManager']();
+}
+
 export function GetMessageBusLost() {
   return window['go']['main']['App']['GetMessageBusLost']();
 }
@@ -480,6 +484,10 @@ export function SwitchBranch(arg1) {
 
 export function SwitchTerminalSession(arg1) {
   return window['go']['main']['App']['SwitchTerminalSession'](arg1);
+}
+
+export function TerminalTabComplete(arg1) {
+  return window['go']['main']['App']['TerminalTabComplete'](arg1);
 }
 
 export function TestAPIConfig(arg1, arg2, arg3, arg4) {

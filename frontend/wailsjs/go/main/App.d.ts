@@ -3,6 +3,7 @@
 import {main} from '../models';
 import {git} from '../models';
 import {types} from '../models';
+import {mcp} from '../models';
 import {context} from '../models';
 
 export function AckMessage(arg1:string):Promise<boolean>;
@@ -88,6 +89,8 @@ export function GetGitStatus():Promise<Array<main.GitStatusEntry>>;
 export function GetGlobalTasks():Promise<string>;
 
 export function GetLogs():Promise<Array<string>>;
+
+export function GetMCPManager():Promise<mcp.Manager>;
 
 export function GetMessageBusLost():Promise<Array<Record<string, any>>>;
 
@@ -244,6 +247,8 @@ export function SwitchAPIConfig(arg1:string):Promise<void>;
 export function SwitchBranch(arg1:string):Promise<void>;
 
 export function SwitchTerminalSession(arg1:string):Promise<void>;
+
+export function TerminalTabComplete(arg1:string):Promise<Array<string>>;
 
 export function TestAPIConfig(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.APITestResult>;
 

@@ -330,6 +330,7 @@ export namespace main {
 	    seConfigId?: string;
 	    apConfigId?: string;
 	    useSeparateModels: boolean;
+	    mcpServers?: types.MCPServerConfig[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -352,6 +353,7 @@ export namespace main {
 	        this.seConfigId = source["seConfigId"];
 	        this.apConfigId = source["apConfigId"];
 	        this.useSeparateModels = source["useSeparateModels"];
+	        this.mcpServers = this.convertValues(source["mcpServers"], types.MCPServerConfig);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -530,6 +532,23 @@ export namespace main {
 	        this.total = source["total"];
 	        this.failed = source["failed"];
 	        this.errors = source["errors"];
+	    }
+	}
+
+}
+
+export namespace mcp {
+	
+	export class Manager {
+	
+	
+	    static createFrom(source: any = {}) {
+	        return new Manager(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	
 	    }
 	}
 
@@ -778,6 +797,28 @@ export namespace types {
 		    }
 		    return a;
 		}
+	}
+	export class MCPServerConfig {
+	    Name: string;
+	    Command: string;
+	    Args: string[];
+	    Env: Record<string, string>;
+	    Enabled: boolean;
+	    Description: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPServerConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Name = source["Name"];
+	        this.Command = source["Command"];
+	        this.Args = source["Args"];
+	        this.Env = source["Env"];
+	        this.Enabled = source["Enabled"];
+	        this.Description = source["Description"];
+	    }
 	}
 	export class PathRule {
 	    path_pattern: string;

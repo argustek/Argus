@@ -753,6 +753,10 @@ func (c *CMonitor) SaveLastInteractionTime(t int64) error {
 	}
 
 	state.LastInteractionTime = t
+	// 首次交互：记录首次时间（只设置一次，之后不再覆盖）
+	if state.FirstInteractionTime == 0 {
+		state.FirstInteractionTime = t
+	}
 	return c.writeStateLocked(state)
 }
 
@@ -767,6 +771,19 @@ func (c *CMonitor) GetLastInteractionTime() (int64, error) {
 	}
 
 	return state.LastInteractionTime, nil
+}
+
+// GetFirstInteractionTime 获取首次交互时间（用于计算"认识多久了"）
+func (c *CMonitor) GetFirstInteractionTime() (int64, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	state, err := c.readState()
+	if err != nil {
+		return 0, err
+	}
+
+	return state.FirstInteractionTime, nil
 }
 
 // SetTimeChecker 设置时间检查器回调

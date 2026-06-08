@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +28,12 @@ type ShellSession struct {
 	stopCh       chan struct{}
 	lastActive   time.Time // 最后活跃时间，用于空闲清理
 	idleTimeout  time.Duration // 空闲超时，默认60秒
+
+	// [v0.7.1] 命令历史
+	history      []string          // 环形缓冲区，最近执行的命令
+	historyPos   int               // 写入位置（环形）
+	historyCount int               // 已存储的命令总数（用于判断是否填满）
+	historyMax   int               // 最大历史条数（默认 500）
 }
 
 // NewShellSession 创建持久化 shell 会话
@@ -38,6 +45,8 @@ func NewShellSession(workDir string) (*ShellSession, error) {
 		stopCh:      make(chan struct{}),
 		idleTimeout: 60 * time.Second,
 		lastActive:  time.Now(),
+		historyMax:  500,
+		history:     make([]string, 500), // 预分配环形缓冲区
 	}
 
 	if err := ss.start(); err != nil {
@@ -138,6 +147,9 @@ func (ss *ShellSession) Exec(command string, timeout time.Duration) (string, err
 	if command == "" {
 		return "", nil
 	}
+
+	// [v0.7.1] 记录命令历史（跳过纯空行和重复的连续命令）
+	ss.appendToHistory(command)
 
 	// 跟踪 cd 命令更新工作目录
 	if strings.HasPrefix(strings.ToLower(command), "cd ") || strings.HasPrefix(strings.ToLower(command), "cd/") || strings.HasPrefix(strings.ToLower(command), "chdir ") {
@@ -323,4 +335,231 @@ func (ss *ShellSession) SetIdleTimeout(d time.Duration) {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.idleTimeout = d
+}
+
+// ========== [v0.7.1] 命令历史 ==========
+
+// appendToHistory 追加命令到历史环形缓冲区（需持有锁）
+func (ss *ShellSession) appendToHistory(cmd string) {
+	// 跳过空命令和与上一条完全相同的连续重复
+	if cmd == "" {
+		return
+	}
+	if ss.historyCount > 0 {
+		lastIdx := (ss.historyPos - 1 + ss.historyMax) % ss.historyMax
+		if ss.history[lastIdx] == cmd {
+			return // 跳过连续重复
+		}
+	}
+
+	ss.history[ss.historyPos] = cmd
+	ss.historyPos = (ss.historyPos + 1) % ss.historyMax
+	if ss.historyCount < ss.historyMax {
+		ss.historyCount++
+	}
+}
+
+// History 返回最近的 n 条命令（最多 n 条，按时间倒序，最新的在前）
+func (ss *ShellSession) History(n int) []string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	if n <= 0 || ss.historyCount == 0 {
+		return []string{}
+	}
+	if n > ss.historyCount {
+		n = ss.historyCount
+	}
+
+	result := make([]string, n)
+	for i := 0; i < n; i++ {
+		// 从最新往回走：historyPos-1 是最近一条，再往前走 i 条
+		idx := (ss.historyPos - 1 - i + ss.historyMax) % ss.historyMax
+		result[i] = ss.history[idx]
+	}
+	return result
+}
+
+// HistoryCount 返回历史中的总命令数
+func (ss *ShellSession) HistoryCount() int {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.historyCount
+}
+
+// SearchHistory 反向搜索历史命令（类似 Ctrl+R）
+// 返回匹配 query 的命令列表（倒序，最近的在前），limit 限制返回条数
+func (ss *ShellSession) SearchHistory(query string, limit int) []string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	if query == "" || ss.historyCount == 0 {
+		return []string{}
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	query = strings.ToLower(query)
+	var results []string
+
+	// 从最新向最旧遍历
+	for i := 0; i < ss.historyCount; i++ {
+		idx := (ss.historyPos - 1 - i + ss.historyMax) % ss.historyMax
+		cmd := ss.history[idx]
+		if strings.Contains(strings.ToLower(cmd), query) {
+			results = append(results, cmd)
+			if len(results) >= limit {
+				break
+			}
+		}
+	}
+	return results
+}
+
+// [v0.7.1] TabComplete 根据输入的前缀返回补全候选列表
+// 支持: 文件路径补全、命令名补全、目录补全
+func (ss *ShellSession) TabComplete(input string) []string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ss.completeCommands("") // 空输入 → 列出常用命令
+	}
+
+	// 提取最后一个词作为补全前缀（处理空格分隔）
+	lastWord := input
+	if idx := strings.LastIndex(input, " "); idx >= 0 {
+		lastWord = input[idx+1:]
+	}
+
+	// 判断是路径补全还是命令补全
+	// 有空格 → 参数位置，优先路径补全
+	hasSpace := strings.LastIndex(input, " ") >= 0
+	if hasSpace || strings.Contains(lastWord, "\\") || strings.Contains(lastWord, "/") ||
+		strings.Contains(lastWord, ".") || lastWord == "" {
+		return ss.completePath(input, lastWord)
+	}
+	return ss.completeCommand(input, lastWord)
+}
+
+// completeCommands 返回可用命令列表（无前缀时调用）
+func (ss *ShellSession) completeCommands(prefix string) []string {
+	var results []string
+
+	// 常用 Windows 命令白名单
+	commonCmds := []string{
+		"dir", "cd", "cls", "type", "copy", "move", "del", "mkdir", "rmdir",
+		"echo", "set", "if", "for", "call", "start", "tasklist", "taskkill",
+		"find", "findstr", "more", "sort", "xcopy", "robocopy", "attrib",
+		"icacls", "net", "sc", "reg", "wmic", "powershell", "cmd", "where",
+		"git", "go", "node", "npm", "npx", "python", "pip", "cargo", "rustc",
+		"docker", "docker-compose", "kubectl", "make", "cmake", "gcc", "g++",
+		"javac", "java", "ruby", "php", "perl", "bash", "ssh", "scp", "curl",
+		"wget", "tar", "zip", "unzip", "grep", "sed", "awk", "cat", "ls",
+		"chmod", "chown", "ps", "kill", "top", "htop", "vim", "nano", "less",
+	}
+
+	for _, cmd := range commonCmds {
+		if prefix == "" || strings.HasPrefix(strings.ToLower(cmd), strings.ToLower(prefix)) {
+			results = append(results, cmd)
+		}
+	}
+
+	// 去重并排序（简单去重）
+	seen := make(map[string]bool)
+	var unique []string
+	for _, r := range results {
+		lower := strings.ToLower(r)
+		if !seen[lower] {
+			seen[lower] = true
+			unique = append(unique, r)
+		}
+	}
+	return unique
+}
+
+// completeCommand 补全命令名
+func (ss *ShellSession) completeCommand(input, prefix string) []string {
+	cmds := ss.completeCommands(prefix)
+	if len(cmds) == 0 {
+		// 回退到路径补全
+		return ss.completePath(input, prefix)
+	}
+
+	// 构建完整输入: 去掉最后一个词 + 补全结果
+	base := ""
+	if idx := strings.LastIndex(input, " "); idx >= 0 {
+		base = input[:idx+1]
+	}
+
+	results := make([]string, 0, len(cmds))
+	for _, cmd := range cmds {
+		results = append(results, base+cmd)
+	}
+	return results
+}
+
+// completePath 补全文件/目录路径
+func (ss *ShellSession) completePath(input, prefix string) []string {
+	dir := ss.workDir
+	filePrefix := prefix
+
+	// 如果包含路径分隔符，提取目录部分
+	if idx := strings.LastIndexAny(prefix, `\/`); idx >= 0 {
+		dirPart := prefix[:idx+1]
+		if filepath.IsAbs(dirPart) {
+			dir = dirPart
+		} else {
+			dir = filepath.Join(ss.workDir, dirPart)
+		}
+		filePrefix = prefix[idx+1:]
+	}
+
+	// 读取目录内容
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var results []string
+	for _, entry := range entries {
+		name := entry.Name()
+		// 跳过隐藏文件（以 . 开头，Windows 下也过滤）
+		if len(name) > 0 && name[0] == '.' && filePrefix != "." && !strings.HasPrefix(filePrefix, ".") {
+			continue
+		}
+		if !strings.EqualFold(name[:cmpLen(name, filePrefix)], filePrefix) {
+			continue
+		}
+
+		full := name
+		if entry.IsDir() {
+			full += `\` // 目录加反斜杠
+		}
+
+		// 还原原始路径前缀
+		base := input
+		if idx := strings.LastIndexAny(prefix, `\/`); idx >= 0 {
+			base = input[:len(input)-len(prefix)+idx+1]
+		} else if idx := strings.LastIndex(input, " "); idx >= 0 {
+			base = input[:idx+1]
+		} else {
+			base = ""
+		}
+		results = append(results, base+full)
+
+		if len(results) >= 20 { // 限制候选数量
+			break
+		}
+	}
+	return results
+}
+
+func cmpLen(a, b string) int {
+	if len(a) < len(b) {
+		return len(a)
+	}
+	return len(b)
 }

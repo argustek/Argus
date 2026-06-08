@@ -29,6 +29,7 @@ import (
 	"argus/internal/dingtalk"
 	"argus/internal/git"
 	"argus/internal/i18n"
+	"argus/internal/mcp"
 	"argus/internal/memory"
 	"argus/internal/types"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -130,6 +131,7 @@ type Config struct {
 	SEConfigID        string         `json:"seConfigId,omitempty"`     // SE绑定的模型ID（空=用默认）
 	APConfigID        string         `json:"apConfigId,omitempty"`     // AP绑定的模型ID（空=用默认）
 	UseSeparateModels bool           `json:"useSeparateModels"`        // 是否各角色使用不同模型
+	MCPServers         []types.MCPServerConfig `json:"mcpServers,omitempty"`   // [v0.7.1] MCP Server 配置列表
 }
 
 // ChatMessage 聊天消息
@@ -239,6 +241,9 @@ type App struct {
 	sendMu       sync.Mutex
 	isSending    bool
 	messageQueue []string // 排队消息
+
+	// [v0.7.1] MCP Manager
+	mcpManager *mcp.Manager
 }
 
 // ChangeRecord 改动记录
@@ -617,6 +622,9 @@ func (a *App) initChatManager() {
 
 	// 初始化C监控（在SetOnMessageAdded之后，确保消息能正确推送到前端）
 	a.chatManager.InitCMonitor()
+
+	// [v0.7.1] 初始化 MCP Manager（启动配置中的所有 MCP Server）
+	a.initMCPManager(projectDir)
 
 	// 监听前端语言切换事件
 	runtime.EventsOn(a.ctx, "set-reply-language", func(optionalData ...interface{}) {
@@ -3614,6 +3622,49 @@ func (a *App) getProjectDir() string {
 	return projectDir
 }
 
+// [v0.7.1] initMCPManager 初始化 MCP Manager，启动配置中的所有 Server
+func (a *App) initMCPManager(workDir string) {
+	servers := a.config.MCPServers
+	if len(servers) == 0 {
+		fmt.Printf("[MCP] ℹ️ 无 MCP Server 配置，跳过初始化\n")
+		return
+	}
+
+	a.mcpManager = mcp.NewManager(workDir)
+
+	for i, srv := range servers {
+		if !srv.Enabled {
+			fmt.Printf("[MCP] ⏭️ Server '%s' 已禁用，跳过\n", srv.Name)
+			continue
+		}
+		if srv.Command == "" || srv.Name == "" {
+			fmt.Printf("[MCP] ⚠️ Server #%d 缺少 name 或 command，跳过\n", i+1)
+			continue
+		}
+
+		if err := a.mcpManager.AddServer(srv); err != nil {
+			a.addLog(fmt.Sprintf("【MCP】启动 Server '%s' 失败: %v", srv.Name, err))
+			fmt.Printf("[MCP] ❌ 启动失败 '%s': %v\n", srv.Name, err)
+		} else {
+			a.addLog(fmt.Sprintf("【MCP】✅ Server '%s' 已连接 (%d tools)", srv.Name, 0))
+		}
+	}
+
+	totalTools := len(a.mcpManager.GetAllTools())
+	fmt.Printf("[MCP] ✅ 初始化完成: %d servers, %d total tools\n",
+		len(a.mcpManager.ListServers()), totalTools)
+
+	// 注入到 chatManager（SE 工具桥接）
+	if a.chatManager != nil {
+		a.chatManager.SetMCPManager(a.mcpManager)
+	}
+}
+
+// GetMCPManager 获取 MCP Manager（供 HTTP API 和 SE 工具桥接使用）
+func (a *App) GetMCPManager() *mcp.Manager {
+	return a.mcpManager
+}
+
 func (a *App) isDangerousWorkDir(dir string) bool {
 	dangerousPatterns := []string{
 		"\\ArgusTek\\",
@@ -3777,6 +3828,16 @@ func (a *App) SetTerminalEncoding(enc string) error {
 		return fmt.Errorf("终端未启动")
 	}
 	return a.terminalManager.SetTerminalEncoding(enc)
+}
+
+// [v0.7.1] TerminalTabComplete Tab 补全（前端调用）
+func (a *App) TerminalTabComplete(input string) ([]string, error) {
+	exe := a.chatManager.GetExecutor()
+	ss, err := exe.GetShellSession()
+	if err != nil {
+		return nil, err
+	}
+	return ss.TabComplete(input), nil
 }
 
 func (a *App) emitTerminalOutput(output string) {

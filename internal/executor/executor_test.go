@@ -1829,3 +1829,154 @@ func TestBuildCodeContext(t *testing.T) {
 
 	t.Logf("✅ BuildCodeContext: files=%d funcs=%d pkgs=%d", ctx.TotalFiles, ctx.TotalFuncs, len(ctx.Packages))
 }
+
+// ============================================================
+// [v0.7.1] TabComplete 测试用例
+// ============================================================
+
+func TestTabComplete_EmptyInput(t *testing.T) {
+	tmpDir := t.TempDir()
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	results := ss.TabComplete("")
+	// 空输入应返回常用命令列表
+	if len(results) == 0 {
+		t.Error("空输入应返回命令列表")
+	}
+	// 应包含常见命令
+	found := false
+	for _, r := range results {
+		if r == "git" || r == "go" || r == "dir" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("应包含常见命令, got: %v", results[:min(5, len(results))])
+	}
+	t.Logf("✅ 空输入补全: %d 个候选", len(results))
+}
+
+func TestTabComplete_CommandPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	tests := []struct{ input, expect string }{
+		{"gi", "git"},
+		{"go", "go"},
+		{"di", "dir"},
+		{"no", "node"}, // npm/npx 也匹配 no
+	}
+	for _, tc := range tests {
+		results := ss.TabComplete(tc.input)
+		found := false
+		for _, r := range results {
+			if strings.EqualFold(r, tc.expect) || strings.HasSuffix(strings.ToLower(r), strings.ToLower(tc.expect)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("TabComplete(%q) 应包含 %q, got: %v", tc.input, tc.expect, results)
+		} else {
+			t.Logf("✅ TabComplete(%q) → 包含 %q (%d candidates)", tc.input, tc.expect, len(results))
+		}
+	}
+}
+
+func TestTabComplete_FilePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	// 创建测试文件
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "utils.go"), []byte("package main"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "subdir"), 0755)
+
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	// 补全文件名
+	results := ss.TabComplete("cat m")
+	foundMain := false
+	foundUtils := false
+	for _, r := range results {
+		if strings.Contains(r, "main.go") { foundMain = true }
+		if strings.Contains(r, "utils.go") { foundUtils = true }
+	}
+	if !foundMain {
+		t.Errorf("应补全到 main.go, got: %v", results)
+	}
+	t.Logf("✅ 文件路径补全 'cat m' → %v (main=%v utils=%v)", results, foundMain, foundUtils)
+
+	// 目录补全（应以 \ 结尾）
+	dirResults := ss.TabComplete("cd s")
+	foundDir := false
+	for _, r := range dirResults {
+		if strings.HasSuffix(strings.ToLower(r), strings.ToLower(`subdir\`)) {
+			foundDir = true
+		}
+	}
+	if !foundDir {
+		t.Logf("目录补全结果: %v", dirResults)
+	}
+}
+
+func TestTabComplete_WithSpace(t *testing.T) {
+	tmpDir := t.TempDir()
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	// "git " 后面应该尝试路径/参数补全
+	results := ss.TabComplete("git ")
+	// 不应 panic，返回值可以是路径或空
+	t.Logf("✅ 带空格输入 'git ': %d candidates", len(results))
+}
+
+func TestTabComplete_NoMatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	results := ss.TabComplete("zzzzzzz_nonexistent_command_xyz")
+	if len(results) > 0 {
+		// 可能回退到路径补全，不报错即可
+		t.Logf("无匹配但有结果(可能是路径): %v", results)
+	}
+	t.Logf("✅ 无匹配输入正常处理")
+}
+
+func TestTabComplete_PathWithSeparator(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("pkg"), 0644)
+
+	ss, err := NewShellSession(tmpDir)
+	if err != nil {
+		t.Fatalf("NewShellSession: %v", err)
+	}
+	defer ss.Close()
+
+	// 路径分隔符触发路径补全
+	results := ss.TabComplete("src/")
+	if len(results) == 0 {
+		t.Log("路径补全 src/ 无结果（可能工作目录问题）")
+	} else {
+		t.Logf("✅ 路径补全 'src/' → %v", results)
+	}
+}

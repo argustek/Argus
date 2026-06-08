@@ -2,9 +2,11 @@ package main
 
 import (
 	"argus/internal/executor"
+	"argus/internal/types"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -78,6 +80,16 @@ func (a *App) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tool/semantic-search", a.authMiddleware(http.HandlerFunc(a.handleToolSemanticSearch)).ServeHTTP)
 	mux.HandleFunc("POST /api/v1/tool/search-files", a.authMiddleware(http.HandlerFunc(a.handleToolSearchFiles)).ServeHTTP)
 	mux.HandleFunc("GET /api/v1/tool/shell-status", a.authMiddleware(http.HandlerFunc(a.handleToolShellStatus)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/tool/shell-history", a.authMiddleware(http.HandlerFunc(a.handleToolShellHistory)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tool/shell-search", a.authMiddleware(http.HandlerFunc(a.handleToolShellSearch)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/tool/tab-complete", a.authMiddleware(http.HandlerFunc(a.handleToolTabComplete)).ServeHTTP)
+
+	// [v0.7.1] MCP 管理端点
+	mux.HandleFunc("GET /api/v1/mcp/servers", a.authMiddleware(http.HandlerFunc(a.handleMCPServers)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/mcp/servers", a.authMiddleware(http.HandlerFunc(a.handleMCPAddServer)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/v1/mcp/servers/{name}", a.authMiddleware(http.HandlerFunc(a.handleMCPRemoveServer)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/mcp/tools", a.authMiddleware(http.HandlerFunc(a.handleMCPTools)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/mcp/call", a.authMiddleware(http.HandlerFunc(a.handleMCPCallTool)).ServeHTTP)
 }
 
 func (a *App) registerSSERoutes(mux *http.ServeMux) {
@@ -598,6 +610,238 @@ func (a *App) handleToolShellStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"active": ss.IsRunning(),
 		"cwd":    ss.CWD(),
+	})
+}
+
+// [v0.7.1] handleToolShellHistory GET /api/v1/tool/shell-history?n=20
+// 返回最近 n 条命令历史（倒序，最新在前）
+func (a *App) handleToolShellHistory(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+	exe := a.chatManager.GetExecutor()
+	ss, err := exe.GetShellSession()
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"active":  false,
+			"history": []string{},
+			"total":   0,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	n := 20 // 默认返回最近 20 条
+	if qn := r.URL.Query().Get("n"); qn != "" {
+		if parsed, err := strconv.Atoi(qn); err == nil && parsed > 0 {
+			n = parsed
+		}
+	}
+
+	history := ss.History(n)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active":  ss.IsRunning(),
+		"total":   ss.HistoryCount(),
+		"history": history,
+	})
+}
+
+// [v0.7.1] handleToolShellSearch POST /api/v1/tool/shell-search
+// 反向搜索命令历史（类似 Ctrl+R）
+func (a *App) handleToolShellSearch(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "未初始化"})
+		return
+	}
+
+	var req struct {
+		Query string `json:"query"`           // 搜索关键词
+		Limit int    `json:"limit,omitempty"` // 返回条数上限（默认 20）
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query is required"})
+		return
+	}
+
+	exe := a.chatManager.GetExecutor()
+	ss, err := exe.GetShellSession()
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"active":  false,
+			"results": []string{},
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	results := ss.SearchHistory(req.Query, req.Limit)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active":  ss.IsRunning(),
+		"query":   req.Query,
+		"count":   len(results),
+		"results": results,
+	})
+}
+
+// [v0.7.1] handleToolTabComplete GET /api/v1/tool/tab-complete — Tab 补全
+func (a *App) handleToolTabComplete(w http.ResponseWriter, r *http.Request) {
+	input := r.URL.Query().Get("input")
+	if input == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"candidates": []string{},
+		})
+		return
+	}
+
+	exe := a.chatManager.GetExecutor()
+	ss, err := exe.GetShellSession()
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"candidates": []string{},
+			"error":      err.Error(),
+		})
+		return
+	}
+
+	candidates := ss.TabComplete(input)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"active":     ss.IsRunning(),
+		"input":      input,
+		"count":      len(candidates),
+		"candidates": candidates,
+	})
+}
+
+// ========== [v0.7.1] MCP 管理端点 ==========
+
+// handleMCPServers GET /api/v1/mcp/servers — 列出所有已连接的 MCP Server
+func (a *App) handleMCPServers(w http.ResponseWriter, r *http.Request) {
+	if a.mcpManager == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"servers": []interface{}{},
+			"total":   0,
+		})
+		return
+	}
+	servers := a.mcpManager.ListServers()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"servers": servers,
+		"total":   len(servers),
+	})
+}
+
+// handleMCPAddServer POST /api/v1/mcp/servers — 动态添加 MCP Server
+func (a *App) handleMCPAddServer(w http.ResponseWriter, r *http.Request) {
+	if a.mcpManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP Manager 未初始化"})
+		return
+	}
+	var cfg types.MCPServerConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
+		return
+	}
+	if cfg.Name == "" || cfg.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 和 command 必填"})
+		return
+	}
+	cfg.Enabled = true // 动态添加默认启用
+
+	if err := a.mcpManager.AddServer(cfg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	a.addLog(fmt.Sprintf("【MCP】动态添加 Server '%s'", cfg.Name))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"message": fmt.Sprintf("Server '%s' 已启动", cfg.Name),
+	})
+}
+
+// handleMCPRemoveServer DELETE /api/v1/mcp/servers/{name} — 移除 MCP Server
+func (a *App) handleMCPRemoveServer(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name 参数缺失"})
+		return
+	}
+	if a.mcpManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP Manager 未初始化"})
+		return
+	}
+	if err := a.mcpManager.RemoveServer(name); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	a.addLog(fmt.Sprintf("【MCP】移除 Server '%s'", name))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"message": fmt.Sprintf("Server '%s' 已移除", name),
+	})
+}
+
+// handleMCPTools GET /api/v1/mcp/tools — 列出所有 MCP 工具（跨所有 Server）
+func (a *App) handleMCPTools(w http.ResponseWriter, r *http.Request) {
+	if a.mcpManager == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"tools": []interface{}{},
+			"total": 0,
+		})
+		return
+	}
+	tools := a.mcpManager.GetAllTools()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"tools": tools,
+		"total": len(tools),
+	})
+}
+
+// handleMCPCallTool POST /api/v1/mcp/call — 调用 MCP 工具（直接调用，不经过 PM/SE）
+func (a *App) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
+	if a.mcpManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "MCP Manager 未初始化"})
+		return
+	}
+	var req struct {
+		ServerName string                 `json:"server_name"`
+		ToolName   string                 `json:"tool_name"`
+		Arguments  map[string]interface{} `json:"arguments,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON: " + err.Error()})
+		return
+	}
+	if req.ServerName == "" || req.ToolName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "server_name 和 tool_name 必填"})
+		return
+	}
+
+	result, err := a.mcpManager.CallTool(req.ServerName, req.ToolName, req.Arguments)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// 提取文本内容
+	var textContent []string
+	for _, block := range result.Content {
+		if block.Type == "text" && block.Text != "" {
+			textContent = append(textContent, block.Text)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    func() string { if result.IsError { return "error" }; return "ok" }(),
+		"is_error":  result.IsError,
+		"content":   textContent,
+		"raw":       result.Content,
 	})
 }
 

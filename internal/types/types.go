@@ -37,6 +37,7 @@ type State struct {
 	LastChange          int64  `json:"last_change"`           // 最后变更时间戳
 	LastUserMessage     string `json:"last_user_message"`     // 最后一条有效用户消息（用于智能恢复）
 	LastInteractionTime int64  `json:"last_interaction_time"` // 最后交互时间戳（Unix时间，用于时间感知+社交）
+	FirstInteractionTime int64 `json:"first_interaction_time"` // 首次交互时间戳（用于计算"认识多久了"）
 }
 
 // 项目状态常量
@@ -159,15 +160,26 @@ type CircuitBreaker struct {
 
 // Config 主配置
 type Config struct {
-	WorkDir          string    `yaml:"work_dir"`
-	CheckInterval    int       `yaml:"check_interval"`    // C检查看板间隔（秒）
-	CommitInterval   int       `yaml:"commit_interval"`   // 自动commit间隔（分钟）
-	HeartbeatTimeout int       `yaml:"heartbeat_timeout"` // 心跳超时（秒）
-	APIConfig        APIConfig `yaml:"api_config"`        // 默认API配置（所有角色共用）
-	PMConfig         APIConfig `yaml:"pm_config"`         // PM专用配置（为空则用APIConfig）
-	SEConfig         APIConfig `yaml:"se_config"`         // SE专用配置（为空则用APIConfig）
-	APConfig         APIConfig `yaml:"ap_config"`         // AP专用配置（为空则用APIConfig）
-	PmDecisionAlert  bool      `yaml:"pm_decision_alert"` // PM决策提醒（弹窗）
+	WorkDir          string              `yaml:"work_dir"`
+	CheckInterval    int                 `yaml:"check_interval"`    // C检查看板间隔（秒）
+	CommitInterval   int                 `yaml:"commit_interval"`   // 自动commit间隔（分钟）
+	HeartbeatTimeout int                 `yaml:"heartbeat_timeout"` // 心跳超时（秒）
+	APIConfig        APIConfig           `yaml:"api_config"`        // 默认API配置（所有角色共用）
+	PMConfig         APIConfig           `yaml:"pm_config"`         // PM专用配置（为空则用APIConfig）
+	SEConfig         APIConfig           `yaml:"se_config"`         // SE专用配置（为空则用APIConfig）
+	APConfig         APIConfig           `yaml:"ap_config"`         // AP专用配置（为空则用APIConfig）
+	PmDecisionAlert  bool                `yaml:"pm_decision_alert"` // PM决策提醒（弹窗）
+	MCPServers       []MCPServerConfig    `yaml:"mcp_servers,omitempty"` // [v0.7.1] MCP Server 配置列表
+}
+
+// MCPServerConfig MCP Server 配置（YAML 用，避免循环依赖）
+type MCPServerConfig struct {
+	Name        string            `yaml:"name"`
+	Command     string            `yaml:"command"`
+	Args        []string          `yaml:"args"`
+	Env         map[string]string `yaml:"env,omitempty"`
+	Enabled     bool              `yaml:"enabled"`
+	Description string            `yaml:"description,omitempty"`
 }
 
 // APIConfig API配置
