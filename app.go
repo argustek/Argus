@@ -3174,6 +3174,7 @@ func (a *App) SendMessage(content string) error {
 
 	if strings.TrimSpace(content) != "" {
 		apiCfg := a.getDefaultAPIConfig()
+		// 快速验证API配置完整性，避免进入PM→SE流水线后才超时报错
 		if apiCfg == nil || strings.TrimSpace(apiCfg.APIKey) == "" {
 			errMsg := "⚠️ API Key 未配置，请先在设置中填写 API Key"
 			a.addLog(errMsg)
@@ -3181,6 +3182,24 @@ func (a *App) SendMessage(content string) error {
 			a.saveMessages()
 			lastMsg := a.messages[len(a.messages)-1]
 			a.emitToFrontend("new-message", lastMsg, "SendMessage:NoAPIKey", chat.PathSystem)
+			return fmt.Errorf("%s", errMsg)
+		}
+		if strings.TrimSpace(apiCfg.BaseURL) == "" {
+			errMsg := "⚠️ API 地址(BaseURL)未配置，请先在设置中填写"
+			a.addLog(errMsg)
+			a.messages = append(a.messages, a.newChatMessage("error", errMsg))
+			a.saveMessages()
+			lastMsg := a.messages[len(a.messages)-1]
+			a.emitToFrontend("new-message", lastMsg, "SendMessage:NoBaseURL", chat.PathSystem)
+			return fmt.Errorf("%s", errMsg)
+		}
+		if strings.TrimSpace(apiCfg.ModelName) == "" {
+			errMsg := "⚠️ 模型名称(Model)未配置，请先在设置中选择模型"
+			a.addLog(errMsg)
+			a.messages = append(a.messages, a.newChatMessage("error", errMsg))
+			a.saveMessages()
+			lastMsg := a.messages[len(a.messages)-1]
+			a.emitToFrontend("new-message", lastMsg, "SendMessage:NoModel", chat.PathSystem)
 			return fmt.Errorf("%s", errMsg)
 		}
 	}

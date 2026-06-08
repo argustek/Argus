@@ -1,10 +1,14 @@
 <template>
   <div class="settings-overlay" @click.self="$emit('close')">
-    <div class="settings-panel">
-      <div class="settings-header">
-        <h3>{{ t('settings.title') }}</h3>
+    <div class="settings-panel" :style="{ left: panelPos.x + 'px', top: panelPos.y + 'px', width: panelWidth + 'px' }">
+      <div class="settings-header" @mousedown.prevent="startDrag($event)" title="按住拖动窗口">
+        <div class="header-left">
+          <span class="drag-hint">⠿</span>
+          <h3>{{ t('settings.title') }}</h3>
+        </div>
         <button class="close-btn" @click="$emit('close')">×</button>
       </div>
+      <div class="panel-resize-handle" @mousedown.prevent="startPanelResize($event)" title="拖拽调整宽度"></div>
       
       <div class="settings-layout">
         <!-- 顶部 Tab 栏 -->
@@ -55,10 +59,18 @@
               <table class="model-table">
                 <thead>
                   <tr>
-                    <th class="col-provider">{{ t('settings.provider') }}</th>
-                    <th class="col-url">URL</th>
-                    <th class="col-model">{{ t('settings.modelName') }}</th>
-                    <th class="col-key">{{ t('settings.apiKey') }}</th>
+                    <th class="col-provider" data-col="provider">
+                      {{ t('settings.provider') }}<span class="col-resize-handle" @mousedown.prevent="startResize($event, 'provider')"></span>
+                    </th>
+                    <th class="col-url" data-col="url">
+                      URL<span class="col-resize-handle" @mousedown.prevent="startResize($event, 'url')"></span>
+                    </th>
+                    <th class="col-model" data-col="model">
+                      {{ t('settings.modelName') }}<span class="col-resize-handle" @mousedown.prevent="startResize($event, 'model')"></span>
+                    </th>
+                    <th class="col-key" data-col="key">
+                      {{ t('settings.apiKey') }}<span class="col-resize-handle" @mousedown.prevent="startResize($event, 'key')"></span>
+                    </th>
                     <th class="col-multimodal">{{ t('settings.multimodal') }}</th>
                     <th class="col-default">{{ t('common.default') }}</th>
                     <th class="col-test">{{ t('settings.testConnection') }}</th>
@@ -332,6 +344,7 @@
             </div>
           </template>
         </div>
+        </div>
         
         <div v-if="currentTab === 'about'" class="tab-panel">
           <div class="settings-section version-section">
@@ -350,7 +363,6 @@
             </div>
           </div>
         </div>
-        </div>
       </div>
     </div>
       
@@ -363,7 +375,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { availableLocales } from '../i18n'
 import { GetCurrentAPIConfigID, SwitchAPIConfig, TestAPIConfig, SetLang } from '../../wailsjs/go/main/App'
@@ -383,7 +395,7 @@ function changeLocale() {
 }
 
 const version = '1.0.21'
-const buildTime = __BUILD_TIME__
+const buildTime: string = (typeof __BUILD_TIME__ !== 'undefined') ? __BUILD_TIME__ : new Date().toLocaleString('zh-CN')
 const currentTab = ref('api')
 
 interface ApiConfig {
@@ -443,6 +455,158 @@ const sharedModelId = ref<string>('')
 const pmConfigId = ref<string>('')
 const seConfigId = ref<string>('')
 const apConfigId = ref<string>('')
+
+// ========== 列宽拖拽 ==========
+const COL_WIDTHS_KEY = 'argus-col-widths'
+const defaultColWidths: Record<string, string> = {
+  provider: '12%', url: '22%', model: '15%', key: '18%',
+}
+const colWidths = ref<Record<string, string>>(
+  JSON.parse(localStorage.getItem(COL_WIDTHS_KEY) || '{}') || { ...defaultColWidths }
+)
+let resizingCol: string | null = null
+let resizeStartX = 0
+let resizeStartWidth = 0
+
+function startResize(e: MouseEvent, col: string) {
+  resizingCol = col
+  resizeStartX = e.clientX
+  const th = (e.target as HTMLElement).closest('th') as HTMLElement
+  resizeStartWidth = th.offsetWidth
+  document.addEventListener('mousemove', onResizeMove)
+  document.addEventListener('mouseup', onResizeEnd)
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+}
+
+function onResizeMove(e: MouseEvent) {
+  if (!resizingCol) return
+  const diff = e.clientX - resizeStartX
+  const tableWrap = document.querySelector('.model-table-wrap') as HTMLElement
+  if (!tableWrap) return
+  const tableWidth = tableWrap.querySelector('.model-table')!.clientWidth
+  const newPx = Math.max(60, resizeStartWidth + diff)
+  const newPct = ((newPx / tableWidth) * 100).toFixed(1) + '%'
+  colWidths.value[resizingCol] = newPct
+  // 实时应用
+  applyColWidths()
+}
+
+function onResizeEnd() {
+  if (resizingCol) {
+    localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(colWidths.value))
+  }
+  resizingCol = null
+  document.removeEventListener('mousemove', onResizeMove)
+  document.removeEventListener('mouseup', onResizeEnd)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+function applyColWidths() {
+  for (const [col, w] of Object.entries(colWidths.value)) {
+    const th = document.querySelector(`.model-table th[data-col="${col}"]`) as HTMLElement
+    if (th) th.style.width = w
+  }
+}
+
+// 组件挂载时恢复列宽和面板位置
+onMounted(() => {
+  nextTick(() => applyColWidths())
+  // 首次打开时居中
+  if (panelPos.value.x === 0 && panelPos.value.y === 0) {
+    nextTick(() => {
+      const panel = document.querySelector('.settings-panel') as HTMLElement
+      if (panel) {
+        const x = Math.round((window.innerWidth - panel.offsetWidth) / 2)
+        const y = Math.round((window.innerHeight - panel.offsetHeight) / 2)
+        panelPos.value = { x: Math.max(0, x), y: Math.max(0, y) }
+      }
+    })
+  }
+})
+
+// ========== 面板拖拽 ==========
+const DRAG_POS_KEY = 'argus-settings-pos'
+const PANEL_WIDTH_KEY = 'argus-settings-width'
+const panelPos = ref<{ x: number; y: number }>(
+  JSON.parse(localStorage.getItem(DRAG_POS_KEY) || 'null') || { x: 0, y: 0 }
+)
+const panelWidth = ref<number>(
+  parseInt(localStorage.getItem(PANEL_WIDTH_KEY) || '920', 10)
+)
+let dragging = false
+let dragOffsetX = 0
+let dragOffsetY = 0
+
+// ========== 面板宽度拖拽 ==========
+let panelResizing = false
+let panelResizeStartX = 0
+let panelResizeStartWidth = 0
+
+function startPanelResize(e: MouseEvent) {
+  panelResizing = true
+  panelResizeStartX = e.clientX
+  panelResizeStartWidth = panelWidth.value
+  document.addEventListener('mousemove', onPanelResizeMove)
+  document.addEventListener('mouseup', onPanelResizeEnd)
+  document.body.style.cursor = 'ew-resize'
+  document.body.style.userSelect = 'none'
+  e.preventDefault()
+}
+
+function onPanelResizeMove(e: MouseEvent) {
+  if (!panelResizing) return
+  const diff = e.clientX - panelResizeStartX
+  const newWidth = Math.max(600, Math.min(window.innerWidth - 40, panelResizeStartWidth + diff))
+  panelWidth.value = newWidth
+}
+
+function onPanelResizeEnd() {
+  if (panelResizing) {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth.value))
+  }
+  panelResizing = false
+  document.removeEventListener('mousemove', onPanelResizeMove)
+  document.removeEventListener('mouseup', onPanelResizeEnd)
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+}
+
+function startDrag(e: MouseEvent) {
+  const panel = (e.currentTarget as HTMLElement).closest('.settings-panel') as HTMLElement
+  if (!panel) return
+  dragging = true
+  dragOffsetX = e.clientX - panel.offsetLeft
+  dragOffsetY = e.clientY - panel.offsetTop
+  document.addEventListener('mousemove', onDragMove)
+  document.addEventListener('mouseup', onDragEnd)
+}
+
+function onDragMove(e: MouseEvent) {
+  if (!dragging) return
+  const panel = document.querySelector('.settings-panel') as HTMLElement
+  if (!panel) return
+  let nx = e.clientX - dragOffsetX
+  let ny = e.clientY - dragOffsetY
+  // 边界限制：不超出窗口
+  const maxW = window.innerWidth - panel.offsetWidth
+  const maxH = window.innerHeight - panel.offsetHeight
+  nx = Math.max(0, Math.min(nx, maxW))
+  ny = Math.max(0, Math.min(ny, maxH))
+  panelPos.value = { x: nx, y: ny }
+  panel.style.left = nx + 'px'
+  panel.style.top = ny + 'px'
+}
+
+function onDragEnd() {
+  if (dragging) {
+    localStorage.setItem(DRAG_POS_KEY, JSON.stringify(panelPos.value))
+  }
+  dragging = false
+  document.removeEventListener('mousemove', onDragMove)
+  document.removeEventListener('mouseup', onDragEnd)
+}
 
 function truncateUrl(url: string): string {
   if (!url) return ''
@@ -722,20 +886,46 @@ watch(() => props.config, (newVal) => {
   right: 0;
   bottom: 0;
   background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   z-index: 1000;
 }
 
 .settings-panel {
-  width: 600px;
+  width: 920px;
   max-height: 80vh;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
+  position: absolute;
+}
+
+/* 面板右侧宽度拖拽手柄 */
+.panel-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 10;
+}
+
+.panel-resize-handle::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 20px;
+  bottom: 20px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 1px;
+  transition: background 0.2s;
+}
+
+.panel-resize-handle:hover::before {
+  background: rgba(100, 180, 255, 0.6);
 }
 
 .settings-header {
@@ -744,11 +934,26 @@ watch(() => props.config, (newVal) => {
   align-items: center;
   padding: 16px 20px;
   border-bottom: 1px solid var(--border-color);
+  cursor: grab;
+  user-select: none;
 }
 
 .settings-header h3 {
   font-size: 16px;
   font-weight: 600;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.drag-hint {
+  font-size: 14px;
+  color: var(--text-tertiary);
+  opacity: 0.6;
+  letter-spacing: -1px;
 }
 
 .close-btn {
@@ -1161,10 +1366,38 @@ watch(() => props.config, (newVal) => {
   text-align: center;
 }
 
-.col-provider { width: 12%; }
-.col-url { width: 22%; }
-.col-model { width: 15%; }
-.col-key { width: 18%; }
+.col-provider { width: 12%; position: relative; }
+.col-url { width: 22%; position: relative; }
+.col-model { width: 15%; position: relative; }
+.col-key { width: 18%; position: relative; }
+
+/* 列宽拖拽手柄 — 明显可见 */
+.col-resize-handle {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 2;
+}
+.col-resize-handle::before {
+  content: '';
+  position: absolute;
+  right: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background: rgba(255,255,255,0.25);
+  border-radius: 1px;
+  transition: all 0.15s;
+}
+.col-resize-handle:hover::before {
+  background: var(--accent);
+  width: 3px;
+  box-shadow: 0 0 6px rgba(64,158,255,0.5);
+}
 .col-multimodal { width: 6%; }
 .col-default { width: 6%; }
 .col-test { width: 7%; }
