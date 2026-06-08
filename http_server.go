@@ -2,6 +2,7 @@ package main
 
 import (
 	"argus/internal/executor"
+	"argus/internal/memory"
 	"argus/internal/types"
 	"encoding/json"
 	"fmt"
@@ -90,6 +91,30 @@ func (a *App) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/v1/mcp/servers/{name}", a.authMiddleware(http.HandlerFunc(a.handleMCPRemoveServer)).ServeHTTP)
 	mux.HandleFunc("GET /api/v1/mcp/tools", a.authMiddleware(http.HandlerFunc(a.handleMCPTools)).ServeHTTP)
 	mux.HandleFunc("POST /api/v1/mcp/call", a.authMiddleware(http.HandlerFunc(a.handleMCPCallTool)).ServeHTTP)
+
+	// [v0.7.2] Debugger DAP 端点
+	mux.HandleFunc("POST /api/v1/debug/start", a.authMiddleware(http.HandlerFunc(a.handleDebugStart)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/stop", a.authMiddleware(http.HandlerFunc(a.handleDebugStop)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/debug/sessions", a.authMiddleware(http.HandlerFunc(a.handleDebugSessions)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/debug/status", a.authMiddleware(http.HandlerFunc(a.handleDebugStatus)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/breakpoint", a.authMiddleware(http.HandlerFunc(a.handleDebugSetBreakpoint)).ServeHTTP)
+	mux.HandleFunc("DELETE /api/v1/debug/breakpoint", a.authMiddleware(http.HandlerFunc(a.handleDebugRemoveBreakpoint)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/debug/breakpoints", a.authMiddleware(http.HandlerFunc(a.handleDebugBreakpoints)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/continue", a.authMiddleware(http.HandlerFunc(a.handleDebugContinue)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/step-over", a.authMiddleware(http.HandlerFunc(a.handleDebugStepOver)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/step-into", a.authMiddleware(http.HandlerFunc(a.handleDebugStepInto)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/step-out", a.authMiddleware(http.HandlerFunc(a.handleDebugStepOut)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/pause", a.authMiddleware(http.HandlerFunc(a.handleDebugPause)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/debug/stacktrace", a.authMiddleware(http.HandlerFunc(a.handleDebugStacktrace)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/debug/variables", a.authMiddleware(http.HandlerFunc(a.handleDebugVariables)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/debug/evaluate", a.authMiddleware(http.HandlerFunc(a.handleDebugEvaluate)).ServeHTTP)
+
+	// [v0.7.2] Context Window / Token 管理端点
+	mux.HandleFunc("GET /api/v1/tokens/stats", a.authMiddleware(http.HandlerFunc(a.handleTokenStats)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tokens/manage", a.authMiddleware(http.HandlerFunc(a.handleTokenManage)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tokens/clear", a.authMiddleware(http.HandlerFunc(a.handleTokenClear)).ServeHTTP)
+	mux.HandleFunc("GET /api/v1/tokens/count", a.authMiddleware(http.HandlerFunc(a.handleTokenCount)).ServeHTTP)
+	mux.HandleFunc("POST /api/v1/tokens/prune", a.authMiddleware(http.HandlerFunc(a.handleTokenPrune)).ServeHTTP)
 }
 
 func (a *App) registerSSERoutes(mux *http.ServeMux) {
@@ -879,7 +904,299 @@ func (a *App) handleSendPending(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "队列为空"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message": "消息已发送", "content": msg})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message": "消息已发送", "content": "msg"})
+}
+
+// ========== [v0.7.2] Debugger DAP Handler 实现 ==========
+
+func (a *App) handleDebugStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Program     string   `json:"program"`
+		Mode        string   `json:"mode"`
+		Args        []string `json:"args"`
+		StopOnEntry bool     `json:"stop_on_entry"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.Mode == "" {
+		req.Mode = "test"
+	}
+
+	session, err := a.debuggerMgr.StartDebug(req.Program, req.Mode, req.Args, req.StopOnEntry)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, session)
+}
+
+func (a *App) handleDebugStop(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.SessionID == "" {
+		a.debuggerMgr.StopAll()
+		writeJSON(w, http.StatusOK, map[string]string{"status": "all sessions stopped"})
+		return
+	}
+	if err := a.debuggerMgr.StopDebug(req.SessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (a *App) handleDebugSessions(w http.ResponseWriter, r *http.Request) {
+	sessions := a.debuggerMgr.GetAllSessions()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"sessions": sessions, "count": len(sessions)})
+}
+
+func (a *App) handleDebugStatus(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		sessions := a.debuggerMgr.GetAllSessions()
+		if len(sessions) == 0 {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"running": false})
+			return
+		}
+		sessionID = sessions[len(sessions)-1].ID
+	}
+	session, err := a.debuggerMgr.GetSession(sessionID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	state := session.Client.CurrentState()
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (a *App) handleDebugSetBreakpoint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		File      string `json:"file_path"`
+		Line      int    `json:"line"`
+		Condition string `json:"condition,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	bp, err := a.debuggerMgr.SetBreakpoint(sessionOrDefault(req.SessionID, a), req.File, req.Line, req.Condition)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, bp)
+}
+
+func (a *App) handleDebugRemoveBreakpoint(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		File      string `json:"file_path"`
+		Line      int    `json:"line"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	err := a.debuggerMgr.RemoveBreakpoint(sessionOrDefault(req.SessionID, a), req.File, req.Line)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+}
+
+func (a *App) handleDebugBreakpoints(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	bps, err := a.debuggerMgr.GetBreakpoints(sessionOrDefault(sessionID, a))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"breakpoints": bps})
+}
+
+func (a *App) handleDebugContinue(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	if err := a.debuggerMgr.Continue(sessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "continued"})
+}
+
+func (a *App) handleDebugStepOver(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	if err := a.debuggerMgr.Next(sessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "step_over"})
+}
+
+func (a *App) handleDebugStepInto(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	if err := a.debuggerMgr.StepIn(sessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "step_into"})
+}
+
+func (a *App) handleDebugStepOut(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	if err := a.debuggerMgr.StepOut(sessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "step_out"})
+}
+
+func (a *App) handleDebugPause(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	if err := a.debuggerMgr.Pause(sessionID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+}
+
+func (a *App) handleDebugStacktrace(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	frames, err := a.debuggerMgr.GetCallStack(sessionID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"frames": frames, "count": len(frames)})
+}
+
+func (a *App) handleDebugVariables(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	varsMap, err := a.debuggerMgr.GetVariables(sessionID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, varsMap)
+}
+
+func (a *App) handleDebugEvaluate(w http.ResponseWriter, r *http.Request) {
+	sessionID := sessionIDFromRequest(r)
+	var req struct {
+		Expression string `json:"expression"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	result, err := a.debuggerMgr.EvaluateExpression(sessionID, req.Expression)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// sessionOrDefault 返回指定的 session ID 或最新的活跃 session
+func sessionOrDefault(id string, a *App) string {
+	if id != "" {
+		return id
+	}
+	sessions := a.debuggerMgr.GetAllSessions()
+	if len(sessions) > 0 {
+		return sessions[len(sessions)-1].ID
+	}
+	return ""
+}
+
+// sessionIDFromRequest 从请求中提取 session_id（query param 或 body）
+func sessionIDFromRequest(r *http.Request) string {
+	id := r.URL.Query().Get("session_id")
+	if id == "" {
+		var req struct {
+			SessionID string `json:"session_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		id = req.SessionID
+	}
+	return id
+}
+
+// ========== [v0.7.2] Context Window / Token Handler 实现 ==========
+
+func (a *App) handleTokenStats(w http.ResponseWriter, r *http.Request) {
+	if a.contextWindow == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "context window not initialized"})
+		return
+	}
+	stats := a.contextWindow.TokenStats()
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (a *App) handleTokenManage(w http.ResponseWriter, r *http.Request) {
+	if a.contextWindow == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "context window not initialized"})
+		return
+	}
+	actionTaken, detail := a.contextWindow.ManageIfNeeded()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"action_taken": actionTaken,
+		"detail":       detail,
+	})
+}
+
+func (a *App) handleTokenClear(w http.ResponseWriter, r *http.Request) {
+	if a.contextWindow == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "context window not initialized"})
+		return
+	}
+	a.contextWindow.Clear()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
+}
+
+func (a *App) handleTokenCount(w http.ResponseWriter, r *http.Request) {
+	text := r.URL.Query().Get("text")
+	if text == "" {
+		var req struct {
+			Text string `json:"text"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		text = req.Text
+	}
+	if text == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "text parameter required"})
+		return
+	}
+
+	counter := memory.NewTokenCounter()
+	count := counter.CountTokens(text)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"text":        text[:min(len(text), 200)] + "...",
+		"char_count":  len(text),
+		"rune_count":  len([]rune(text)),
+		"token_count": count,
+	})
+}
+
+func (a *App) handleTokenPrune(w http.ResponseWriter, r *http.Request) {
+	if a.contextWindow == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "context window not initialized"})
+		return
+	}
+	var req struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.MaxTokens <= 0 {
+		req.MaxTokens = 100000 // default
+	}
+	pruned := a.contextWindow.PruneToLimit(req.MaxTokens)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"pruned": pruned,
+		"status": fmt.Sprintf("pruned %d messages", pruned),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {

@@ -8,12 +8,7 @@
       
       <!-- 即时贴按钮 -->
       <button class="icon-btn" :class="{ active: stickyNoteVisible }" @click.stop="toggleStickyNote" :title="stickyNoteVisible ? '隐藏即时贴' : '显示即时贴'">📌</button>
-      
-      <!-- TODO按钮 -->
-      <button class="icon-btn" :class="{ active: showTodoPanel }" @click.stop="toggleTodoPanel" title="待办任务">
-        ✅ <span v-if="todoList.filter(t => t.status === 'pending').length > 0" class="todo-badge">{{ todoList.filter(t => t.status === 'pending').length }}</span>
-      </button>
-      
+
       <div class="divider"></div>
       <button 
         class="icon-btn monitor-btn" 
@@ -32,6 +27,10 @@
       <button class="icon-btn git-btn" @click.stop="$emit('toggle-git')" :title="t('topBar.gitVersionControl')">
         🌿 <span v-if="gitStatusCount > 0" class="git-badge">{{ gitStatusCount }}</span>
       </button>
+      <!-- [v0.7.2] 新增工具面板入口 -->
+      <button class="icon-btn" @click.stop="$emit('toggle-window', 'debug')" :class="{ active: activeWindows.debug }" title="Debugger 调试器">🐛</button>
+      <button class="icon-btn" @click.stop="$emit('toggle-window', 'mcp')" :class="{ active: activeWindows.mcp }" title="MCP 工具协议">🔌</button>
+      <button class="icon-btn" @click.stop="$emit('toggle-window', 'token')" :class="{ active: activeWindows.token }" title="Token 监控">📊</button>
       <div class="divider"></div>
       
       <div class="workdir-selector" @mousedown.stop>
@@ -109,21 +108,6 @@
       </div>
     </div>
     
-    <!-- TODO面板 -->
-    <div v-if="showTodoPanel" class="todo-panel" @mousedown.stop>
-      <div class="todo-header">
-        <span>✅ 待办任务 ({{ todoList.length }})</span>
-        <button class="todo-close" @click="showTodoPanel = false">✕</button>
-      </div>
-      <div class="todo-body">
-        <div v-if="todoList.length === 0" class="todo-empty">暂无待办任务</div>
-        <div v-for="item in todoList" :key="item.id" class="todo-item" :class="item.status">
-          <span class="todo-status-icon">{{ statusIcon(item.status) }}</span>
-          <span class="todo-desc">{{ item.description }}</span>
-        </div>
-      </div>
-    </div>
-    
     <!-- 即时贴弹窗 -->
     <div v-if="stickyNoteVisible" class="sticky-note" :style="{ left: stickyNotePos.x + 'px', top: stickyNotePos.y + 'px', width: stickyNoteSize.width + 'px', height: stickyNoteSize.height + 'px' }" @mousedown="startStickyDrag">
       <div class="sticky-header">
@@ -151,7 +135,7 @@ import { OpenFolderDialog, ClearWorkDir, ForceQuit, ShowWindow, OpenWorkDir, Ope
 const { t } = useI18n()
 
 const props = defineProps<{
-  activeWindows: { fileTree: boolean; editor: boolean; terminal: boolean; changes: boolean }
+  activeWindows: { fileTree: boolean; editor: boolean; terminal: boolean; changes: boolean; debug?: boolean; mcp?: boolean; token?: boolean }
   aiStatus: { pmStatus: string; seStatus: string; apStatus: string; cRunning: boolean; currentTask: string }
   workDir: string
   recentProjects: string[]
@@ -171,27 +155,6 @@ const remoteStatus = ref<{ type: string; msg: string } | null>(null)
 const remoteLoading = ref(false)
 const credUser = ref('')
 const credPass = ref('')
-
-// TODO 面板
-interface TodoItem {
-  id: string
-  description: string
-  status: string
-  createdAt: number
-  updatedAt: number
-}
-const showTodoPanel = ref(false)
-const todoList = ref<TodoItem[]>([])
-
-function toggleTodoPanel() {
-  showTodoPanel.value = !showTodoPanel.value
-}
-
-function statusIcon(status: string) {
-  if (status === 'done') return '✅'
-  if (status === 'doing') return '🔄'
-  return '⏳'
-}
 
 // 即时贴相关
 const STICKY_STORAGE_KEY = 'argus_sticky_note'
@@ -340,41 +303,6 @@ function handleClickOutside(e: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
-  // 📋 监听TODO更新事件（Message Bus驱动）- 双重监听确保收到
-  const handleTodoUpdate = (data: any) => {
-    console.log('[TopBar📋TODO] Received update:', data)
-    
-    // 兼容多种数据格式
-    let items: TodoItem[] = []
-    if (Array.isArray(data)) {
-      items = data
-    } else if (data && data.items && Array.isArray(data.items)) {
-      items = data.items
-    } else if (data && data.data && data.data.items) {
-      items = data.data.items
-    }
-    
-    console.log('[TopBar📋TODO] Parsed items:', items.length, items)
-    todoList.value = items
-    
-    // 动态更新badge计数
-    const pendingCount = items.filter((t: TodoItem) => t.status === 'pending').length
-    if (pendingCount > 0) {
-      console.log(`[TopBar📋TODO] Updated: ${items.length} tasks, ${pendingCount} pending`)
-    }
-  }
-
-  // 方式1: 直接监听Wails事件
-  try {
-    window.runtime.EventsOn('todo_update', handleTodoUpdate)
-    console.log('[TopBar📋TODO] ✅ Registered EventsOn listener')
-  } catch (e) {
-    console.log('[TopBar] runtime.EventsOn not available (SSR or dev)')
-  }
-
-  // 方式2: 注册全局回调（App.vue转发用）
-  ;(window as any).__argusTodoUpdate = handleTodoUpdate
-  console.log('[TopBar📋TODO] ✅ Registered global callback')
 })
 onUnmounted(() => document.removeEventListener('click', handleClickOutside))
 
@@ -540,111 +468,6 @@ const projectStatusText = computed(() => {
   margin-left: 2px;
   line-height: 14px;
 }
-
-/* TODO面板 */
-.todo-panel {
-  position: fixed;
-  top: 44px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 380px;
-  max-height: 400px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-  z-index: 9999;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.todo-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border-color);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.todo-close {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px;
-}
-
-.todo-close:hover { color: var(--text-primary); }
-
-.todo-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-.todo-empty {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 24px;
-  font-size: 13px;
-}
-
-.todo-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  margin-bottom: 4px;
-  font-size: 13px;
-  line-height: 1.4;
-  transition: background 0.15s;
-}
-
-.todo-item:hover { background: var(--bg-tertiary); }
-
-.todo-item.done .todo-desc {
-  text-decoration: line-through;
-  color: var(--text-muted);
-}
-
-.todo-status-icon {
-  flex-shrink: 0;
-  font-size: 14px;
-  line-height: 1;
-}
-
-.todo-desc {
-  flex: 1;
-  color: var(--text-primary);
-  word-break: break-word;
-}
-
-.todo-badge {
-  font-size: 10px;
-  background: #e74c3c;
-  color: #fff;
-  border-radius: 8px;
-  padding: 0 4px;
-  margin-left: -3px;
-  position: absolute;
-  top: -2px;
-  right: -6px;
-  min-width: 14px;
-  text-align: center;
-  line-height: 14px;
-  font-weight: bold;
-  pointer-events: none;
-}
-
-/* TODO按钮相对定位，让badge定位正确 */
-.icon-btn.todo-btn { position: relative; }
 
 /* 监控按钮样式 */
 .monitor-btn {

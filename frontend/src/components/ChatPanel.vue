@@ -380,7 +380,84 @@ const props = defineProps<{
 const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message', 'open-file-in-editor', 'run-in-terminal'])
 
 const inputMessage = ref('')
-const globalTasks = ref<GlobalTask[]>([])
+
+// 从消息中提取所有角色的任务，驱动底部任务追踪栏
+const globalTasks = computed<GlobalTask[]>(() => {
+  const tasks: GlobalTask[] = []
+  for (const msg of props.messages) {
+    const role = msg.role.toUpperCase() as 'PM' | 'SE' | 'AP' | 'USR'
+    const ts = new Date(msg.timestamp as number)
+
+    // 1) SE/PM 执行步骤 (_execData.actions)
+    const execData = (msg as any)._execData
+    if (execData?.actions?.length) {
+      for (let i = 0; i < execData.actions.length; i++) {
+        const a = execData.actions[i]
+        const idx = typeof a.index === 'number' ? a.index : i
+        const label = a.label || a.type || `Step ${idx + 1}`
+        tasks.push({
+          id: `exec-${msg.timestamp}-${idx}`,
+          description: label,
+          role: (execData.executor === 'pm' ? 'PM' : 'SE') as 'PM' | 'SE',
+          status: a.status === 'running' ? 'doing' : a.status === 'done' || a.status === 'success' ? 'done' : a.status === 'error' ? 'failed' : 'pending',
+          createdAt: ts,
+          updatedAt: ts,
+        })
+      }
+      continue
+    }
+
+    // 2) PM 规划消息 → 追踪为 PM 任务
+    if (role === 'PM' && msg.content && !(msg as any)._execData) {
+      // 提取 PM 的任务描述（通常包含 📋 或 @USR）
+      const summary = (msg as any).summary || msg.content.substring(0, 80)
+      if (summary.length > 3) {
+        tasks.push({
+          id: `pm-${msg.timestamp}`,
+          description: summary.replace(/\n/g, ' ').substring(0, 60),
+          role: 'PM',
+          status: 'done', // PM 消息发出即视为完成规划
+          createdAt: ts,
+          updatedAt: ts,
+        })
+      }
+      continue
+    }
+
+    // 3) AP 审批消息 → 追踪为 AP 任务
+    if (role === 'AP') {
+      const apText = msg.content.substring(0, 60)
+      if (apText.length > 3) {
+        const isPass = /PASSED|APPROVED|通过/i.test(msg.content)
+        tasks.push({
+          id: `ap-${msg.timestamp}`,
+          description: apText.replace(/\n/g, ' '),
+          role: 'AP',
+          status: isPass ? 'done' : 'doing',
+          createdAt: ts,
+          updatedAt: ts,
+        })
+      }
+      continue
+    }
+
+    // 4) 用户消息 → 追踪为 USR 待处理（最后一条）
+    if (role === 'USR') {
+      const usrText = msg.content.substring(0, 60)
+      if (usrText.length > 3) {
+        tasks.push({
+          id: `usr-${msg.timestamp}`,
+          description: usrText.replace(/\n/g, ' '),
+          role: 'USR',
+          status: 'pending',
+          createdAt: ts,
+          updatedAt: ts,
+        })
+      }
+    }
+  }
+  return tasks
+})
 
 // [3.4] AI 思考链状态
 const thinkingCollapsed = ref(true) // 默认折叠，不占空间

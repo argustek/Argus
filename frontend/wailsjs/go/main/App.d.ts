@@ -48,6 +48,36 @@ export function CreateBranch(arg1:string):Promise<void>;
 
 export function CreateFile(arg1:string,arg2:string):Promise<void>;
 
+export function DebugBreakpoints(arg1:string):Promise<any>;
+
+export function DebugContinue(arg1:string):Promise<void>;
+
+export function DebugEvaluate(arg1:string,arg2:string):Promise<any>;
+
+export function DebugPause(arg1:string):Promise<void>;
+
+export function DebugRemoveBreakpoint(arg1:string,arg2:string,arg3:number):Promise<void>;
+
+export function DebugSessions():Promise<Record<string, any>>;
+
+export function DebugSetBreakpoint(arg1:string,arg2:string,arg3:number,arg4:string):Promise<any>;
+
+export function DebugStacktrace(arg1:string,arg2:number):Promise<any>;
+
+export function DebugStart(arg1:string,arg2:string,arg3:Array<string>,arg4:boolean):Promise<any>;
+
+export function DebugStatus(arg1:string):Promise<any>;
+
+export function DebugStepInto(arg1:string):Promise<void>;
+
+export function DebugStepOut(arg1:string):Promise<void>;
+
+export function DebugStepOver(arg1:string):Promise<void>;
+
+export function DebugStop(arg1:string):Promise<void>;
+
+export function DebugVariables(arg1:string,arg2:string):Promise<any>;
+
 export function DeleteFile(arg1:string):Promise<void>;
 
 export function EmitTaskClarify(arg1:string):Promise<void>;
@@ -154,6 +184,16 @@ export function ListFiles():Promise<Array<Record<string, any>>>;
 
 export function LogPMAudit(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function MCPAddServer(arg1:string,arg2:string,arg3:Array<string>,arg4:Record<string, string>):Promise<void>;
+
+export function MCPCallTool(arg1:string,arg2:Record<string, any>):Promise<any>;
+
+export function MCPRemoveServer(arg1:string):Promise<void>;
+
+export function MCPServers():Promise<Record<string, any>>;
+
+export function MCPTools():Promise<Array<Record<string, any>>>;
+
 export function NewTerminalSession(arg1:string):Promise<string>;
 
 export function OnWindowDidShow(arg1:context.Context):Promise<void>;
@@ -251,6 +291,16 @@ export function SwitchTerminalSession(arg1:string):Promise<void>;
 export function TerminalTabComplete(arg1:string):Promise<Array<string>>;
 
 export function TestAPIConfig(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.APITestResult>;
+
+export function TokenClear():Promise<void>;
+
+export function TokenCount(arg1:string):Promise<Record<string, any>>;
+
+export function TokenManage():Promise<Record<string, any>>;
+
+export function TokenPrune(arg1:number):Promise<Record<string, any>>;
+
+export function TokenStats():Promise<Record<string, any>>;
 
 export function TrackFile(arg1:string):Promise<void>;
 

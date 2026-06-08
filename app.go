@@ -26,6 +26,7 @@ import (
 
 	"argus/internal/chat"
 	"argus/internal/core"
+	"argus/internal/debugger"
 	"argus/internal/dingtalk"
 	"argus/internal/git"
 	"argus/internal/i18n"
@@ -212,6 +213,7 @@ type App struct {
 	memoryManager  *memory.MemoryManager
 	contextBuilder *memory.ContextBuilder
 	compressor     *memory.Compressor
+	contextWindow  *memory.ContextWindow // [v0.7.2] 智能上下文窗口管理
 
 	// C 守护进程相关
 	cRunning  bool
@@ -244,6 +246,9 @@ type App struct {
 
 	// [v0.7.1] MCP Manager
 	mcpManager *mcp.Manager
+
+	// [v0.7.2] Debugger Session Manager
+	debuggerMgr *debugger.DebugSessionManager
 }
 
 // ChangeRecord 改动记录
@@ -3528,6 +3533,7 @@ func (a *App) initMemorySystem() {
 	a.memoryManager = mm
 	a.contextBuilder = memory.NewContextBuilder(mm)
 	a.compressor = memory.NewCompressor(mm)
+	a.contextWindow = memory.NewContextWindow(memory.DefaultContextBudget())
 
 	a.addLog("记忆系统已初始化（SQLite + FTS5）")
 }
@@ -3650,6 +3656,9 @@ func (a *App) initMCPManager(workDir string) {
 	}
 
 	a.mcpManager = mcp.NewManager(workDir)
+
+	// Initialize Debugger Manager
+	a.debuggerMgr = debugger.NewDebugSessionManager(nil, workDir) // executor set later when available
 
 	for i, srv := range servers {
 		if !srv.Enabled {
@@ -3861,4 +3870,226 @@ func (a *App) TerminalTabComplete(input string) ([]string, error) {
 
 func (a *App) emitTerminalOutput(output string) {
 	a.emitToFrontend("terminal:output", output, "Terminal", chat.PathSEExec)
+}
+
+// ========== [v0.7.2] Panel Binding Methods (Message Bus / Direct Call) ==========
+
+// --- Token Monitor ---
+
+func (a *App) TokenStats() (map[string]interface{}, error) {
+	if a.contextWindow == nil {
+		return nil, fmt.Errorf("context window not initialized")
+	}
+	return a.contextWindow.TokenStats(), nil
+}
+
+func (a *App) TokenManage() (map[string]interface{}, error) {
+	if a.contextWindow == nil {
+		return nil, fmt.Errorf("context window not initialized")
+	}
+	actionTaken, detail := a.contextWindow.ManageIfNeeded()
+	return map[string]interface{}{"action_taken": actionTaken, "detail": detail}, nil
+}
+
+func (a *App) TokenClear() error {
+	if a.contextWindow == nil {
+		return fmt.Errorf("context window not initialized")
+	}
+	a.contextWindow.Clear()
+	return nil
+}
+
+func (a *App) TokenCount(text string) (map[string]interface{}, error) {
+	if text == "" {
+		return nil, fmt.Errorf("text parameter required")
+	}
+	counter := memory.NewTokenCounter()
+	count := counter.CountTokens(text)
+	return map[string]interface{}{
+		"text": text, "char_count": len(text),
+		"rune_count": len([]rune(text)), "token_count": count,
+	}, nil
+}
+
+func (a *App) TokenPrune(maxTokens int) (map[string]interface{}, error) {
+	if a.contextWindow == nil {
+		return nil, fmt.Errorf("context window not initialized")
+	}
+	if maxTokens <= 0 {
+		maxTokens = 100000
+	}
+	pruned := a.contextWindow.PruneToLimit(maxTokens)
+	return map[string]interface{}{"pruned": pruned}, nil
+}
+
+// --- MCP Panel ---
+
+func (a *App) MCPServers() (map[string]interface{}, error) {
+	if a.mcpManager == nil {
+		return map[string]interface{}{"servers": []interface{}{}, "total": 0}, nil
+	}
+	servers := a.mcpManager.ListServers()
+	return map[string]interface{}{"servers": servers, "total": len(servers)}, nil
+}
+
+func (a *App) MCPAddServer(name, command string, args []string, env map[string]string) error {
+	if a.mcpManager == nil {
+		return fmt.Errorf("MCP Manager 未初始化")
+	}
+	if name == "" || command == "" {
+		return fmt.Errorf("name 和 command 必填")
+	}
+	cfg := types.MCPServerConfig{Name: name, Command: command, Args: args, Env: env, Enabled: true}
+	if err := a.mcpManager.AddServer(cfg); err != nil {
+		return err
+	}
+	a.addLog(fmt.Sprintf("【MCP】动态添加 Server '%s'", name))
+	return nil
+}
+
+func (a *App) MCPRemoveServer(name string) error {
+	if a.mcpManager == nil {
+		return fmt.Errorf("MCP Manager 未初始化")
+	}
+	if err := a.mcpManager.RemoveServer(name); err != nil {
+		return err
+	}
+	a.addLog(fmt.Sprintf("【MCP】移除 Server '%s'", name))
+	return nil
+}
+
+func (a *App) MCPTools() ([]map[string]interface{}, error) {
+	if a.mcpManager == nil {
+		return []map[string]interface{}{}, nil
+	}
+	raw := a.mcpManager.GetAllTools()
+	result := make([]map[string]interface{}, len(raw))
+	for i, t := range raw {
+		result[i] = map[string]interface{}{
+			"name": t.Name, "description": t.Description,
+			"server_name": t.ServerName, "input_schema": t.InputSchema,
+		}
+	}
+	return result, nil
+}
+
+func (a *App) MCPCallTool(toolName string, arguments map[string]interface{}) (interface{}, error) {
+	if a.mcpManager == nil {
+		return nil, fmt.Errorf("MCP Manager 未初始化")
+	}
+	// 遍历所有服务器查找工具
+	servers := a.mcpManager.ListServers()
+	for _, s := range servers {
+		if !s.Initialized { continue }
+		tools, err := a.mcpManager.RefreshTools(s.Name)
+		if err != nil { continue }
+		for _, t := range tools {
+			if t.Name == toolName {
+				result, err := a.mcpManager.CallTool(s.Name, toolName, arguments)
+				if err != nil { return nil, err }
+				return result.Content, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("tool '%s' not found", toolName)
+}
+
+// --- Debugger Panel ---
+
+func (a *App) DebugStart(program, mode string, args []string, stopOnEntry bool) (interface{}, error) {
+	if mode == "" {
+		mode = "test"
+	}
+	session, err := a.debuggerMgr.StartDebug(program, mode, args, stopOnEntry)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+func (a *App) DebugStop(sessionID string) error {
+	if sessionID == "" {
+		a.debuggerMgr.StopAll()
+		return nil
+	}
+	return a.debuggerMgr.StopDebug(sessionID)
+}
+
+func (a *App) DebugSessions() (map[string]interface{}, error) {
+	sessions := a.debuggerMgr.GetAllSessions()
+	return map[string]interface{}{"sessions": sessions, "count": len(sessions)}, nil
+}
+
+func (a *App) DebugStatus(sessionID string) (interface{}, error) {
+	if sessionID == "" {
+		sessions := a.debuggerMgr.GetAllSessions()
+		if len(sessions) == 0 {
+			return map[string]bool{"running": false}, nil
+		}
+		sessionID = sessions[len(sessions)-1].ID
+	}
+	session, err := a.debuggerMgr.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return session.Client.CurrentState(), nil
+}
+
+func (a *App) DebugSetBreakpoint(sessionID, file string, line int, condition string) (interface{}, error) {
+	bp, err := a.debuggerMgr.SetBreakpoint(sessionOrDefault(sessionID, a), file, line, condition)
+	if err != nil {
+		return nil, err
+	}
+	return bp, nil
+}
+
+func (a *App) DebugRemoveBreakpoint(sessionID, file string, line int) error {
+	return a.debuggerMgr.RemoveBreakpoint(sessionOrDefault(sessionID, a), file, line)
+}
+
+func (a *App) DebugBreakpoints(sessionID string) (interface{}, error) {
+	bps, err := a.debuggerMgr.GetBreakpoints(sessionOrDefault(sessionID, a))
+	if err != nil {
+		return nil, err
+	}
+	return bps, nil
+}
+
+func (a *App) DebugContinue(sessionID string) error {
+	return a.debuggerMgr.Continue(sessionOrDefault(sessionID, a))
+}
+
+func (a *App) DebugStepOver(sessionID string) error {
+	return a.debuggerMgr.Next(sessionOrDefault(sessionID, a))
+}
+
+func (a *App) DebugStepInto(sessionID string) error {
+	return a.debuggerMgr.StepIn(sessionOrDefault(sessionID, a))
+}
+
+func (a *App) DebugStepOut(sessionID string) error {
+	return a.debuggerMgr.StepOut(sessionOrDefault(sessionID, a))
+}
+
+func (a *App) DebugPause(sessionID string) error {
+	return a.debuggerMgr.Pause(sessionOrDefault(sessionID, a))
+}
+
+func (a *App) DebugStacktrace(sessionID string, depth int) (interface{}, error) {
+	if depth <= 0 { depth = 20 }
+	frames, err := a.debuggerMgr.GetCallStack(sessionOrDefault(sessionID, a))
+	if err != nil { return nil, err }
+	return map[string]interface{}{"frames": frames, "count": len(frames)}, nil
+}
+
+func (a *App) DebugVariables(sessionID string, scope string) (interface{}, error) {
+	vars, err := a.debuggerMgr.GetVariables(sessionOrDefault(sessionID, a))
+	if err != nil { return nil, err }
+	return vars, nil
+}
+
+func (a *App) DebugEvaluate(sessionID, expression string) (interface{}, error) {
+	v, err := a.debuggerMgr.EvaluateExpression(sessionOrDefault(sessionID, a), expression)
+	if err != nil { return nil, err }
+	return v, nil
 }

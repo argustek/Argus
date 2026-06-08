@@ -116,6 +116,24 @@
       v-if="activeWindows.git"
       @close="activeWindows.git = false"
     />
+
+    <!-- [v0.7.2] 浮动窗口：Debugger 调试器 -->
+    <div v-if="activeWindows.debug" class="floating-panel floating-wide">
+      <DebugPanel @close="activeWindows.debug = false" />
+      <button class="panel-close" @click="activeWindows.debug = false">×</button>
+    </div>
+
+    <!-- [v0.7.2] 浮动窗口：MCP 工具协议 -->
+    <div v-if="activeWindows.mcp" class="floating-panel">
+      <MCPPanel />
+      <button class="panel-close" @click="activeWindows.mcp = false">×</button>
+    </div>
+
+    <!-- [v0.7.2] 浮动窗口：Token 监控 -->
+    <div v-if="activeWindows.token" class="floating-panel floating-narrow">
+      <TokenMonitor />
+      <button class="panel-close" @click="activeWindows.token = false">×</button>
+    </div>
     
     <!-- 设置面板 -->
     <SettingsPanel
@@ -153,6 +171,9 @@ import ChangesWindow from './components/ChangesWindow.vue'
 import GitWindow from './components/GitWindow.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import DiffPreviewDialog from './components/DiffPreviewDialog.vue'
+import DebugPanel from './components/DebugPanel.vue'
+import MCPPanel from './components/MCPPanel.vue'
+import TokenMonitor from './components/TokenMonitor.vue'
 
 // DiffPreviewDialog 数据类型
 interface DiffData {
@@ -178,7 +199,10 @@ const activeWindows = reactive({
   editor: savedWindowStates.editor ?? false,
   terminal: true,
   changes: savedWindowStates.changes ?? false,
-  git: savedWindowStates.git ?? false
+  git: savedWindowStates.git ?? false,
+  debug: savedWindowStates.debug ?? false,
+  mcp: savedWindowStates.mcp ?? false,
+  token: savedWindowStates.token ?? false
 })
 
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
@@ -742,6 +766,7 @@ onMounted(async () => {
         if (role === 'pm') aiStatus.pmStatus = status === 'busy' ? 'busy' : 'idle'
         else if (role === 'se') aiStatus.seStatus = status === 'busy' ? 'busy' : 'idle'
         else if (role === 'ap') aiStatus.apStatus = status === 'busy' ? 'busy' : 'idle'
+        else if (role === 'none' || status === 'error') { aiStatus.pmStatus = 'idle'; aiStatus.seStatus = 'idle'; aiStatus.apStatus = 'idle' }
       }
     }
   })
@@ -1690,4 +1715,38 @@ body {
 .right-panel .terminal-window .win-btn {
   display: none !important;
 }
+
+/* [v0.7.2] 浮动面板 (Debug/MCP/Token) */
+.floating-panel {
+  position: fixed;
+  top: 40px; /* TopBar height */
+  right: 12px;
+  width: 360px;
+  max-height: calc(100vh - 60px);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.floating-panel.floating-wide {
+  width: 480px;
+}
+
+.floating-panel.floating-narrow {
+  width: 300px;
+}
+
+.panel-close {
+  position: absolute;
+  top: 8px; right: 8px;
+  background: transparent; border: none; color: var(--text-secondary);
+  font-size: 18px; cursor: pointer; z-index: 10;
+  line-height: 1; padding: 2px 6px; border-radius: 4px;
+}
+.panel-close:hover { color: var(--error-color); background: var(--bg-tertiary); }
 </style>

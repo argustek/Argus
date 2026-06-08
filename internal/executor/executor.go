@@ -26,7 +26,7 @@ import (
 type Executor struct {
 	workDir        string
 	boardManager   *board.Manager
-	terminalOutput func(string)
+	TerminalOutput func(string)
 	onFileWritten  func(path string)
 	shellSession   *ShellSession
 }
@@ -39,7 +39,7 @@ func NewExecutor(workDir string, boardManager *board.Manager) *Executor {
 }
 
 func (e *Executor) SetTerminalOutput(callback func(string)) {
-	e.terminalOutput = callback
+	e.TerminalOutput = callback
 }
 
 func (e *Executor) SetOnFileWritten(callback func(path string)) {
@@ -658,8 +658,8 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 	outputStr := toUTF8(output)
 	fmt.Printf("[Executor] Output length: %d, err: %v\n", len(outputStr), err)
 
-	if e.terminalOutput != nil {
-		e.terminalOutput(fmt.Sprintf("[%s] > %s\n%s", e.workDir, command, outputStr))
+	if e.TerminalOutput != nil {
+		e.TerminalOutput(fmt.Sprintf("[%s] > %s\n%s", e.workDir, command, outputStr))
 	}
 
 	if err != nil {

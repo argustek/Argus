@@ -86,6 +86,66 @@ export function CreateFile(arg1, arg2) {
   return window['go']['main']['App']['CreateFile'](arg1, arg2);
 }
 
+export function DebugBreakpoints(arg1) {
+  return window['go']['main']['App']['DebugBreakpoints'](arg1);
+}
+
+export function DebugContinue(arg1) {
+  return window['go']['main']['App']['DebugContinue'](arg1);
+}
+
+export function DebugEvaluate(arg1, arg2) {
+  return window['go']['main']['App']['DebugEvaluate'](arg1, arg2);
+}
+
+export function DebugPause(arg1) {
+  return window['go']['main']['App']['DebugPause'](arg1);
+}
+
+export function DebugRemoveBreakpoint(arg1, arg2, arg3) {
+  return window['go']['main']['App']['DebugRemoveBreakpoint'](arg1, arg2, arg3);
+}
+
+export function DebugSessions() {
+  return window['go']['main']['App']['DebugSessions']();
+}
+
+export function DebugSetBreakpoint(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['DebugSetBreakpoint'](arg1, arg2, arg3, arg4);
+}
+
+export function DebugStacktrace(arg1, arg2) {
+  return window['go']['main']['App']['DebugStacktrace'](arg1, arg2);
+}
+
+export function DebugStart(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['DebugStart'](arg1, arg2, arg3, arg4);
+}
+
+export function DebugStatus(arg1) {
+  return window['go']['main']['App']['DebugStatus'](arg1);
+}
+
+export function DebugStepInto(arg1) {
+  return window['go']['main']['App']['DebugStepInto'](arg1);
+}
+
+export function DebugStepOut(arg1) {
+  return window['go']['main']['App']['DebugStepOut'](arg1);
+}
+
+export function DebugStepOver(arg1) {
+  return window['go']['main']['App']['DebugStepOver'](arg1);
+}
+
+export function DebugStop(arg1) {
+  return window['go']['main']['App']['DebugStop'](arg1);
+}
+
+export function DebugVariables(arg1, arg2) {
+  return window['go']['main']['App']['DebugVariables'](arg1, arg2);
+}
+
 export function DeleteFile(arg1) {
   return window['go']['main']['App']['DeleteFile'](arg1);
 }
@@ -298,6 +358,26 @@ export function LogPMAudit(arg1, arg2, arg3) {
   return window['go']['main']['App']['LogPMAudit'](arg1, arg2, arg3);
 }
 
+export function MCPAddServer(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['MCPAddServer'](arg1, arg2, arg3, arg4);
+}
+
+export function MCPCallTool(arg1, arg2) {
+  return window['go']['main']['App']['MCPCallTool'](arg1, arg2);
+}
+
+export function MCPRemoveServer(arg1) {
+  return window['go']['main']['App']['MCPRemoveServer'](arg1);
+}
+
+export function MCPServers() {
+  return window['go']['main']['App']['MCPServers']();
+}
+
+export function MCPTools() {
+  return window['go']['main']['App']['MCPTools']();
+}
+
 export function NewTerminalSession(arg1) {
   return window['go']['main']['App']['NewTerminalSession'](arg1);
 }
@@ -492,6 +572,26 @@ export function TerminalTabComplete(arg1) {
 
 export function TestAPIConfig(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['TestAPIConfig'](arg1, arg2, arg3, arg4);
+}
+
+export function TokenClear() {
+  return window['go']['main']['App']['TokenClear']();
+}
+
+export function TokenCount(arg1) {
+  return window['go']['main']['App']['TokenCount'](arg1);
+}
+
+export function TokenManage() {
+  return window['go']['main']['App']['TokenManage']();
+}
+
+export function TokenPrune(arg1) {
+  return window['go']['main']['App']['TokenPrune'](arg1);
+}
+
+export function TokenStats() {
+  return window['go']['main']['App']['TokenStats']();
 }
 
 export function TrackFile(arg1) {

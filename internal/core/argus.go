@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"argus/internal/ai"
+	"argus/internal/debugger"
 	"argus/internal/executor"
 )
 
@@ -94,6 +95,8 @@ type ArgusCore struct {
 	workDir  string
 	language string
 
+	debuggerMgr *debugger.DebugSessionManager // DAP 调试会话管理器
+
 	onMessage      func(source, content string)
 	onChunk        func(delta string)
 	onThought      func(evt map[string]interface{}) // 思考链回调（Dashboard可视化）
@@ -123,6 +126,7 @@ func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *Arg
 		cancel:     cancel,
 		maxRetries: 3,
 		timeout:    120 * time.Second,
+		debuggerMgr: debugger.NewDebugSessionManager(exec, workDir),
 	}
 
 	return core
@@ -1789,6 +1793,127 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 			} else {
 				output = fmt.Sprintf("✅ install_pkg '%s' via %s succeeded\n%s", pkgName, pkgManager, truncateContent(output, 2000))
 			}
+		// ========== DAP 断点调试工具 ==========
+		case "debug_start":
+			mode := action.DebugMode
+			if mode == "" {
+				mode = "test"
+			}
+			stopOnEntry := action.DebugStopOnEntry
+			session, dbgErr := c.debuggerMgr.StartDebug(action.Program, mode, action.Args, stopOnEntry)
+			if dbgErr != nil {
+				output = fmt.Sprintf("❌ debug_start error: %v", dbgErr)
+				err = dbgErr
+			} else {
+				output = fmt.Sprintf("🐛 Debug session started [ID:%s] program=%s mode=%s",
+					session.ID, session.Program, session.Mode)
+			}
+		case "debug_set_breakpoint":
+			bp, bpErr := c.debuggerMgr.SetBreakpoint(c.getActiveDebugSessionID(), action.FilePath, action.Line, action.Condition)
+			if bpErr != nil {
+				output = fmt.Sprintf("❌ debug_set_breakpoint error: %v", bpErr)
+				err = bpErr
+			} else if !bp.Verified {
+				output = fmt.Sprintf("⚠️  Breakpoint set at %s:%d (not verified - may not be valid code line)",
+					action.FilePath, action.Line)
+			} else {
+				output = fmt.Sprintf("✅ Breakpoint #%d at %s:%d verified ✓", bp.ID, action.FilePath, bp.Line)
+			}
+		case "debug_continue":
+			if stepErr := c.debuggerMgr.Continue(c.getActiveDebugSessionID()); stepErr != nil {
+				output = fmt.Sprintf("❌ debug_continue error: %v", stepErr)
+				err = stepErr
+			} else {
+				output = "▶️  Continued — running until next breakpoint"
+				c.debuggerMgr.InvalidateCache(c.getActiveDebugSessionID())
+			}
+		case "debug_step_over":
+			if stepErr := c.debuggerMgr.Next(c.getActiveDebugSessionID()); stepErr != nil {
+				output = fmt.Sprintf("❌ debug_step_over error: %v", stepErr)
+				err = stepErr
+			} else {
+				output = "⤵️  Step Over"
+				c.debuggerMgr.InvalidateCache(c.getActiveDebugSessionID())
+			}
+		case "debug_step_into":
+			if stepErr := c.debuggerMgr.StepIn(c.getActiveDebugSessionID()); stepErr != nil {
+				output = fmt.Sprintf("❌ debug_step_into error: %v", stepErr)
+				err = stepErr
+			} else {
+				output = "⤵️  Step Into"
+				c.debuggerMgr.InvalidateCache(c.getActiveDebugSessionID())
+			}
+		case "debug_step_out":
+			if stepErr := c.debuggerMgr.StepOut(c.getActiveDebugSessionID()); stepErr != nil {
+				output = fmt.Sprintf("❌ debug_step_out error: %v", stepErr)
+				err = stepErr
+			} else {
+				output = "⤴️  Step Out"
+				c.debuggerMgr.InvalidateCache(c.getActiveDebugSessionID())
+			}
+		case "debug_pause":
+			if pauseErr := c.debuggerMgr.Pause(c.getActiveDebugSessionID()); pauseErr != nil {
+				output = fmt.Sprintf("❌ debug_pause error: %v", pauseErr)
+				err = pauseErr
+			} else {
+				output = "⏸️  Paused"
+			}
+		case "debug_stop":
+			if stopErr := c.debuggerMgr.StopDebug(c.getActiveDebugSessionID()); stopErr != nil {
+				output = fmt.Sprintf("❌ debug_stop error: %v", stopErr)
+				err = stopErr
+			} else {
+				output = "🛑 Debug session stopped"
+			}
+		case "debug_stacktrace":
+			frames, stErr := c.debuggerMgr.GetCallStack(c.getActiveDebugSessionID())
+			if stErr != nil {
+				output = fmt.Sprintf("❌ debug_stacktrace error: %v", stErr)
+				err = stErr
+			} else {
+				output = fmt.Sprintf("📋 Call Stack (%d frames):\n", len(frames))
+				for i, f := range frames {
+					src := ""
+					if f.Source != nil {
+						src = fmt.Sprintf("%s:%d", f.Source.Path, f.Line)
+					}
+					output += fmt.Sprintf("  #%d %s @ %s\n", i, f.Name, src)
+				}
+			}
+		case "debug_variables":
+			varsMap, vErr := c.debuggerMgr.GetVariables(c.getActiveDebugSessionID())
+			if vErr != nil {
+				output = fmt.Sprintf("❌ debug_variables error: %v", vErr)
+				err = vErr
+			} else {
+				output = "📊 Variables:\n"
+				for scopeName, vars := range varsMap {
+					output += fmt.Sprintf("  [%s] (%d vars):\n", scopeName, len(vars))
+					for _, v := range vars {
+						vType := ""
+						if v.Type != "" {
+							vType = fmt.Sprintf(" [%s]", v.Type)
+						}
+						refHint := ""
+						if v.VariablesReference > 0 {
+							refHint = fmt.Sprintf(" (+%d children)", v.NamedVariables+v.IndexedVariables)
+						}
+						output += fmt.Sprintf("    %s%s = %s%s\n", v.Name, vType, v.Value, refHint)
+					}
+				}
+			}
+		case "debug_evaluate":
+			result, evalErr := c.debuggerMgr.EvaluateExpression(c.getActiveDebugSessionID(), action.Expression)
+			if evalErr != nil {
+				output = fmt.Sprintf("❌ debug_evaluate '%s' error: %v", action.Expression, evalErr)
+				err = evalErr
+			} else {
+				vType := ""
+				if result.Type != "" {
+					vType = fmt.Sprintf(" [%s]", result.Type)
+				}
+				output = fmt.Sprintf("🔍 eval(%s) = %s%s", action.Expression, result.Value, vType)
+			}
 		default:
 			err = fmt.Errorf("unknown action type: %s", action.Type)
 			output = fmt.Sprintf("❌ unknown action: %s", action.Type)
@@ -1888,6 +2013,16 @@ func (c *ArgusCore) GetMemory() *SharedMemory {
 
 func (c *ArgusCore) ClearMemory() {
 	c.memory.Clear()
+}
+
+// getActiveDebugSessionID 获取当前活跃的调试会话ID
+// 如果没有活跃会话则返回空字符串（调用方需检查）
+func (c *ArgusCore) getActiveDebugSessionID() string {
+	sessions := c.debuggerMgr.GetAllSessions()
+	if len(sessions) > 0 {
+		return sessions[len(sessions)-1].ID // 返回最新的会话
+	}
+	return ""
 }
 
 func (c *ArgusCore) Stats() map[string]interface{} {

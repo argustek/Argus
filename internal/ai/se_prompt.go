@@ -581,6 +581,39 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			action.Command = v
 		}
 		action.Type = "debug_run"
+	// ========== DAP 断点调试工具 ==========
+	case "debug_start":
+		if v, ok := args["program"].(string); ok {
+			action.Program = v
+		}
+		if v, ok := args["mode"].(string); ok {
+			action.DebugMode = v
+		}
+		if v, ok := args["stop_on_entry"].(bool); ok {
+			action.DebugStopOnEntry = v
+		}
+		if v, ok := args["args"].([]string); ok {
+			action.Args = v
+		}
+		action.Type = "debug_start"
+	case "debug_set_breakpoint":
+		if v, ok := args["file_path"].(string); ok {
+			action.FilePath = v
+		}
+		if v, ok := args["line"].(float64); ok {
+			action.Line = int(v)
+		}
+		if v, ok := args["condition"].(string); ok {
+			action.Condition = v
+		}
+		action.Type = "debug_set_breakpoint"
+	case "debug_continue", "debug_step_over", "debug_step_into", "debug_step_out", "debug_pause", "debug_stop", "debug_stacktrace", "debug_variables":
+		action.Type = tc.Function.Name
+	case "debug_evaluate":
+		if v, ok := args["expression"].(string); ok {
+			action.Expression = v
+		}
+		action.Type = "debug_evaluate"
 	// ========== 文档处理工具 ==========
 	case "read_pdf":
 		if v, ok := args["path"].(string); ok {
@@ -1444,6 +1477,15 @@ type SEAction struct {
 	ToolName        string   `json:"tool_name,omitempty"`      // ensure_tool: 要检测的工具名
 	PkgName         string   `json:"pkg_name,omitempty"`       // install_pkg: 包名
 	PkgManager      string   `json:"pkg_manager,omitempty"`    // install_pkg: 包管理器(pip/npm/cargo/go)
+
+	// ========== DAP 断点调试工具参数 ==========
+	Args            []string `json:"args,omitempty"`           // debug_start: 程序参数
+	Program         string   `json:"program,omitempty"`        // debug_start: 要调试的程序/测试包
+	DebugMode       string   `json:"debug_mode,omitempty"`     // debug_start: "debug" 或 "test"
+	DebugStopOnEntry bool    `json:"debug_stop_on_entry,omitempty"` // debug_start: 入口暂停
+	FilePath        string   `json:"file_path,omitempty"`      // debug_set_breakpoint: 源文件路径
+	Condition       string   `json:"condition,omitempty"`       // debug_set_breakpoint: 条件表达式
+	Expression      string   `json:"expression,omitempty"`      // debug_evaluate: 要计算的表达式
 }
 
 type SECompletion struct {
@@ -2288,6 +2330,177 @@ var SETools = []Tool{
 					},
 				},
 				"required": []string{"command"},
+			},
+		},
+	},
+	// ========== DAP 断点调试工具 (delve) ==========
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_start",
+			Description: "启动 DAP 调试会话（基于 delve）。支持调试运行模式（debug）和测试模式（test）。启动后可设置断点、单步执行、查看变量。使用前确保已安装 delve（go install github.com/go-delve/delve/cmd/dlv@latest）。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"program": map[string]interface{}{
+						"type":        "string",
+						"description": "要调试的程序或测试包（如 './cmd/argus' 或 './internal/ai/' 或 'go test ./...'）",
+					},
+					"mode": map[string]interface{}{
+						"type":        "string",
+						"description": "模式: 'debug'（调试可执行文件）或 'test'（调试测试），默认 test",
+					},
+					"stop_on_entry": map[string]interface{}{
+						"type":        "boolean",
+						"description": "是否在入口处暂停（默认 false）",
+					},
+					"args": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+						"description": "程序参数（仅 debug 模式）",
+					},
+				},
+				"required": []string{"program"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_set_breakpoint",
+			Description: "在指定文件的某一行设置断点。程序执行到该行时会自动暂停，可以检查变量状态。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{
+						"type":        "string",
+						"description": "源文件路径（相对于工作目录）",
+					},
+					"line": map[string]interface{}{
+						"type":        "integer",
+						"description": "行号（从1开始）",
+					},
+					"condition": map[string]interface{}{
+						"type":        "string",
+						"description": "条件断点表达式（可选，如 'i > 5'），为空则无条件断点",
+					},
+				},
+				"required": []string{"file_path", "line"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_continue",
+			Description: "继续执行：从当前断点恢复程序运行，直到遇到下一个断点或程序结束。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_step_over",
+			Description: "单步跳过(Step Over)：执行当前行，不进入函数内部。用于逐行跟踪代码逻辑。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_step_into",
+			Description: "单步进入(Step Into)：如果当前行是函数调用，则进入函数内部。用于深入追踪函数执行过程。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_step_out",
+			Description: "单步跳出(Step Out)：执行完当前函数剩余部分，返回到调用者。用于快速退出不关心的函数。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_pause",
+			Description: "暂停正在运行的程序。当程序陷入死循环或长时间运行时使用。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_stop",
+			Description: "停止调试会话，终止被调试进程并释放所有资源。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_stacktrace",
+			Description: "获取当前调用栈信息。显示函数调用链、文件名、行号。在断点暂停后使用。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_variables",
+			Description: "获取当前作用域的局部变量和参数值。显示变量名、类型、值。在断点暂停后使用。支持展开结构体/切片/映射等复合类型。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties":    map[string]interface{}{},
+				"required":      []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "debug_evaluate",
+			Description: "在当前上下文中计算任意 Go 表达式的值。例如查看数组元素 arr[3]、字段 obj.Name、计算 len(data) 等。比 variables 更灵活。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"expression": map[string]interface{}{
+						"type":        "string",
+						"description": "要计算的 Go 表达式（如 'user.Name', 'len(result)', 'err.Error()'）",
+					},
+				},
+				"required": []string{"expression"},
 			},
 		},
 	},
