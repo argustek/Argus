@@ -482,17 +482,25 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	m.config.APIConfig = apiConfig
 	m.aiClient = ai.NewClient(apiConfig)
 	m.aiClient.SetDebugLog(m.seDebugLog) // Client层G-DEBUG日志写入conversation.log
+	m.seDebugLog(fmt.Sprintf("[UpdateAPIConfig] aiClient=%p model=%s useSeparate=%v", m.aiClient, apiConfig.Model, m.config.UseSeparateModels))
+
+	// 共享模式下清空角色配置，防止rebuildRoleClients创建独立client覆盖aiClient
+	if !m.config.UseSeparateModels {
+		m.config.PMConfig = types.APIConfig{}
+		m.config.SEConfig = types.APIConfig{}
+		m.config.APConfig = types.APIConfig{}
+	}
 
 	// 重建各角色独立客户端（如果配置了）
 	m.rebuildRoleClients()
 	// 重建后必须重新设置debugLog（新Client对象）
-	if m.pmClient != nil { m.pmClient.SetDebugLog(m.seDebugLog) }
+	if m.pmClient != nil { m.pmClient.SetDebugLog(m.seDebugLog); m.seDebugLog(fmt.Sprintf("[UpdateAPIConfig] pmClient=%p model=%s", m.pmClient, m.config.PMConfig.Model)) }
 	if m.seClient != nil { m.seClient.SetDebugLog(m.seDebugLog) }
 	if m.apClient != nil { m.apClient.SetDebugLog(m.seDebugLog) }
 
 	// PM
 	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
-		fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
+		fmt.Printf("[PM] 通过FunctionCall更新项目状态: %d\n", state)
 		if m.cMonitor != nil {
 			m.cMonitor.UpdateProjectState(state)
 		} else {
@@ -565,14 +573,24 @@ func (m *Manager) rebuildRoleClients() {
 	}
 }
 
+// UpdateUseSeparateModels 更新共享/独立模式标志（SaveConfig时先调用此方法）
+func (m *Manager) UpdateUseSeparateModels(useSeparate bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.UseSeparateModels = useSeparate
+}
+
 // UpdatePMConfig 动态更新PM的独立模型配置
 func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.PMConfig = pmConfig
 	m.rebuildRoleClients()
+	if m.pmClient != nil {
+		m.seDebugLog(fmt.Sprintf("[UpdatePMConfig] NEW pmClient=%p model=%s", m.pmClient, pmConfig.Model))
+	}
 	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
-		fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
+		fmt.Printf("[PM] 通过FunctionCall更新项目状态: %d\n", state)
 		if m.cMonitor != nil {
 			m.cMonitor.UpdateProjectState(state)
 		}
@@ -583,6 +601,8 @@ func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
 		func() { m.ClearTodoList() },
 	)
+	m.seDebugLog(fmt.Sprintf("[UpdatePMConfig] ✅ PM model changed to: %s (BaseURL=%s)",
+		pmConfig.Model, pmConfig.BaseURL))
 	fmt.Printf("[Manager] PM配置已更新: Model=%s\n", pmConfig.Model)
 }
 
@@ -1645,6 +1665,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	aiGen := m.getResetGeneration()
+	
+	// [DEBUG] Log current PM model before calling processor
+	m.seDebugLog(fmt.Sprintf("[handleToPM] 🔧 PM model=%s baseURL=%s (pmClient=%v)",
+		m.config.PMConfig.Model, m.config.PMConfig.BaseURL, m.pmClient != nil))
+	
 	if isReviewScenario {
 		fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
 		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, func(delta string) {
@@ -5720,6 +5745,11 @@ func (m *Manager) seDebugLog(msg string) {
 
 // writeRouteLog 路由调试日志（永久保留，排查消息路由问题用）
 func (m *Manager) writeRouteLog(msg string) {
+	m.seDebugLog(msg)
+}
+
+// LogDebug 写调试日志到conversation.log（暴露给App层使用）
+func (m *Manager) LogDebug(msg string) {
 	m.seDebugLog(msg)
 }
 

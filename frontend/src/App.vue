@@ -368,6 +368,19 @@ onMounted(async () => {
   })
   console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
 
+  // [v0.7.3] Context Management: global ACK for token/context/compress events (must be inside onMounted)
+  EventsOn('token_stats', (data: any) => {
+    console.log('[App.vue] token_stats received, msgId=', data?._msgId)
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+  EventsOn('context_built', (data: any) => {
+    console.log('[App.vue] context_built received, msgId=', data?._msgId)
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+  EventsOn('compress_done', (data: any) => {
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+
   // 监听项目状态变更事件（后端产生 → 必须ACK）
   EventsOn('project-state-changed', (data: { state?: string; _msgId?: string; data?: any }) => {
     // [🔴追踪] 确认收到后端状态更新
@@ -391,16 +404,8 @@ onMounted(async () => {
     }
   })
 
-  // [v0.7.2] Context Management: 全局监听三个组件事件（防止TokenMonitor未打开时丢车）
-  EventsOn('token_stats', (data: any) => {
-    if (data?._msgId) ackMessage(data._msgId)
-  })
-  EventsOn('context_built', (data: any) => {
-    if (data?._msgId) ackMessage(data._msgId)
-  })
-  EventsOn('compress_done', (data: any) => {
-    if (data?._msgId) ackMessage(data._msgId)
-  })
+  // [v0.7.3] Context Management events moved into onMounted (Wails runtime must be ready)
+  // Registered below in onMounted block
 
   // 监听新消息事件（来自后端）
   EventsOff('new-message')

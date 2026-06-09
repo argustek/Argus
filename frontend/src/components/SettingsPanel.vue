@@ -819,6 +819,11 @@ function testImConnection() {
 }
 
 function save() {
+  // [FIX] 共享模式下，sharedModelId 同步到 defaultModelId（否则 isDefault 不更新，重启后用错模型）
+  if (!useSeparateModels.value && sharedModelId.value) {
+    defaultModelId.value = sharedModelId.value
+  }
+
   // 同步默认模型到 apiConfigs
   apiConfigs.value.forEach(cfg => {
     cfg.isDefault = (cfg.id === defaultModelId.value)

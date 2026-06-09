@@ -439,6 +439,10 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 	now := time.Now()
 	latency := now.Sub(pending.SentAt)
 
+	// [v0.7.3] Debug: log every ACK to diagnose token_stats/context_built LOST issue
+	fmt.Printf("[🥤MSG] ✅ ACK received: id=%s event=%s latency=%.0fms\n",
+		msgId, pending.EventName, latency.Seconds()*1000)
+
 	received := &ReceivedMessage{
 		MsgId:      msgId,
 		Role:       pending.Role,
@@ -516,10 +520,12 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 			fmt.Printf("[🚨MSG] 超时未确认! id=%s role=%s path=%s source=%s 已等待%.1fs\n",
 				msgId, pending.Role, pending.Tag.Path, pending.Tag.SourceLoc, elapsed.Seconds())
 			mb.lostMessages = append(mb.lostMessages, pending)
-			// [v0.7.2] 同步写入 conversation.log（与对话框信息一致）
+			// [v0.7.3] Enhanced LOST alert with data preview for debugging
+			contentPreview := pending.Content
+			if len(contentPreview) > 200 { contentPreview = contentPreview[:200] + "..." }
 			if mb.writeDebugLog != nil {
-				mb.writeDebugLog(fmt.Sprintf("[MessageBus-LOST] 🚨 %s/%s msgId=%s 等待%.1fs | 发送者:%s",
-					pending.EventName, pending.Tag.Path, msgId, elapsed.Seconds(), pending.Tag.SourceLoc))
+				mb.writeDebugLog(fmt.Sprintf("[MessageBus-LOST] 🚨 %s/%s msgId=%s 等待%.1fs | 发送者:%s | 数据: %s",
+					pending.EventName, pending.Tag.Path, msgId, elapsed.Seconds(), pending.Tag.SourceLoc, contentPreview))
 			}
 		}
 	}

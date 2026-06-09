@@ -658,8 +658,8 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	if len(chatResp.Choices) > 0 {
 		msg := chatResp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 && chatResp.ToolsDefined > 0 {
-			c.cLog("[G-DEBUG] ⚠️ LLM返回ToolCalls=0 (已发送%d个tools) | content_len=%d | model=%s\n",
-				chatResp.ToolsDefined, len(msg.Content), c.config.Model)
+			c.cLog("[G-DEBUG] ⚠️ LLM返回ToolCalls=0 (已发送%d个tools) | content_len=%d | model=%s | client_ptr=%p\n",
+				chatResp.ToolsDefined, len(msg.Content), c.config.Model, c)
 			// 只截取前200字符避免日志爆炸
 			preview := msg.Content
 			if len(preview) > 200 { preview = preview[:200] + "..." }

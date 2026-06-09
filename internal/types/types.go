@@ -169,6 +169,7 @@ type Config struct {
 	SEConfig         APIConfig           `yaml:"se_config"`         // SE专用配置（为空则用APIConfig）
 	APConfig         APIConfig           `yaml:"ap_config"`         // AP专用配置（为空则用APIConfig）
 	PmDecisionAlert  bool                `yaml:"pm_decision_alert"` // PM决策提醒（弹窗）
+	UseSeparateModels bool               `yaml:"use_separate_models"` // 是否每角色独立模型（false=共享模式）
 	MCPServers       []MCPServerConfig    `yaml:"mcp_servers,omitempty"` // [v0.7.1] MCP Server 配置列表
 }
 

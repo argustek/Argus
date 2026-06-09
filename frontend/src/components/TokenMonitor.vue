@@ -179,41 +179,48 @@ const usageBarColor = computed(() => {
 })
 
 // ========== Lifecycle ==========
+// [v0.7.3] IMPORTANT: Wails EventsOff(eventName, callback) does NOT support callback param!
+// The 2nd arg is ...additionalEventNames (string[]), so calling EventsOff on shared events
+// kills ALL listeners including App.vue's global ACK listener.
+// Solution: use mounted flag to silently ignore events after unmount, never call EventsOff.
+const _mounted = ref(false)
+
 onMounted(() => {
+  _mounted.value = true
   handleRefresh()
-  // [v0.7.2] 通过 MessageBus 事件接收 Token 统计（后端桥接点自动推送）
+  // [v0.7.2] Token stats: receive via MessageBus event, ACK to prevent LOST alert
   EventsOn('token_stats', (data: any) => {
+    if (!_mounted.value) return // ignore after unmount
     if (data && typeof data === 'object') {
       stats.value = data as TokenStatsData
-      // [G63] MessageBus ACK: 确认收到，防止报警
       if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
     }
   })
 
-  // [v0.7.2] ContextBuilder: 接收任务上下文构建结果
+  // [v0.7.2] ContextBuilder: task context build result
   EventsOn('context_built', (data: any) => {
+    if (!_mounted.value) return
     if (data && typeof data === 'object') {
       console.log('[TokenMonitor] context_built received:', data.task_id, 'len=', data.context?.length)
-      // [G63] MessageBus ACK
       if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
     }
   })
 
-  // [v0.7.2] Compressor: 接收对话压缩完成通知
+  // [v0.7.2] Compressor: compression complete notification
   EventsOn('compress_done', (data: any) => {
+    if (!_mounted.value) return
     if (data && typeof data === 'object') {
       console.log('[TokenMonitor] compress_done received:', data.task_id, 'compressed=', data.compressed_count)
       lastAction.value = { success: true, detail: `对话已压缩 ${data.compressed_count} 条旧消息` }
-      // [G63] MessageBus ACK
       if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
     }
   })
 })
 
 onUnmounted(() => {
-  EventsOff('token_stats')
-  EventsOff('context_built')
-  EventsOff('compress_done')
+  _mounted.value = false
+  // DO NOT call EventsOff on shared events — it would kill App.vue global ACK listeners!
+  // Callbacks become no-ops via _mounted flag check above.
 })
 
 // ========== Helpers ==========

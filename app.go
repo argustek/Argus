@@ -522,18 +522,31 @@ func (a *App) initChatManager() {
 
 	// 构造配置
 	config := types.Config{
-		WorkDir:         projectDir,
-		CommitInterval:  5,
-		APIConfig:       types.APIConfig{},
-		PmDecisionAlert: a.config.PmDecisionAlert,
+		WorkDir:           projectDir,
+		CommitInterval:    5,
+		APIConfig:         types.APIConfig{},
+		PmDecisionAlert:   a.config.PmDecisionAlert,
+		UseSeparateModels: a.config.UseSeparateModels,
 	}
 
-	// 从 app config 转换 API 配置（优先使用默认配置）
+	// 从 app config 转换 API 配置（共享模式优先用pmConfigId，否则用isDefault）
 	var selectedConfig *APIConfig
-	for i := range a.config.APIConfigs {
-		if a.config.APIConfigs[i].IsDefault {
-			selectedConfig = &a.config.APIConfigs[i]
-			break
+	if !a.config.UseSeparateModels && a.config.PMConfigID != "" {
+		// 共享模式：用 All roles share 选的模型
+		for i := range a.config.APIConfigs {
+			if a.config.APIConfigs[i].ID == a.config.PMConfigID {
+				selectedConfig = &a.config.APIConfigs[i]
+				break
+			}
+		}
+	}
+	if selectedConfig == nil {
+		// 回退：找 isDefault
+		for i := range a.config.APIConfigs {
+			if a.config.APIConfigs[i].IsDefault {
+				selectedConfig = &a.config.APIConfigs[i]
+				break
+			}
 		}
 	}
 	if selectedConfig == nil && len(a.config.APIConfigs) > 0 {
@@ -760,16 +773,27 @@ func (a *App) initChatManagerCLI() {
 	fmt.Printf("[CLI] 项目目录: %s\n", projectDir)
 
 	config := types.Config{
-		WorkDir:        projectDir,
-		CommitInterval: 5,
-		APIConfig:      types.APIConfig{},
+		WorkDir:           projectDir,
+		CommitInterval:    5,
+		APIConfig:         types.APIConfig{},
+		UseSeparateModels: a.config.UseSeparateModels,
 	}
 
 	var selectedConfig *APIConfig
-	for i := range a.config.APIConfigs {
-		if a.config.APIConfigs[i].IsDefault {
-			selectedConfig = &a.config.APIConfigs[i]
-			break
+	if !a.config.UseSeparateModels && a.config.PMConfigID != "" {
+		for i := range a.config.APIConfigs {
+			if a.config.APIConfigs[i].ID == a.config.PMConfigID {
+				selectedConfig = &a.config.APIConfigs[i]
+				break
+			}
+		}
+	}
+	if selectedConfig == nil {
+		for i := range a.config.APIConfigs {
+			if a.config.APIConfigs[i].IsDefault {
+				selectedConfig = &a.config.APIConfigs[i]
+				break
+			}
 		}
 	}
 	if selectedConfig == nil && len(a.config.APIConfigs) > 0 {
@@ -1009,39 +1033,69 @@ func (a *App) SaveConfig(config Config) error {
 
 	a.config = config
 
+	// [DEBUG] SaveConfig 热生效诊断 - 写conversation.log
+	if a.chatManager != nil {
+		a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] PMConfigID=%s, SEConfigID=%s, APConfigID=%s, useSeparate=%v",
+			config.PMConfigID, config.SEConfigID, config.APConfigID, config.UseSeparateModels))
+		for i, cfg := range config.APIConfigs {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] apiConfigs[%d]: id=%s name=%s baseUrl=%s model=%s",
+				i, cfg.ID, cfg.Name, cfg.BaseURL, cfg.ModelName))
+		}
+	}
+
 	// [v1.0.22] 每角色独立模型配置
 	if a.chatManager != nil {
-		// 1. 默认模型 → 更新主 Client（不配独立模型时的兜底）
-		defaultCfg := a.getDefaultAPIConfig()
-		if defaultCfg != nil {
+		// 先同步UseSeparateModels到Manager（UpdateAPIConfig依赖此字段判断是否清空角色配置）
+		a.chatManager.UpdateUseSeparateModels(config.UseSeparateModels)
+
+		// 1. 默认/共享模型 → 更新主 aiClient（共享模式下的实际工作客户端）
+		var sharedCfg *APIConfig
+		if !config.UseSeparateModels && config.PMConfigID != "" {
+			// 共享模式：用 All roles share 选的模型更新 aiClient
+			sharedCfg = a.findAPIConfigByID(config.PMConfigID)
+		}
+		if sharedCfg == nil {
+			sharedCfg = a.getDefaultAPIConfig()
+		}
+		if sharedCfg != nil {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] aiClient-Update → id=%s name=%s model=%s (useSeparate=%v)",
+				sharedCfg.ID, sharedCfg.Name, sharedCfg.ModelName, config.UseSeparateModels))
 			a.chatManager.UpdateAPIConfig(types.APIConfig{
-				Provider: defaultCfg.Provider,
-				BaseURL:  defaultCfg.BaseURL,
-				APIKey:   defaultCfg.APIKey,
-				Model:    defaultCfg.ModelName,
+				Provider: sharedCfg.Provider,
+				BaseURL:  sharedCfg.BaseURL,
+				APIKey:   sharedCfg.APIKey,
+				Model:    sharedCfg.ModelName,
 			})
 		}
 
 		// 2. PM独立模型
 		pmCfg := a.findAPIConfigByID(config.PMConfigID)
 		if pmCfg != nil {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] PM-Update → id=%s name=%s baseUrl=%s model=%s",
+				pmCfg.ID, pmCfg.Name, pmCfg.BaseURL, pmCfg.ModelName))
 			a.chatManager.UpdatePMConfig(types.APIConfig{
 				Provider: pmCfg.Provider,
 				BaseURL:  pmCfg.BaseURL,
 				APIKey:   pmCfg.APIKey,
 				Model:    pmCfg.ModelName,
 			})
+		} else {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] PM → config NOT FOUND for id=%s", config.PMConfigID))
 		}
 
 		// 3. SE独立模型
 		seCfg := a.findAPIConfigByID(config.SEConfigID)
 		if seCfg != nil {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] SE-Update → id=%s name=%s baseUrl=%s model=%s",
+				seCfg.ID, seCfg.Name, seCfg.BaseURL, seCfg.ModelName))
 			a.chatManager.UpdateSEConfig(types.APIConfig{
 				Provider: seCfg.Provider,
 				BaseURL:  seCfg.BaseURL,
 				APIKey:   seCfg.APIKey,
 				Model:    seCfg.ModelName,
 			})
+		} else {
+			a.chatManager.LogDebug(fmt.Sprintf("[SaveConfig] SE → config NOT FOUND for id=%s", config.SEConfigID))
 		}
 
 		// 4. AP模型
