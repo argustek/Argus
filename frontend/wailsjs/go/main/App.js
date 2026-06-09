@@ -66,10 +66,6 @@ export function CheckUnfinishedTask() {
   return window['go']['main']['App']['CheckUnfinishedTask']();
 }
 
-export function ClearMessages() {
-  return window['go']['main']['App']['ClearMessages']();
-}
-
 export function ClearWorkDir() {
   return window['go']['main']['App']['ClearWorkDir']();
 }

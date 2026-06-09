@@ -92,6 +92,8 @@ type ArgusCore struct {
 	prompts  *PromptKit
 	todo     *TodoManager  // 动态任务列表管理器
 
+	pmProcessor *ai.PMProcessor // [v0.7.2] PM处理器（带 add_todo/update_todo Function Call）
+
 	workDir  string
 	language string
 
@@ -242,6 +244,17 @@ func (c *ArgusCore) SetOnTodoUpdate(fn func(TodoEvent)) {
 
 func (c *ArgusCore) GetTodoManager() *TodoManager {
 	return c.todo
+}
+
+// SetPMProcessor 注入 PM 处理器（带 add_todo/update_todo Function Call）
+// 同时连接 TODO 回调：PM 工具调用 → TodoManager → MessageBus → 前端
+func (c *ArgusCore) SetPMProcessor(p *ai.PMProcessor) {
+	c.pmProcessor = p
+	p.SetTodoCallbacks(
+		func(desc string) string { return c.todo.AddTask(desc, "ai_todo", 1) },
+		func(id, status string) { c.todo.UpdateStatus(id, TodoStatus(status)) },
+		func() { c.todo.Clear() },
+	)
 }
 
 func (c *ArgusCore) emitChunk(delta string) {
@@ -418,7 +431,24 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	c.memory.Add(RoleUser, userMsg)
 
-	pmResponse, pmErr := c.callAI(RolePM, userMsg, "")
+	var pmResponse string
+	var pmErr error
+
+	if c.pmProcessor != nil {
+		// [v0.7.2] 带工具调用的 PM（add_todo/update_todo 可用，ChatWithTools）
+		history := []ai.ChatMessage{} // 新对话，无历史
+		var resp *ai.PMResponse
+		resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
+			if c.onChunk != nil {
+				c.onChunk(delta)
+			}
+		})
+		if pmErr == nil && resp != nil {
+			pmResponse = resp.Content
+		}
+	} else {
+		pmResponse, pmErr = c.callAI(RolePM, userMsg, "")
+	}
 	phasePM := PhaseResult{
 		Phase:    PhaseAnalyze,
 		Role:     RolePM,
@@ -456,16 +486,9 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	}
 	// PM 安排了工作，继续走 SE 流程
 
-	// 📋 TODO: PM分析完成，设置初始任务列表
+	// [v0.7.2] 硬编码TODO已禁用，改由 PM 的 AI 工具调用 (add_todo/update_todo) 管理
+	// 但每次新任务必须先清空旧 TODO，否则堆积
 	c.todo.Clear()
-	c.todo.SetTasks([]string{
-		"PM Analysis: Analyze user requirements",
-		"SE Execution: Write code and run verification",
-		"PM Code Review: Quality check and verification",
-		"AP Final Approval: Security and compliance check",
-	}, "pipeline")
-	c.todo.UpdateByPhase("pipeline", TodoDone) // PM已完成
-	c.todo.MarkCurrentDoing() // 标记SE为doing
 
 	// [Layer 1] 工具链预检：在SE执行前检测编译器/解释器是否可用
 	// 从PM响应中提取目标语言（基于文件扩展名）
@@ -755,9 +778,9 @@ Output ONLY this exact JSON structure:
 			c.emitStatus("se", "se", "busy")
 			c.emit("se_to_pm", fmt.Sprintf("🔄 SE Retry #%d (PM Feedback): %s", reviewAttempt, reviewResult.Reason))
 
-			// 📋 TODO: 添加重试任务
-			c.todo.AddTask(fmt.Sprintf("SE Retry #%d: Fix PM feedback", reviewAttempt+1), "se_retry", 1)
-			c.todo.MarkCurrentDoing()
+			// [v0.7.2] 硬编码TODO已禁用
+			// c.todo.AddTask(...)
+			// c.todo.MarkCurrentDoing()
 
 			retryPrompt := fmt.Sprintf(`PM rejected your previous work with this reason:
 %s
@@ -849,8 +872,9 @@ Decide: approve or reject with specific reasons.`,
 
 		if !reviewResult.Rejected {
 			// PM approved, proceed to AP
-			c.todo.CompleteCurrent() // Review done
-			c.todo.MarkCurrentDoing() // AP start
+			// [v0.7.2] 硬编码TODO已禁用
+			// c.todo.CompleteCurrent()
+			// c.todo.MarkCurrentDoing()
 
 			break
 		}
@@ -1061,8 +1085,22 @@ Perform final quality and security check. Approve or reject with reasons.`,
 
 	c.emitStatus("done", "none", "idle")
 
-	// 📋 TODO: 全部完成
-	c.todo.CompleteCurrent() // AP done - all tasks completed
+	// [v0.7.2] 硬编码TODO已禁用
+
+	// [v0.7.2] AP通过后，PM收尾：@USR向用户简要总结（无工具，不带历史目录扫描）
+	if c.pmProcessor != nil {
+		fmt.Println("[Core-PM] 🎯 AP审批通过，请求PM做最终总结...")
+		summaryMsg := "当前任务已通过AP最终审批。请@USR向用户做一句话总结（只说本次做了什么，不要列举其他文件）。"
+		// 用 callAI 而不是 ProcessStream，不带工具，避免 PM 目录扫描后列出所有历史文件
+		summary, err := c.callAI(RolePM, summaryMsg, c.memory.FormatForPrompt())
+		if err != nil {
+			fmt.Printf("[Core-PM] ⚠️ 最终总结失败: %v\n", err)
+		} else if strings.TrimSpace(summary) != "" {
+			fmt.Printf("[Core-PM] ✅ 最终总结: %s\n", summary)
+			c.emit("pm_to_user", summary)
+			c.memory.Add(RolePM, summary)
+		}
+	}
 
 	result.Success = true
 	return result

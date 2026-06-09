@@ -12,7 +12,6 @@
       :git-status-count="gitStatusCount"
       @toggle-window="toggleWindow"
       @reset="handleReset"
-      @clear-messages="handleClearMessages"
       @open-settings="showSettings = true"
       @select-project="handleSelectProject"
       @toggle-c-monitor="toggleCMonitor"
@@ -847,6 +846,17 @@ onMounted(async () => {
     ackMessage(data._msgId || '')
   })
 
+  // [v0.7.2] 全局ACK后端事件（对话框=log，两车站一致）
+  EventsOn('reset', (data: { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+  })
+  EventsOn('tasks_cleared', (data: { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+  })
+  EventsOn('done', (data: { _msgId?: string }) => {
+    ackMessage(data._msgId || '')
+  })
+
   // 监听 AP approved 事件，清空消息防止旧任务显示
   EventsOn('project_approved', (data: { timestamp: number; action: string; _msgId?: string }) => {
     ackMessage(data._msgId || '')
@@ -854,13 +864,6 @@ onMounted(async () => {
     seenMsgIds.clear()
     streamingRole.value = ''
     thoughtEvents.value = []
-
-    const { ClearMessages } = require('../wailsjs/go/main/App')
-    ClearMessages().then(() => {
-      // 消息已清空
-    }).catch((e: any) => {
-      console.error('[APPROVED] 清空messages失败:', e)
-    })
   })
 
   EventsOn('se-file-written', async (data: string | { _msgId?: string; path?: string }) => {
@@ -1277,15 +1280,6 @@ async function handleReset() {
   aiThinking.value = false
   projectState.value = 'idle'
   chatPanelRef.value?.resetState()
-}
-
-async function handleClearMessages() {
-  try {
-    const { ClearMessages } = await import('../wailsjs/go/main/App')
-    await ClearMessages()
-  } catch (err) {
-    console.error(t('app.clearMessagesFailed'), err)
-  }
 }
 
 function openFile(file: any) {

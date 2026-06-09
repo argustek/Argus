@@ -369,7 +369,7 @@ func (cw *ContextWindow) ManageIfNeeded() (actionTaken bool, detail string) {
 	}
 
 	// 第二步：压缩旧消息
-	compressed := cw.compressOldMessages()
+	compressed := cw.CompressOldMessages()
 	if compressed > 0 {
 		cw.totalCompressed += compressed
 		_, _, newRatio := cw.currentUsageLocked()
@@ -554,7 +554,7 @@ func (cw *ContextWindow) pruneToTarget(target int) int {
 }
 
 // compressOldMessages 压缩旧消息为摘要
-func (cw *ContextWindow) compressOldMessages() int {
+func (cw *ContextWindow) CompressOldMessages() int {
 	if len(cw.messages) <= cw.budget.HistoryMinKeep+2 {
 		return 0
 	}
@@ -563,13 +563,13 @@ func (cw *ContextWindow) compressOldMessages() int {
 	// 从第二条消息开始找可压缩的（跳过 system）
 	for i := 1; i < len(cw.messages)-cw.budget.HistoryMinKeep; i++ {
 		msg := cw.messages[i]
-		if msg.Compressed || msg.Priority >= 7 || msg.TokenCount < 50 {
+		if msg.Compressed || msg.Priority >= 7 {
 			continue
 		}
 
 		summary := cw.summarizeMessage(msg)
 		if summary != "" {
-			msg.Content = summary
+			msg.Content = "[压缩] " + summary
 			msg.TokenCount = cw.counter.CountTokens(summary)
 			msg.Compressed = true
 			compressed++
@@ -621,13 +621,22 @@ func (cw *ContextWindow) summarizeMessage(msg *ContextMessage) string {
 		return fmt.Sprintf("[SUMMARY code: %d lines, starts with: %s]", lineCount, truncate(firstLine, 100))
 
 	default:
-		// 通用截断
-		if len(runes) <= 200 {
-			return "" // 太短不需要压缩
+		// 通用摘要：按角色生成不同前缀
+		prefix := "[摘要]"
+		switch msg.Role {
+		case "user":
+			prefix = "[USR摘要]"
+		case "assistant":
+			prefix = "[AI摘要]"
 		}
-		// 保留首尾各 100 字符
-		head := string(runes[:100])
-		tail := string(runes[len(runes)-100:])
+		if len(runes) <= 80 {
+			return fmt.Sprintf("%s %s", prefix, content)
+		}
+		if len(runes) <= 200 {
+			return fmt.Sprintf("%s %s", prefix, content[:min(150, len(content))]+"...")
+		}
+		head := content[:100]
+		tail := content[len(content)-100:]
 		return fmt.Sprintf("[SUMMARY original %d chars]\n%s\n...\n%s",
 			len(runes), head, tail)
 	}

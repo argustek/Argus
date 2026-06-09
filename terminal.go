@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 

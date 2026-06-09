@@ -1606,19 +1606,6 @@ func (a *App) saveMessages() {
 	os.WriteFile(messagesPath, data, 0644)
 }
 
-// ClearMessages 清空聊天记录
-func (a *App) ClearMessages() {
-	a.messages = make([]ChatMessage, 0)
-	a.saveMessages()
-	a.addLog("✅ 已清空聊天记录")
-
-	// 清空全局任务列表
-	if a.chatManager != nil {
-		a.chatManager.ClearGlobalTasks()
-	}
-	a.emitToFrontend("messages-cleared", nil, "ClearMessages", chat.PathSystem)
-}
-
 func (a *App) ResetRoleStatus() {
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()

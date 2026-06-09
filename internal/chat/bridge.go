@@ -49,6 +49,12 @@ func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Br
 	b.argus.SetOnChunk(b.onCoreChunk)
 	b.argus.SetOnThought(b.onCoreThought) // 思考链 → MessageBus → 前端Dashboard
 
+	// [v0.7.2] 创建带工具调用的 PM 处理器（add_todo/update_todo），注入 ArgusCore
+	pmProc := ai.NewPMProcessor(aiClient, workDir, func(state int) {
+		fmt.Printf("[Bridge-PM] 项目状态更新: %d\n", state)
+	})
+	b.argus.SetPMProcessor(pmProc)
+
 	return b
 }
 
@@ -315,23 +321,27 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 		}
 	}
 
-	// [v0.7.2] Compressor: 检查是否需要压缩对话（保留最近2条，便于测试）
-	if b.compressor != nil {
-		taskID := "current"
-		compressedCount, err := b.compressor.CompressConversations(taskID, 2)
-		if err != nil {
-			if b.writeDebugLog != nil {
-				b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ⚠ Compressor 失败: %v", err))
+	// [v0.7.2] Compressor: 50条门槛 + ManageIfNeeded 自动判断（ContextBudget.CompressionTrigger=80%）
+	if b.contextWindow != nil {
+		msgs := b.contextWindow.GetMessages()
+		if len(msgs) > 50 {
+			actionTaken, detail := b.contextWindow.ManageIfNeeded()
+			if actionTaken {
+				b.pushCompressDone("current", 0)
+				if b.writeDebugLog != nil {
+					b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ 上下文管理已执行: %s (消息数=%d)", detail, len(msgs)))
+				}
+				if b.onMessage != nil {
+					b.onMessage(&Message{
+						From:      "system",
+						To:        "user",
+						Role:      "system",
+						Content:   fmt.Sprintf("📦 对话压缩完成 — %s", detail),
+						Source:    "compressor",
+						Timestamp: time.Now(),
+					})
+				}
 			}
-			// Compressor失败不影响主流程，继续执行
-		} else if compressedCount > 0 {
-			// 只有真的压缩了才通知前端
-			b.pushCompressDone(taskID, compressedCount)
-			if b.writeDebugLog != nil {
-				b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ 对话压缩完成: 压缩了 %d 条旧消息", compressedCount))
-			}
-		} else if b.writeDebugLog != nil {
-			b.writeDebugLog("[Bridge-CTX] ℹ️ 对话未超过阈值，无需压缩")
 		}
 	}
 

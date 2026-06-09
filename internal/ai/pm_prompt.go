@@ -199,6 +199,12 @@ Message Source Identification (IMPORTANT):
 - **审核最多2轮工具调用**：用完工具后直接给结论
 - 如果验证失败 → 用 @SE 指出具体错误要求返工
 
+## 📋 TODO 管理规则（⚠️ 必须遵守）
+
+⚠️ **先建清单，再派活**：接到用户任务后，第一时间调用 add_todo 拆解为待办清单，完成后再 @SE 分派任务。严禁先派活后补清单！
+✅ **完工即勾**：SE 汇报完成 → 调用 update_todo 标记 done。AP 批准 → 标记 done。AP 驳回 → 标记 pending 并 @SE 返工。
+📌 **清单是一轮对话的总看板**：用户追加需求 → add_todo 追加条目，不清空已有清单。新任务到来 → PM 判断是否新建清单。
+
 ## 📋 任务分配流程
 
 当用户提出编程需求时：
@@ -254,6 +260,7 @@ type PMProcessor struct {
 	ctx            context.Context
 	todoAdder      func(string) string    // 添加待办
 	todoUpdater    func(string, string)   // 更新待办状态
+	todoClearer    func()                 // 清空待办（replace=true时）
 
 	shellEmitter    types.ShellEventEmitter // 三层模型 Shell 事件推送（可选）
 	currentTaskId   string                   // 当前 TaskList ID
@@ -281,9 +288,10 @@ func (p *PMProcessor) SetStateUpdater(updater func(int)) {
 }
 
 // SetTodoCallbacks 设置TODO回调
-func (p *PMProcessor) SetTodoCallbacks(adder func(string) string, updater func(string, string)) {
+func (p *PMProcessor) SetTodoCallbacks(adder func(string) string, updater func(string, string), clearer func()) {
 	p.todoAdder = adder
 	p.todoUpdater = updater
+	p.todoClearer = clearer
 }
 
 // SetTimeContext 设置时间上下文（动态注入到Prompt）
@@ -390,13 +398,17 @@ var PMTools = []Tool{
 		Type: "function",
 		Function: ToolFunction{
 			Name:        "add_todo",
-			Description: "添加待办任务到TODO列表。当有来自其他角色的任务需要跟踪时使用，或者需要记住将来要做的事情。最多5条，超过自动淘汰最旧的。",
+			Description: "⚠️ 必须在接到用户任务后、@SE分派之前调用！将任务拆解为待办清单（最多5条）。新任务替换=true清空旧清单，追加需求替换=false。严禁事后补加！",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"description": map[string]interface{}{
 						"type":        "string",
 						"description": "待办任务描述",
+					},
+					"replace": map[string]interface{}{
+						"type":        "boolean",
+						"description": "true=新建清单（清空旧的），false=追加到现有清单",
 					},
 				},
 				"required": []string{"description"},
@@ -407,7 +419,7 @@ var PMTools = []Tool{
 		Type: "function",
 		Function: ToolFunction{
 			Name:        "update_todo",
-			Description: "更新待办任务状态（pending/doing/done）。任务完成后务必更新状态为done。",
+			Description: "更新待办状态：SE完成/AP批准→done，AP驳回→pending，正在执行→doing。收到SE汇报或AP结果后必须调用！",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -552,19 +564,62 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		}
 	}
 
-	response, err := p.client.ChatStream(p.getCtx(), p.getSystemPrompt(), aiHistory, userInput, p.ReplyLanguage, onChunk, nil)
-	if err != nil {
-		fmt.Printf("[PM Stream] AI call failed: %v\n", err)
-		return nil, err
-	}
-	fmt.Printf("[PM Stream] AI response completed, length: %d\n", len(response))
+	// [v0.7.2] 使用 ChatWithTools 让 PM 能调用 add_todo/update_todo
+	maxToolRounds := 5
+	var finalContent string
 
-	p.extractAndUpdateState(response)
-	tasks := p.extractTasks(response)
-	reviewResult, reviewReason := p.extractReviewResult(response)
+	for round := 0; round < maxToolRounds; round++ {
+		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
+		resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, userInput, PMTools)
+		callCancel()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(resp.Choices) == 0 {
+			return nil, fmt.Errorf("no response from AI")
+		}
+
+		msg := resp.Choices[0].Message
+		// 累积所有轮次的内容（工具轮 + 最终文本轮），避免 @SE 被后续工具轮覆盖
+		if msg.Content != "" {
+			if finalContent != "" && !strings.Contains(finalContent, msg.Content) {
+				finalContent += "\n" + msg.Content
+			} else if finalContent == "" {
+				finalContent = msg.Content
+			}
+		}
+
+		// 没有工具调用 → 结束
+		if len(msg.ToolCalls) == 0 {
+			break
+		}
+
+		// 处理工具调用（add_todo / update_todo）
+		aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
+		aiHistory = append(aiHistory, msg)
+
+		for _, tc := range msg.ToolCalls {
+			if onChunk != nil {
+				onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", tc.Function.Name))
+			}
+			toolResult := p.executeTool(tc.Function.Name, tc.Function.Arguments)
+			aiHistory = append(aiHistory, Message{
+				Role:       "tool",
+				Content:    toolResult,
+				ToolCallID: tc.ID,
+			})
+		}
+
+		userInput = "[工具结果已返回，请继续分析并给出结论]"
+	}
+
+	p.extractAndUpdateState(finalContent)
+	tasks := p.extractTasks(finalContent)
+	reviewResult, reviewReason := p.extractReviewResult(finalContent)
 
 	return &PMResponse{
-		Content:      response,
+		Content:      finalContent,
 		Tasks:        tasks,
 		HasTasks:     tasks != nil,
 		ReviewResult: reviewResult,
@@ -1010,9 +1065,14 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 	case "add_todo":
 		var args struct {
 			Description string `json:"description"`
+			Replace     bool   `json:"replace"`
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
 		if p.todoAdder != nil {
+			// Replace=true → 清空旧清单重建（Trae风格merge=false）
+			if args.Replace && p.todoClearer != nil {
+				p.todoClearer()
+			}
 			id := p.todoAdder(args.Description)
 			return fmt.Sprintf("待办已添加 ✅  ID: %s | 描述: %s", id, args.Description)
 		}

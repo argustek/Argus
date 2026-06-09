@@ -21,9 +21,6 @@
       <div class="divider"></div>
       <button class="icon-btn" @click.stop="$emit('reset')" :title="t('common.reset')">↻</button>
       <button class="icon-btn search-btn" @click.stop="$emit('toggle-search')" :title="t('topBar.searchChat') + ' (Ctrl+F)'">🔍</button>
-      <button class="icon-btn clear-btn" @click.stop="$emit('clear-messages')" :title="t('topBar.clearMessages') + ' (' + messageCount + ')'">
-        🗑️ <span v-if="messageCount > 0" class="msg-badge">{{ messageCount }}</span>
-      </button>
       <button class="icon-btn git-btn" @click.stop="$emit('toggle-git')" :title="t('topBar.gitVersionControl')">
         🌿 <span v-if="gitStatusCount > 0" class="git-badge">{{ gitStatusCount }}</span>
       </button>
@@ -145,7 +142,7 @@ const props = defineProps<{
   gitStatusCount: number
 }>()
 
-const emit = defineEmits(['toggle-window', 'reset', 'clear-messages', 'open-settings', 'select-project', 'toggle-c-monitor', 'toggle-git', 'toggle-search', 'open-file-in-editor'])
+const emit = defineEmits(['toggle-window', 'reset', 'open-settings', 'select-project', 'toggle-c-monitor', 'toggle-git', 'toggle-search', 'open-file-in-editor'])
 
 const showMenu = ref(false)
 const showRemoteDialog = ref(false)

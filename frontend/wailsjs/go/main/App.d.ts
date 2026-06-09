@@ -38,8 +38,6 @@ export function CheckProcessExists(arg1:string):Promise<boolean>;
 
 export function CheckUnfinishedTask():Promise<boolean>;
 
-export function ClearMessages():Promise<void>;
-
 export function ClearWorkDir():Promise<void>;
 
 export function CloseTerminalSession(arg1:string):Promise<void>;

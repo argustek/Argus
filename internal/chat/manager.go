@@ -397,6 +397,7 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	pmProcessor.SetTodoCallbacks(
 		func(desc string) string { return manager.AddTodo(desc) },
 		func(id, status string) { manager.UpdateTodoStatus(id, status) },
+		func() { manager.ClearTodoList() },
 	)
 
 	// 初始化三层模型 Builder（用于 PM/SE 可视化）
@@ -512,6 +513,7 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	m.pmProcessor.SetTodoCallbacks(
 		func(desc string) string { return m.AddTodo(desc) },
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
+		func() { m.ClearTodoList() },
 	)
 
 	fmt.Printf("[Manager] API配置已更新: BaseURL=%s, Model=%s\n", apiConfig.BaseURL, apiConfig.Model)
@@ -579,6 +581,7 @@ func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 	m.pmProcessor.SetTodoCallbacks(
 		func(desc string) string { return m.AddTodo(desc) },
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
+		func() { m.ClearTodoList() },
 	)
 	fmt.Printf("[Manager] PM配置已更新: Model=%s\n", pmConfig.Model)
 }
@@ -840,6 +843,7 @@ func (m *Manager) initCMonitor() {
 		m.pmProcessor.SetTodoCallbacks(
 			func(desc string) string { return m.AddTodo(desc) },
 			func(id, status string) { m.UpdateTodoStatus(id, status) },
+			func() { m.ClearTodoList() },
 		)
 		// 重置状态
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
@@ -1633,19 +1637,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	fmt.Printf("[handleToPM] 调用 PMProcessor (isReview=%v)\n", isReviewScenario)
 
-	// === [v0.7.2] Context Management Bridge ===
-	// 1) Compressor: 自动压缩旧对话（防止上下文窗口爆炸）
-	if m.compressor != nil && m.memoryManager != nil {
-		if compressed, err := m.compressor.CompressIfNeeded("default", 50000, 3); err != nil {
-			fmt.Printf("[ContextBridge] ⚠ Compressor 压缩失败（非致命）: %v\n", err)
-		} else if compressed > 0 {
-			fmt.Printf("[ContextBridge] ✅ Compressor 压缩了 %d 条旧消息\n", compressed)
-		} else {
-			fmt.Println("[ContextBridge] ✅ Compressor 检查完成（无需压缩）")
-		}
-	}
-
-	// 2) ContextWindow: 记录本次用户消息（TokenMonitor 数据源）
+	var resp *ai.PMResponse
 	if m.contextWindow != nil {
 		m.contextWindow.AddMessage(memory.RoleUser, content, 0, "")
 		m.pushTokenStats()
@@ -1653,7 +1645,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	aiGen := m.getResetGeneration()
-	var resp *ai.PMResponse
 	if isReviewScenario {
 		fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
 		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, func(delta string) {
@@ -5284,6 +5275,31 @@ func (m *Manager) ensurePMToUSR(content string) string {
 	return "@USR " + content
 }
 
+// buildCompressionSummary 生成压缩对话摘要
+func (m *Manager) buildCompressionSummary(msgs []Message) string {
+	var lines []string
+	for _, msg := range msgs {
+		role := msg.Role
+		if role == "user" {
+			role = "[用户]"
+		} else if role == "pm" {
+			role = "[PM]"
+		} else if role == "se" {
+			role = "[SE]"
+		} else if role == "ap" {
+			role = "[AP]"
+		} else {
+			role = "[" + role + "]"
+		}
+		content := msg.Content
+		if len(content) > 80 {
+			content = content[:80] + "..."
+		}
+		lines = append(lines, fmt.Sprintf("- %s %s", role, content))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // addPMToUserMsg 发送PM→USR消息（自动加@USR）
 // ✅ 静默模式：只保存到历史记录，不发送 new-message 事件（因为流式已显示）
 func (m *Manager) addPMToUserMsg(content string) {
@@ -6815,6 +6831,41 @@ func (m *Manager) forceProjectApproved() {
 			})
 		}()
 	}
+
+	// [v0.7.2] PM 最终总结：AP通过后PM向用户汇报完成情况 + 更新TODO
+	go m.PMFinalSummary()
+}
+
+// PMFinalSummary AP审批通过后PM向用户做最终汇报（导出供Bridge路径调用）
+func (m *Manager) PMFinalSummary() {
+	if m.pmProcessor == nil {
+		return
+	}
+
+	fmt.Println("[PM-Final] 开始最终汇报...")
+
+	msg := "@PM 所有任务已通过AP审批，请向用户做最终汇报摘要，并调用 update_todo 将所有待办标记为 done。"
+
+	// 构建PM历史
+	history := m.GetHistory()
+	pmHistory := make([]ai.ChatMessage, len(history))
+	for i, msg := range history {
+		pmHistory[i] = ai.ChatMessage{Role: msg.Role, Content: msg.Content}
+	}
+
+	resp, err := m.pmProcessor.ProcessReview(msg, pmHistory, func(delta string) {
+		// 最终汇报不需要流式输出
+	})
+	if err != nil {
+		fmt.Printf("[PM-Final] ❌ 最终汇报失败: %v\n", err)
+		return
+	}
+
+	content := strings.TrimSpace(resp.Content)
+	if content != "" {
+		m.addPMToUserMsg(content)
+		m.WriteDebugLog(fmt.Sprintf("[PM-Final] 最终汇报已发送 (%d chars)", len(content)))
+	}
 }
 
 // forceProjectDone 强制结束项目（清除状态、通知前端）- 旧版兼容，状态=done
@@ -6925,7 +6976,7 @@ func (m *Manager) ExecuteReset(reason string, trigger string) error {
 	return nil
 }
 
-// ClearGlobalTasks 清空全局任务列表（供 App.ClearMessages 调用）
+// ClearGlobalTasks 清空全局任务列表
 func (m *Manager) ClearGlobalTasks() {
 	if m.taskManager != nil {
 		m.taskManager.ClearTasks()

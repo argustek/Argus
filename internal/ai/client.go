@@ -599,7 +599,7 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 		Messages:   messages,
 		Stream:     false,
 		Tools:      tools,
-		ToolChoice: "auto", // "auto"兼容思考模式(DeepSeek等)；"required"会报错
+		ToolChoice: "auto", // [v0.7.2] DeepSeek不支持"required"会报错，用auto+prompt引导
 	}
 
 	data, err := json.Marshal(req)
