@@ -646,14 +646,14 @@ func (a *App) initChatManager() {
 		go func() {
 			data := git.GetStatus(a.getProjectDir())
 			jsonData, _ := json.Marshal(data)
-			runtime.EventsEmit(a.ctx, "git:status", string(jsonData))
+			a.emitToFrontend("git:status", string(jsonData), "GitStatusHandler", chat.PathSystem)
 		}()
 	})
 	runtime.EventsOn(a.ctx, "git:request-repo-info", func(optionalData ...interface{}) {
 		go func() {
 			info := git.GetRepoInfo(a.getProjectDir())
 			jsonData, _ := json.Marshal(info)
-			runtime.EventsEmit(a.ctx, "git:repo-info", string(jsonData))
+			a.emitToFrontend("git:repo-info", string(jsonData), "GitRepoInfoHandler", chat.PathSystem)
 		}()
 	})
 
@@ -734,7 +734,6 @@ func (a *App) initChatManager() {
 				a.messages = make([]ChatMessage, 0)
 				a.saveMessages()
 				if a.ctx != nil {
-					runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 					a.emitToFrontend("messages-cleared", nil, "G36Fix", chat.PathSystem)
 				}
 			} else {
@@ -1617,15 +1616,12 @@ func (a *App) ClearMessages() {
 	if a.chatManager != nil {
 		a.chatManager.ClearGlobalTasks()
 	}
-
-	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 	a.emitToFrontend("messages-cleared", nil, "ClearMessages", chat.PathSystem)
 }
 
 func (a *App) ResetRoleStatus() {
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()
-	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 	a.emitToFrontend("messages-cleared", nil, "ResetRoleStatus", chat.PathSystem)
 
 	if a.chatManager != nil {
@@ -1648,7 +1644,6 @@ func (a *App) ExecuteReset(reason string) error {
 	}
 	a.messages = make([]ChatMessage, 0)
 	a.saveMessages()
-	runtime.EventsEmit(a.ctx, "messages-cleared", nil)
 	a.emitToFrontend("messages-cleared", nil, "ExecuteReset", chat.PathSystem)
 	a.emitToFrontend("reset-completed", map[string]string{"reason": reason}, "ExecuteReset", chat.PathSystem)
 	a.addLog("✅ 已执行复位: " + reason)

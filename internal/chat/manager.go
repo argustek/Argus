@@ -20,6 +20,7 @@ import (
 	"argus/internal/executor"
 	"argus/internal/i18n"
 	"argus/internal/mcp"
+	"argus/internal/memory"
 	"argus/internal/monitor"
 	"argus/internal/task"
 	"argus/internal/types"
@@ -90,6 +91,28 @@ func (m *Manager) SetDingTalkEnabled(enabled bool) {
 // [v0.7.1] SetMCPManager 设置 MCP Manager（供 App 初始化后注入）
 func (m *Manager) SetMCPManager(mgr *mcp.Manager) {
 	m.mcpManager = mgr
+}
+
+// [v0.7.2] SetContextManagement 设置上下文管理三个组件（由 App 初始化后注入）
+func (m *Manager) SetContextManagement(cw *memory.ContextWindow, cb *memory.ContextBuilder, c *memory.Compressor) {
+	m.contextWindow = cw
+	m.contextBuilder = cb
+	m.compressor = c
+}
+
+// [v0.7.2] pushTokenStats 通过 MessageBus 推送 Token 统计数据到前端 TokenMonitor
+func (m *Manager) pushTokenStats() {
+	if m.contextWindow == nil {
+		m.WriteDebugLog("[ContextBridge] ⚠ pushTokenStats 跳过: contextWindow=nil（SetContextManagement 未调用？）")
+		return
+	}
+	if m.msgBus == nil {
+		m.WriteDebugLog("[ContextBridge] ⚠ pushTokenStats 跳过: msgBus=nil")
+		return
+	}
+	stats := m.contextWindow.TokenStats()
+	msgId := m.msgBusSend("system", "", "token_stats", PathSystem, "ContextBridge:pushTokenStats", stats)
+	m.WriteDebugLog(fmt.Sprintf("[ContextBridge] ✅ token_stats 已推送 msgId=%s total_tokens=%v", msgId, stats["total_tokens"]))
 }
 
 func (m *Manager) sendToDingTalk(msg string) {
@@ -227,6 +250,11 @@ type Manager struct {
 	mcpManager interface {
 		CallTool(serverName, toolName string, args map[string]interface{}) (*mcp.CallToolResult, error)
 	}
+
+	// [v0.7.2] Context Management Bridge（上下文管理桥接）
+	contextWindow   *memory.ContextWindow // Token 监控 + 窗口管理（TokenMonitor 面板数据源）
+	contextBuilder *memory.ContextBuilder // 任务上下文组装器（注入 PM/SE system prompt）
+	compressor     *memory.Compressor    // 对话压缩器（自动裁剪旧对话）
 }
 
 type TodoItem struct {
@@ -717,13 +745,11 @@ func (m *Manager) clearSessionState() {
 
 	// ⚠️ G点36修复：AP approved 时通知前端清空 messages
 	// 防止下次启动时显示已完成的旧任务
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "project_approved", map[string]interface{}{
-			"timestamp": time.Now().Unix(),
-			"action":    "clear_messages",
-		})
-		fmt.Println("[TRACE-AP] ✅ 发送 project_approved 事件（清空messages）")
-	}
+	m.msgBusSend("system", "", "project_approved", PathSystem, "approveProject:project_approved", map[string]interface{}{
+		"timestamp": time.Now().Unix(),
+		"action":    "clear_messages",
+	})
+	fmt.Println("[TRACE-AP] ✅ 发送 project_approved 事件（清空messages）")
 	m.boardManager.Reset()
 	m.currentRole = ""
 	m.pmWaitingForUserSince = 0
@@ -1606,6 +1632,26 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	fmt.Printf("[handleToPM] 调用 PMProcessor (isReview=%v)\n", isReviewScenario)
+
+	// === [v0.7.2] Context Management Bridge ===
+	// 1) Compressor: 自动压缩旧对话（防止上下文窗口爆炸）
+	if m.compressor != nil && m.memoryManager != nil {
+		if compressed, err := m.compressor.CompressIfNeeded("default", 50000, 3); err != nil {
+			fmt.Printf("[ContextBridge] ⚠ Compressor 压缩失败（非致命）: %v\n", err)
+		} else if compressed > 0 {
+			fmt.Printf("[ContextBridge] ✅ Compressor 压缩了 %d 条旧消息\n", compressed)
+		} else {
+			fmt.Println("[ContextBridge] ✅ Compressor 检查完成（无需压缩）")
+		}
+	}
+
+	// 2) ContextWindow: 记录本次用户消息（TokenMonitor 数据源）
+	if m.contextWindow != nil {
+		m.contextWindow.AddMessage(memory.RoleUser, content, 0, "")
+		m.pushTokenStats()
+		m.WriteDebugLog("[ContextBridge] ✅ 用户消息已写入 ContextWindow + TokenStats 已推送")
+	}
+
 	aiGen := m.getResetGeneration()
 	var resp *ai.PMResponse
 	if isReviewScenario {
@@ -1664,6 +1710,14 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	m.resetPMHealth()
+
+	// [v0.7.2] ContextWindow: 记录 PM 响应
+	if m.contextWindow != nil && resp != nil {
+		m.contextWindow.AddMessage(memory.RoleAssistant, resp.Content, 0, "")
+		m.pushTokenStats()
+		m.WriteDebugLog("[ContextBridge] ✅ PM 响应已写入 ContextWindow + TokenStats 已推送")
+	}
+
 	fmt.Printf("[DEBUG-FLOW] ProcessStream返回: content=%q len=%d\n", resp.Content[:min(80, len(resp.Content))], len(resp.Content))
 
 	// 🔬 探针：记录 AI 原始输出（用于排查双@问题）
@@ -2691,6 +2745,13 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		}
 		}
 
+		// [v0.7.2] ContextWindow: 记录 SE 任务输入
+		if m.contextWindow != nil {
+			m.contextWindow.AddMessage(memory.RoleUser, taskDesc, 0, "")
+			m.pushTokenStats()
+			m.WriteDebugLog("[ContextBridge] ✅ SE 任务输入已写入 ContextWindow + TokenStats 已推送")
+		}
+
 		resp, err = m.seProcessor.ProcessTaskWithTools(taskDesc, func(delta string) {
 			m.cMonitor.UpdateSeChunkTime()
 			m.emitStreamChunk("se", delta)
@@ -2794,6 +2855,14 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	fmt.Printf("[SE Debug] NeedHelp: %v\n", resp.NeedHelp)
 	m.writeRouteLog(fmt.Sprintf("[SE-RESP] actions=%d completed=%v needHelp=%v content_len=%d",
 		len(resp.Actions), resp.Completed != nil, resp.NeedHelp, len(resp.Content)))
+
+	// [v0.7.2] ContextWindow: 记录 SE 响应
+	if m.contextWindow != nil && len(resp.Content) > 0 {
+		m.contextWindow.AddMessage(memory.RoleAssistant, resp.Content, 0, "")
+		m.pushTokenStats()
+		m.WriteDebugLog("[ContextBridge] ✅ SE 响应已写入 ContextWindow + TokenStats 已推送")
+	}
+
 	if len(resp.Content) > 0 {
 		fmt.Printf("[SE Debug] Response preview: %s\n", resp.Content[:min(500, len(resp.Content))])
 	}
@@ -3349,11 +3418,9 @@ continueProcess:
 	return nil
 }
 
-// emitWailsEvent 安全触发Wails前端事件（ctx为nil时跳过），同时推送到SSE
+// [v0.7.2] emitWailsEvent 改为走 MessageBus（不再走破路 runtime.EventsEmit）
 func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, eventName, data)
-	}
+	m.msgBusSend("se", "", eventName, PathSEExec, "emitWailsEvent:"+eventName, data)
 	m.pushSSEEvent(eventName, data)
 }
 
@@ -6726,9 +6793,7 @@ func (m *Manager) forceProjectApproved() {
 
 	m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "approved"})
-	}
+	m.msgBusSend("system", "", "done", PathSystem, "completeTask:done_approved", map[string]string{"status": "approved"})
 	m.cMonitor.UpdateProjectState(types.ProjectStateApproved)
 	m.boardManager.MarkDone()
 
@@ -6770,9 +6835,7 @@ func (m *Manager) forceProjectDone() {
 		})
 	}
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "completed"})
-	}
+	m.msgBusSend("system", "", "done", PathSystem, "completeTask:done_completed", map[string]string{"status": "completed"})
 	m.cMonitor.UpdateProjectState(types.ProjectStateDone)
 	m.boardManager.MarkDone() // [TAG-D6]
 
@@ -6853,12 +6916,10 @@ func (m *Manager) ExecuteReset(reason string, trigger string) error {
 		m.taskManager.ClearTasks()
 	}
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "reset", map[string]string{
-			"reason":  reason,
-			"trigger": string(trigger),
-		})
-	}
+	m.msgBusSend("system", "", "reset", PathSystem, "ResetController:reset", map[string]string{
+		"reason":  reason,
+		"trigger": string(trigger),
+	})
 
 	fmt.Printf("[RESET] ✅ 复位完成\n")
 	return nil
@@ -6940,9 +7001,7 @@ func (m *Manager) UpdateTodoStatus(id, status string) {
 	todoCopy := make([]TodoItem, len(m.todoList))
 	copy(todoCopy, m.todoList)
 	m.todoMu.RUnlock()
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "todo_update", todoCopy)
-	}
+	m.msgBusSend("system", "", "todo_update", PathSystem, "updateTodoList:todo_update", todoCopy)
 }
 
 func (m *Manager) GetTodoList() []TodoItem {
@@ -6959,9 +7018,7 @@ func (m *Manager) ClearTodoList() {
 	m.todoList = []TodoItem{}
 
 	// SSE推送TODO status clear
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "todo_update", []TodoItem{})
-	}
+	m.msgBusSend("system", "", "todo_update", PathSystem, "ClearTodoList:todo_clear", []TodoItem{})
 }
 
 // emitTodoUpdate SSE推送TODO列表变更
@@ -6970,9 +7027,7 @@ func (m *Manager) emitTodoUpdate() {
 	defer m.todoMu.RUnlock()
 	todoCopy := make([]TodoItem, len(m.todoList))
 	copy(todoCopy, m.todoList)
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "todo_update", todoCopy)
-	}
+	m.msgBusSend("system", "", "todo_update", PathSystem, "emitTodoUpdate:todo_update", todoCopy)
 }
 
 // addAPToUserMsg 添加AP消息到历史并通知用户
@@ -7248,9 +7303,7 @@ func (m *Manager) StopCurrentTask() {
 		_ = m.memoryManager.ClearState()
 	}
 
-	if m.ctx != nil {
-		runtime.EventsEmit(m.ctx, "done", map[string]string{"status": "cancelled"})
-	}
+	m.msgBusSend("system", "", "done", PathSystem, "stopCurrentTask:done_cancelled", map[string]string{"status": "cancelled"})
 
 	fmt.Println("[Manager] 🛑 当前任务已停止")
 

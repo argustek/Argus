@@ -15,6 +15,8 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
+
+	"argus/internal/chat"
 )
 
 // TerminalSession 单个终端会话
@@ -89,10 +91,10 @@ func (tm *TerminalManager) NewSession(name, workingDir string) error {
 	tm.activeID = sessionID
 
 	tm.app.addLog(fmt.Sprintf("[终端] 新会话启动: %s (%s)", name, sessionID))
-	runtime.EventsEmit(tm.app.ctx, "terminal:session-created", map[string]interface{}{
+	tm.app.emitToFrontend("terminal:session-created", map[string]interface{}{
 		"id":   sessionID,
 		"name": name,
-	})
+	}, "TerminalManager:CreateSession", chat.PathStatus)
 
 	return nil
 }
@@ -266,7 +268,7 @@ func (s *TerminalSession) stop() error {
 	s.manager.app.addLog(fmt.Sprintf("[终端] 会话停止: %s", s.Name))
 	s.manager.app.emitTerminalOutput("\r\n\x1b[33m⏹ 终端已停止\x1b[0m\r\n")
 
-	runtime.EventsEmit(s.manager.app.ctx, "terminal:session-closed", s.ID)
+	s.manager.app.emitToFrontend("terminal:session-closed", s.ID, "Session:Close", chat.PathStatus)
 
 	return nil
 }
@@ -309,7 +311,7 @@ func (tm *TerminalManager) SwitchSession(sessionID string) error {
 	}
 
 	tm.activeID = sessionID
-	runtime.EventsEmit(tm.app.ctx, "terminal:session-switched", sessionID)
+	tm.app.emitToFrontend("terminal:session-switched", sessionID, "TerminalManager:SwitchSession", chat.PathStatus)
 	return nil
 }
 

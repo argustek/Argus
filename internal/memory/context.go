@@ -15,15 +15,17 @@ func NewContextBuilder(mm *MemoryManager) *ContextBuilder {
 
 func (cb *ContextBuilder) BuildContextForTask(taskID string, maxTokens int) (string, error) {
 	var contextParts []string
-	
+
+	// [v0.7.2] 获取任务信息，如果不存在则创建默认上下文
 	task, err := cb.getTaskInfo(taskID)
 	if err != nil {
-		return "", err
-	}
-	
-	contextParts = append(contextParts, fmt.Sprintf("## 任务目标\n%s\n\n", task.Goal))
-	if task.Description != "" {
-		contextParts = append(contextParts, fmt.Sprintf("## 任务描述\n%s\n\n", task.Description))
+		// 数据库中没有任务记录时，返回默认上下文而非错误
+		contextParts = append(contextParts, fmt.Sprintf("## 当前会话\n- 任务ID: %s\n- 状态: 活跃会话\n\n", taskID))
+	} else {
+		contextParts = append(contextParts, fmt.Sprintf("## 任务目标\n%s\n\n", task.Goal))
+		if task.Description != "" {
+			contextParts = append(contextParts, fmt.Sprintf("## 任务描述\n%s\n\n", task.Description))
+		}
 	}
 	
 	contextParts = append(contextParts, "## 待解决问题\n")
