@@ -100,8 +100,9 @@ type MessageBus struct {
 	onStateChange func(RoleState)          // 状态变更回调
 	streamCounter int64                    // 流式消息计数器
 	streamSampleN int                      // 每凑够N个chunk打包一批（默认10）
-	streamBatches map[string]*StreamBatch  // 按 role+event 分组的当前缓冲批（key: "pm_pm_stream"）
+	streamBatches map[string]*StreamBatch  // 按 role+event 分组的当前缓冲批（key: "pm_pm_stream")
 	batchMu       sync.RWMutex            // 批次缓冲专用锁（避免与主锁竞争）
+	writeDebugLog func(content string)    // [v0.7.2] 写入 conversation.log（与Bridge一致）
 }
 
 // NewMessageBus 创建消息总线
@@ -515,6 +516,11 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 			fmt.Printf("[🚨MSG] 超时未确认! id=%s role=%s path=%s source=%s 已等待%.1fs\n",
 				msgId, pending.Role, pending.Tag.Path, pending.Tag.SourceLoc, elapsed.Seconds())
 			mb.lostMessages = append(mb.lostMessages, pending)
+			// [v0.7.2] 同步写入 conversation.log（与对话框信息一致）
+			if mb.writeDebugLog != nil {
+				mb.writeDebugLog(fmt.Sprintf("[MessageBus-LOST] 🚨 %s/%s msgId=%s 等待%.1fs | 发送者:%s",
+					pending.EventName, pending.Tag.Path, msgId, elapsed.Seconds(), pending.Tag.SourceLoc))
+			}
 		}
 	}
 
@@ -642,6 +648,13 @@ func (mb *MessageBus) SetOnStateChange(fn func(RoleState)) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 	mb.onStateChange = fn
+}
+
+// [v0.7.2] SetDebugLogWriter 注入 conversation.log 写入函数（与Bridge一致）
+func (mb *MessageBus) SetDebugLogWriter(fn func(content string)) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.writeDebugLog = fn
 }
 
 // SetEnabled 启用/禁用

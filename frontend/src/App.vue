@@ -392,6 +392,17 @@ onMounted(async () => {
     }
   })
 
+  // [v0.7.2] Context Management: 全局监听三个组件事件（防止TokenMonitor未打开时丢车）
+  EventsOn('token_stats', (data: any) => {
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+  EventsOn('context_built', (data: any) => {
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+  EventsOn('compress_done', (data: any) => {
+    if (data?._msgId) ackMessage(data._msgId)
+  })
+
   // 监听新消息事件（来自后端）
   EventsOff('new-message')
   EventsOn('new-message', (msg: { id?: number; role: string; content: string; raw?: string; timestamp?: number | string; _msgId?: string }) => {

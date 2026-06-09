@@ -13,37 +13,40 @@ func NewCompressor(mm *MemoryManager) *Compressor {
 	return &Compressor{mm: mm}
 }
 
-func (c *Compressor) CompressConversations(taskID string, keepLastN int) error {
+func (c *Compressor) CompressConversations(taskID string, keepLastN int) (int, error) {
 	conversations, err := c.mm.GetConversations(taskID, 1000)
 	if err != nil {
-		return fmt.Errorf("获取对话记录失败：%v", err)
+		return 0, fmt.Errorf("获取对话记录失败：%v", err)
 	}
-	
+
 	if len(conversations) <= keepLastN {
-		return nil
+		return 0, nil  // 无需压缩，返回0
 	}
-	
+
 	toCompress := conversations[:len(conversations)-keepLastN]
-	
+	compressedCount := 0
+
 	for _, conv := range toCompress {
 		if conv.IsCompressed {
 			continue
 		}
-		
+
 		summary := c.generateSummary(conv.Content)
-		
+
 		_, err := c.mm.db.Exec(`
-			UPDATE conversations 
-			SET summary = ?, is_compressed = TRUE 
+			UPDATE conversations
+			SET summary = ?, is_compressed = TRUE
 			WHERE id = ?
 		`, summary, conv.ID)
-		
+
 		if err != nil {
-			return fmt.Errorf("压缩对话记录失败：%v", err)
+			return compressedCount, fmt.Errorf("压缩对话记录失败：%v", err)
 		}
+
+		compressedCount++
 	}
-	
-	return nil
+
+	return compressedCount, nil  // 返回实际压缩数量
 }
 
 func (c *Compressor) generateSummary(content string) string {
@@ -96,15 +99,15 @@ func (c *Compressor) ShouldCompress(taskID string, maxTokens int) (bool, error) 
 	return totalTokens > maxTokens, nil
 }
 
-func (c *Compressor) CompressIfNeeded(taskID string, maxTokens int, keepLastN int) error {
+func (c *Compressor) CompressIfNeeded(taskID string, maxTokens int, keepLastN int) (int, error) {
 	shouldCompress, err := c.ShouldCompress(taskID, maxTokens)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	
+
 	if shouldCompress {
 		return c.CompressConversations(taskID, keepLastN)
 	}
-	
-	return nil
+
+	return 0, nil
 }

@@ -11,18 +11,22 @@ import (
 	"argus/internal/ai"
 	"argus/internal/core"
 	"argus/internal/executor"
+	"argus/internal/memory"
 )
 
 type Bridge struct {
-	mu       sync.RWMutex
-	argus    *core.ArgusCore
-	executor *executor.Executor
-	msgBus   *MessageBus
+	mu            sync.RWMutex
+	argus         *core.ArgusCore
+	executor      *executor.Executor
+	msgBus        *MessageBus
+	contextWindow *memory.ContextWindow // [v0.7.2] Token 监控 + 窗口管理
+	contextBuilder *memory.ContextBuilder // [v0.7.2] 任务上下文组装器
+	compressor     *memory.Compressor     // [v0.7.2] 对话压缩器
 
 	onMessage func(msg *Message)
 	onChunk   func(delta string)
 	ctx       context.Context
-	cancel    context.CancelFunc
+	cancel    func()
 
 	isProcessing bool
 	writeDebugLog func(content string)
@@ -91,6 +95,80 @@ func (b *Bridge) SetDebugLogWriter(fn func(content string)) {
 	b.writeDebugLog = fn
 }
 
+// [v0.7.2] SetContextWindow 注入 Token 监控窗口
+func (b *Bridge) SetContextWindow(cw *memory.ContextWindow) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.contextWindow = cw
+}
+
+// [v0.7.2] SetContextBuilder 注入任务上下文组装器
+func (b *Bridge) SetContextBuilder(cb *memory.ContextBuilder) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.contextBuilder = cb
+}
+
+// [v0.7.2] SetCompressor 注入对话压缩器
+func (b *Bridge) SetCompressor(c *memory.Compressor) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.compressor = c
+}
+
+// [v0.7.2] pushTokenStats 通过 MessageBus 推送 token_stats 到前端 TokenMonitor
+func (b *Bridge) pushTokenStats() {
+	if b.contextWindow == nil {
+		if b.writeDebugLog != nil {
+			b.writeDebugLog("[Bridge-CTX] ⚠ pushTokenStats 跳过: contextWindow=nil")
+		}
+		return
+	}
+	if b.msgBus == nil {
+		if b.writeDebugLog != nil {
+			b.writeDebugLog("[Bridge-CTX] ⚠ pushTokenStats 跳过: msgBus=nil")
+		}
+		return
+	}
+	stats := b.contextWindow.TokenStats()
+	msgId := b.msgBus.Send("system", "", "token_stats", PathSystem, "Bridge:pushTokenStats", stats)
+	if b.writeDebugLog != nil {
+		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ token_stats 已推送 msgId=%s total_tokens=%v", msgId, stats["total_tokens"]))
+	}
+}
+
+// [v0.7.2] pushContextBuilt 通过 MessageBus 推送任务上下文到前端
+func (b *Bridge) pushContextBuilt(taskID string, contextStr string) {
+	if b.msgBus == nil {
+		return
+	}
+	data := map[string]interface{}{
+		"task_id":   taskID,
+		"context":    contextStr,
+		"timestamp":  time.Now().Unix(),
+	}
+	msgId := b.msgBus.Send("system", "", "context_built", PathSystem, "Bridge:pushContextBuilt", data)
+	if b.writeDebugLog != nil {
+		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ context_built 已推送 msgId=%s taskID=%s len=%d", msgId, taskID, len(contextStr)))
+	}
+}
+
+// [v0.7.2] pushCompressDone 通过 MessageBus 推送压缩结果到前端
+func (b *Bridge) pushCompressDone(taskID string, compressedCount int) {
+	if b.msgBus == nil {
+		return
+	}
+	data := map[string]interface{}{
+		"task_id":         taskID,
+		"compressed_count": compressedCount,
+		"timestamp":       time.Now().Unix(),
+	}
+	msgId := b.msgBus.Send("system", "", "compress_done", PathSystem, "Bridge:pushCompressDone", data)
+	if b.writeDebugLog != nil {
+		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ compress_done 已推送 msgId=%s taskID=%s compressed=%d", msgId, taskID, compressedCount))
+	}
+}
+
 func (b *Bridge) emitStatus(status string) {
 	if b.onMessage != nil {
 		msg := &Message{
@@ -98,6 +176,20 @@ func (b *Bridge) emitStatus(status string) {
 			To:        "frontend",
 			Role:      "status",
 			Content:   status,
+			Timestamp: time.Now(),
+		}
+		b.onMessage(msg)
+	}
+}
+
+// [v0.7.2] emitSystemMsg 在聊天历史中插入一条系统消息（用户可见，类似 Trae IDE 的 "正在压缩对话..."）
+func (b *Bridge) emitSystemMsg(content string) {
+	if b.onMessage != nil {
+		msg := &Message{
+			From:      "system",
+			To:        "frontend",
+			Role:      "system",
+			Content:   content,
 			Timestamp: time.Now(),
 		}
 		b.onMessage(msg)
@@ -183,7 +275,65 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 		b.writeDebugLog(fmt.Sprintf("USER: %s", userMsg))
 	}
 
+	// [v0.7.2] ContextWindow: 记录用户消息 + 推送 Token 统计
+	if b.contextWindow != nil {
+		b.contextWindow.AddMessage(memory.RoleUser, userMsg, 0, "")
+		b.pushTokenStats()
+		if b.writeDebugLog != nil {
+			b.writeDebugLog("[Bridge-CTX] ✅ 用户消息已写入 ContextWindow")
+		}
+	}
+
+	// [v0.7.2] ContextBuilder: 构建任务上下文并推送到前端（如果可用）
+	if b.contextBuilder != nil {
+		taskID := "current" // 使用固定taskID表示当前会话
+		contextStr, err := b.contextBuilder.BuildContextForTask(taskID, 8000)
+		if err != nil {
+			if b.writeDebugLog != nil {
+				b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ⚠ ContextBuilder 失败: %v", err))
+			}
+			// ContextBuilder失败不影响主流程，继续执行
+		} else {
+			b.pushContextBuilt(taskID, contextStr)
+			if b.writeDebugLog != nil {
+				b.writeDebugLog("[Bridge-CTX] ✅ 任务上下文已构建并推送")
+			}
+		}
+	}
+
 	result := b.argus.Process(userMsg)
+
+	// [v0.7.2] ContextWindow: 记录 PM 响应 + 推送 Token 统计
+	if b.contextWindow != nil && result.Success && len(result.Phases) > 0 {
+		pmOutput := result.Phases[0].Output // PhaseAnalyze = PM phase
+		if pmOutput != "" {
+			b.contextWindow.AddMessage(memory.RoleAssistant, pmOutput, 0, "")
+			b.pushTokenStats()
+			if b.writeDebugLog != nil {
+				b.writeDebugLog("[Bridge-CTX] ✅ PM 响应已写入 ContextWindow")
+			}
+		}
+	}
+
+	// [v0.7.2] Compressor: 检查是否需要压缩对话（保留最近2条，便于测试）
+	if b.compressor != nil {
+		taskID := "current"
+		compressedCount, err := b.compressor.CompressConversations(taskID, 2)
+		if err != nil {
+			if b.writeDebugLog != nil {
+				b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ⚠ Compressor 失败: %v", err))
+			}
+			// Compressor失败不影响主流程，继续执行
+		} else if compressedCount > 0 {
+			// 只有真的压缩了才通知前端
+			b.pushCompressDone(taskID, compressedCount)
+			if b.writeDebugLog != nil {
+				b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ 对话压缩完成: 压缩了 %d 条旧消息", compressedCount))
+			}
+		} else if b.writeDebugLog != nil {
+			b.writeDebugLog("[Bridge-CTX] ℹ️ 对话未超过阈值，无需压缩")
+		}
+	}
 
 	if b.writeDebugLog != nil {
 		if result.Success {

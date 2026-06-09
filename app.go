@@ -671,8 +671,20 @@ func (a *App) initChatManager() {
 
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
+				a.chatManager.GetMessageBus().SetDebugLogWriter(a.chatManager.WriteDebugLog) // [v0.7.2] 对话框与log一致
 				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
 				a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
+				// [v0.7.2] 注入 ContextWindow 到 Bridge（真正的消息处理入口）
+				if a.contextWindow != nil {
+					a.bridge.SetContextWindow(a.contextWindow)
+				}
+				// [v0.7.2] 注入 ContextBuilder 和 Compressor 到 Bridge
+				if a.contextBuilder != nil {
+					a.bridge.SetContextBuilder(a.contextBuilder)
+				}
+				if a.compressor != nil {
+					a.bridge.SetCompressor(a.compressor)
+				}
 				a.chatManager.GetMessageBus().SetOnStateChange(func(state core.RoleState) {
 					a.emitToFrontend("role-state", state, "MessageBus:State", chat.PathStatus)
 				})
@@ -3685,6 +3697,8 @@ func (a *App) initMCPManager(workDir string) {
 	// 注入到 chatManager（SE 工具桥接）
 	if a.chatManager != nil {
 		a.chatManager.SetMCPManager(a.mcpManager)
+		// [v0.7.2] 注入上下文管理三个组件
+		a.chatManager.SetContextManagement(a.contextWindow, a.contextBuilder, a.compressor)
 	}
 }
 

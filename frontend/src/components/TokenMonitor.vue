@@ -132,7 +132,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { TokenStats, TokenManage, TokenClear, TokenCount, TokenPrune } from '../../wailsjs/go/main/App'
 
 interface TokenStatsData {
@@ -178,7 +179,42 @@ const usageBarColor = computed(() => {
 })
 
 // ========== Lifecycle ==========
-onMounted(() => handleRefresh())
+onMounted(() => {
+  handleRefresh()
+  // [v0.7.2] 通过 MessageBus 事件接收 Token 统计（后端桥接点自动推送）
+  EventsOn('token_stats', (data: any) => {
+    if (data && typeof data === 'object') {
+      stats.value = data as TokenStatsData
+      // [G63] MessageBus ACK: 确认收到，防止报警
+      if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
+    }
+  })
+
+  // [v0.7.2] ContextBuilder: 接收任务上下文构建结果
+  EventsOn('context_built', (data: any) => {
+    if (data && typeof data === 'object') {
+      console.log('[TokenMonitor] context_built received:', data.task_id, 'len=', data.context?.length)
+      // [G63] MessageBus ACK
+      if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
+    }
+  })
+
+  // [v0.7.2] Compressor: 接收对话压缩完成通知
+  EventsOn('compress_done', (data: any) => {
+    if (data && typeof data === 'object') {
+      console.log('[TokenMonitor] compress_done received:', data.task_id, 'compressed=', data.compressed_count)
+      lastAction.value = { success: true, detail: `对话已压缩 ${data.compressed_count} 条旧消息` }
+      // [G63] MessageBus ACK
+      if (data._msgId) { ;(window as any).__argusAck?.(data._msgId) }
+    }
+  })
+})
+
+onUnmounted(() => {
+  EventsOff('token_stats')
+  EventsOff('context_built')
+  EventsOff('compress_done')
+})
 
 // ========== Helpers ==========
 function formatNum(n: number): string {
