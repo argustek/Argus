@@ -105,6 +105,8 @@ type ArgusCore struct {
 	onStateChange  func(RoleState)
 	onActionEvent  func(eventName string, data interface{})
 
+	silent bool // [v0.8] Featherweight静默模式：抑制所有中间emit，只发最终总结
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -255,6 +257,11 @@ func (c *ArgusCore) SetPMProcessor(p *ai.PMProcessor) {
 		func(id, status string) { c.todo.UpdateStatus(id, TodoStatus(status)) },
 		func() { c.todo.Clear() },
 	)
+}
+
+// SetClient 热更新 LLM 客户端（SaveConfig 切换模型时调用）
+func (c *ArgusCore) SetClient(client AICaller) {
+	c.client = client
 }
 
 func (c *ArgusCore) emitChunk(delta string) {
@@ -439,12 +446,21 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		history := []ai.ChatMessage{} // 新对话，无历史
 		var resp *ai.PMResponse
 		resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
+			// [v0.8] 过滤空delta和纯JSON delta（避免前端显示空消息）
+			trimmed := strings.TrimSpace(delta)
+			if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
+				return
+			}
 			if c.onChunk != nil {
 				c.onChunk(delta)
 			}
 		})
 		if pmErr == nil && resp != nil {
 			pmResponse = resp.Content
+			// [v0.8] 暴露 HasToolCalls 给分流器使用
+			if resp.HasToolCalls {
+				pmResponse += "\n[HAS_TOOL_CALLS]"
+			}
 		}
 	} else {
 		pmResponse, pmErr = c.callAI(RolePM, userMsg, "")
@@ -467,9 +483,79 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	c.memory.Add(RolePM, pmResponse)
 
-	displayText := c.extractDisplayText(pmResponse)
-	c.emit("pm_to_user", displayText)
+	// ===== [v0.8] 项目分级分流器 =====
+	// 1. 解析用户 /level 命令（用户优先权）
+	userLevel := ""
+	if strings.Contains(userMsg, "/level ") {
+		parts := strings.SplitN(userMsg, "/level ", 2)
+		if len(parts) == 2 {
+			userLevel = strings.TrimSpace(strings.Fields(parts[1])[0])
+			fmt.Printf("[Core:Level] 用户指定级别: %s\n", userLevel)
+		}
+	}
 
+	// 2. 判断是否为 Featherweight
+	isFeatherweight := false
+
+	// 条件A：用户显示指定 /level featherweight
+	if userLevel == "featherweight" || userLevel == "feather" || userLevel == "🪶" {
+		isFeatherweight = true
+		fmt.Printf("[Core:Level] 🪶 用户强制指定 Featherweight\n")
+	}
+
+	// 条件B：PM 明确标记了 featherweight
+	if !isFeatherweight && (strings.Contains(pmResponse, `"level":"featherweight"`) ||
+		strings.Contains(pmResponse, `"level":"feather"`) ||
+		strings.Contains(pmResponse, "🪶") ||
+		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]")) {
+		isFeatherweight = true
+		fmt.Printf("[Core:Level] 🪶 PM标记 Featherweight\n")
+	}
+
+	// 条件C：启发式检测 — 用户消息明显是简单编码任务
+	// 即使 PM 说了 @SE（因为它没有工具），仍然强制走 Featherweight
+	if !isFeatherweight {
+		lowerUserMsg := strings.ToLower(userMsg)
+		// 明显是单文件简单任务的模式
+		isTinyTask := (strings.Contains(lowerUserMsg, "hello world") ||
+			strings.Contains(lowerUserMsg, "fibonacci") ||
+			strings.Contains(lowerUserMsg, "counter") ||
+			strings.Contains(lowerUserMsg, "单文件") ||
+			strings.Contains(lowerUserMsg, "featherweight")) &&
+			(strings.Contains(lowerUserMsg, "create") ||
+				strings.Contains(lowerUserMsg, "write") ||
+				strings.Contains(lowerUserMsg, "创建") ||
+				strings.Contains(lowerUserMsg, "写个") ||
+				strings.Contains(lowerUserMsg, "写一个"))
+
+		// "and run" / "and execute" 进一步确认是编程任务
+		isCodingTask := isTinyTask ||
+			(strings.Contains(lowerUserMsg, " and ") &&
+				(strings.Contains(lowerUserMsg, "go program") ||
+					strings.Contains(lowerUserMsg, ".go"))) ||
+			(strings.Contains(lowerUserMsg, "create") && strings.Contains(lowerUserMsg, "run"))
+
+		if isCodingTask {
+			isFeatherweight = true
+			fmt.Printf("[Core:Level] 🪶 启发式检测→Featherweight (coding task detected)\n")
+		}
+	}
+
+	// 3. Featherweight → pmDirectExecute（跳过 SE/Review/AP）
+	if isFeatherweight {
+		fmt.Printf("[Core:分流] 🪶 Featherweight → PM直执模式\n")
+		return c.pmDirectExecute(userMsg, pmResponse, result)
+	}
+
+	// 非Featherweight：清理内部标记后再展示 PM 原始响应
+	cleanPMResponse := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
+	cleanPMResponse = strings.TrimSpace(cleanPMResponse)
+	displayText := c.extractDisplayText(cleanPMResponse)
+	if displayText != "" {
+		c.emit("pm_to_user", displayText)
+	}
+
+	// 非Featherweight：继续原有流程
 	// PM 是聪明人，不是分类器。看 PM 的 @ 指令决定流向
 	hasSE := strings.Contains(pmResponse, "@SE")
 
@@ -594,7 +680,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	}
 
 	// 执行操作
-	execResults, execErr := c.executeActions(actions)
+	execResults, execErr := c.executeActions(actions, "se")
 
 	maxSelfFix := 5
 	for selfAttempt := 0; selfAttempt <= maxSelfFix; selfAttempt++ {
@@ -721,7 +807,7 @@ Output ONLY this exact JSON structure:
 		}
 
 		// self-fix 后重新执行
-		execResults, execErr = c.executeActions(actions)
+		execResults, execErr = c.executeActions(actions, "se")
 	}
 
 	result.Outputs = execResults
@@ -811,7 +897,7 @@ Original user request: %s`, reviewResult.Reason, userMsg)
 			}
 
 			// PM feedback retry: 重新执行
-			execResults, execErr = c.executeActions(actions)
+			execResults, execErr = c.executeActions(actions, "se")
 			result.Outputs = execResults
 			result.Actions = actions
 			if execErr != nil {
@@ -1014,7 +1100,7 @@ Generate corrected actions JSON:
 			}
 
 			// AP-fix: 执行修复操作
-			execResults, execErr = c.executeActions(actions)
+			execResults, execErr = c.executeActions(actions, "se")
 			result.Outputs = execResults
 			result.Actions = actions
 			if execErr != nil {
@@ -1654,11 +1740,203 @@ func findMatchingBracket(s string) int {
 	return -1
 }
 
-func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
+// pmDirectExecute [v0.8] PM直执模式 — Featherweight任务，PM在自己工位上用SE工具直接执行
+// 不换帽子、不换工位、不走SE/Review/AP
+// LLM调用：正常1次，出错最多重试3次（共4次）
+func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *ProcessResult) *ProcessResult {
+	fmt.Printf("[Core:Feather] 🪶 PM直执模式启动\n")
+
+	// [v0.8] 静默模式：抑制所有中间action事件到前端（一条消息搞定）
+	prevSilent := c.silent
+	c.silent = true
+	defer func() { c.silent = prevSilent }()
+
+	c.emitStatus("execute", "pm", "busy")
+
+	start := time.Now()
+
+	// Step 1: 调用 LLM（PM自己工位 + SE工具，不换工位）
+	systemPrompt := c.prompts.Get(RolePM)
+	execPrompt := fmt.Sprintf(`【PM直执模式】你是PM，现在亲自执行这个Featherweight任务。
+
+用户请求：%s
+你的分析：%s
+
+要求：
+1. 一次返回完整 actions（write_file 写代码 + exec 执行验证）
+2. 在 Content 中包含结果汇报文本（🪶 格式）
+3. exec 必须验证代码能运行`, userMsg, pmResponse)
+
+	var actions []ai.SEAction
+	var displayContent string
+	var callErr error
+
+	// 第一次 LLM 调用
+	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
+	var resp *ai.ChatResponse
+	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, []ai.Message{}, execPrompt, ai.SETools)
+	callCancel()
+
+	if callErr != nil {
+		result.Error = fmt.Errorf("pmDirectExecute LLM call failed: %w", callErr)
+		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 PM直执失败: %v", callErr))
+		c.emitStatus("error", "pm", "idle")
+		return result
+	}
+
+	if len(resp.Choices) == 0 {
+		result.Error = fmt.Errorf("pmDirectExecute: no response from AI")
+		c.emit("pm_to_user", "@USR 🪶 无响应")
+		c.emitStatus("error", "pm", "idle")
+		return result
+	}
+
+	msg := resp.Choices[0].Message
+	displayContent = msg.Content
+
+	// 提取 ToolCalls 为 actions
+	if len(msg.ToolCalls) > 0 {
+		for _, tc := range msg.ToolCalls {
+			var args map[string]interface{}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			action := ai.SEAction{Type: tc.Function.Name}
+			if p, ok := args["path"].(string); ok { action.Path = p }
+			if ct, ok := args["content"].(string); ok { action.Content = ct }
+			if cmd, ok := args["command"].(string); ok { action.Command = cmd }
+			actions = append(actions, action)
+		}
+	}
+
+	phaseFE := PhaseResult{Phase: PhaseExecute, Role: RolePM, Input: execPrompt, Output: msg.Content, Raw: msg.Content, Duration: time.Since(start)}
+	result.Phases = append(result.Phases, phaseFE)
+
+	// 如果没有 actions（PM 只返回了文本），直接展示
+	if len(actions) == 0 {
+		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", displayContent))
+		c.memory.Add(RolePM, msg.Content)
+		c.emitStatus("done", "none", "idle")
+		result.Success = true
+		return result
+	}
+
+	// Step 2: 执行 actions（executor="pm"）
+	execResults, execErr := c.executeActions(actions, "pm")
+	result.Outputs = execResults
+	result.Actions = actions
+
+	// Step 3: 检查结果 + 重试（最多3次）
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if execErr == nil && c.seExecutionSatisfied(execResults) {
+			// 成功！汇报结果
+			break
+		}
+
+		// 最后一次也失败了
+		if attempt == maxRetries {
+			if execErr != nil {
+				result.Error = fmt.Errorf("pmDirectExecute failed after %d retries: %w", maxRetries, execErr)
+			} else {
+				result.Error = fmt.Errorf("pmDirectExecute incomplete after %d retries", maxRetries)
+			}
+			fmt.Printf("[Core:Feather] ❌ PM直执失败 (重试%d次耗尽)\n", maxRetries)
+			break
+		}
+
+		// 重试：带上错误信息让 PM 修复
+		feedbackErr := "<no error>"
+		if execErr != nil { feedbackErr = execErr.Error() }
+		fmt.Printf("[Core:Feather] 🔄 PM重试 #%d/%d: %s\n", attempt, maxRetries, feedbackErr)
+
+		fixPrompt := fmt.Sprintf(`⚠️ 上次执行出错，请修复后重新返回 actions。
+
+错误: %s
+你尝试的actions: %v
+执行结果: %v
+
+任务: %s
+
+要求：
+1. 修正代码中的错误（语法错误、路径错误等）
+2. 返回完整的修正后 actions（write_file + exec）
+3. exec 命令格式: go run filename.go（使用相对路径）`,
+			feedbackErr, actions, execResults, userMsg)
+
+		callCtx2, cancel2 := context.WithTimeout(c.ctx, c.timeout)
+		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, []ai.Message{}, fixPrompt, ai.SETools)
+		cancel2()
+		if err2 != nil {
+			fmt.Printf("[Core:Feather] ⚠️ 重试LLM调用失败: %v\n", err2)
+			continue
+		}
+		if len(resp2.Choices) == 0 { continue }
+
+		msg2 := resp2.Choices[0].Message
+		if len(msg2.Content) > 20 { displayContent = msg2.Content } // 更新汇报文本
+
+		actions = nil
+		for _, tc := range msg2.ToolCalls {
+			var args map[string]interface{}
+			json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			a := ai.SEAction{Type: tc.Function.Name}
+			if p, ok := args["path"].(string); ok { a.Path = p }
+			if ct, ok := args["content"].(string); ok { a.Content = ct }
+			if cmd, ok := args["command"].(string); ok { a.Command = cmd }
+			actions = append(actions, a)
+		}
+		if len(actions) > 0 {
+			execResults, execErr = c.executeActions(actions, "pm")
+			result.Outputs = execResults
+			result.Actions = actions
+		}
+	}
+
+	// Step 4: 调用 LLM 生成自然语言最终总结（利用PM的总结能力）
+	if result.Error != nil {
+		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 ❌ %v", result.Error))
+	} else if len(execResults) > 0 {
+		// 用 LLM 生成自然语言摘要（不是手动拼字符串）
+		summaryPrompt := fmt.Sprintf(`用1-2句话向用户汇报你完成的工作（你是PM，直接对用户说话，用🪶标记）：
+
+用户任务：%s
+你执行的操作和结果：
+%s
+
+直接输出汇报文本即可（不要太长，用自然语言）。`, userMsg, strings.Join(execResults, "\n"))
+
+		summaryCtx, summaryCancel := context.WithTimeout(c.ctx, c.timeout)
+		finalSummary, summaryErr := c.client.ChatStream(summaryCtx, c.prompts.Get(RolePM), nil, summaryPrompt, "zh", nil, nil)
+		summaryCancel()
+
+		if summaryErr != nil || len(strings.TrimSpace(finalSummary)) < 3 {
+			// fallback: 简洁的 exec 结果
+			finalSummary = fmt.Sprintf("✅ 完成 (%d 个操作): %s", len(actions), strings.Join(execResults, "\n"))
+		}
+		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", finalSummary))
+	} else if len(strings.TrimSpace(displayContent)) > 0 {
+		cleanSummary := c.extractCleanSummary(displayContent)
+		if cleanSummary != "" {
+			c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", cleanSummary))
+		} else {
+			c.emit("pm_to_user", "@USR 🪶 ✅ 完成")
+		}
+	}
+
+	c.memory.Add(RolePM, displayContent)
+	c.emitStatus("done", "none", "idle")
+	result.Success = (result.Error == nil)
+	return result
+}
+
+func (c *ArgusCore) executeActions(actions []ai.SEAction, executor string) ([]string, error) {
 	outputs := make([]string, 0, len(actions))
 
+	if executor == "" {
+		executor = "se"
+	}
+
 	c.emitAction("exec_start", map[string]interface{}{
-		"executor": "se",
+		"executor": executor,
 		"total":    len(actions),
 	})
 
@@ -1674,7 +1952,7 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		}
 
 		c.emitAction("exec_start", map[string]interface{}{
-			"executor": "se",
+			"executor": executor,
 			"index":    i + 1,
 			"total":    len(actions),
 			"type":     action.Type,
@@ -1709,9 +1987,9 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 				output = fmt.Sprintf("✅ exec '%s'\n%s", action.Command, output)
 			}
 			c.emitAction("exec_output", map[string]interface{}{
-				"executor": "se",
-				"command":  action.Command,
-				"output":   output,
+				"executor":  executor,
+				"command":   action.Command,
+				"output":    output,
 				"exit_code": 0,
 			})
 		case "edit_file":
@@ -1963,7 +2241,7 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		}
 
 		c.emitAction("exec_done", map[string]interface{}{
-			"executor": "se",
+			"executor": executor,
 			"index":    i + 1,
 			"total":    len(actions),
 			"type":     action.Type,
@@ -1973,7 +2251,10 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 		})
 
 		outputs = append(outputs, output)
-		c.emit("se_to_pm", output)
+		// [v0.8] PM直执不逐条emit action结果（最终总结一条消息搞定）
+		if executor != "pm" {
+			c.emit(executor+"_to_user", output)
+		}
 
 		if err != nil {
 			return outputs, fmt.Errorf("action %d (%s) failed: %w", i, action.Type, err)
@@ -1986,6 +2267,10 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction) ([]string, error) {
 }
 
 func (c *ArgusCore) emitAction(eventName string, data interface{}) {
+	// [v0.8] Featherweight静默模式：跳过action事件到前端（避免多余bubble）
+	if c.silent {
+		return
+	}
 	if c.onActionEvent != nil {
 		c.onActionEvent(eventName, data)
 	}
@@ -2031,6 +2316,68 @@ func (c *ArgusCore) extractDisplayText(response string) string {
 		displayLines = append(displayLines, line)
 	}
 	return strings.Join(displayLines, "\n")
+}
+
+// extractCleanSummary [v0.8] 从PM直执的LLM响应中提取干净的汇报文本
+// 过滤掉：JSON代码块、中间思考过程、工具调用说明
+func (c *ArgusCore) extractCleanSummary(content string) string {
+	if content == "" { return "" }
+
+	lines := strings.Split(content, "\n")
+	var clean []string
+	inJSONBlock := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" { continue }
+
+		// 跳过 JSON 代码块
+		if strings.HasPrefix(trimmed, "```") {
+			inJSONBlock = !inJSONBlock
+			continue
+		}
+		if inJSONBlock { continue }
+		if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, `"type"`) { continue }
+		if strings.HasPrefix(trimmed, "[") { continue }
+
+		// 跳过中间过程/思考文本
+		skipPrefixes := []string{
+			// 中文
+			"让我执行", "我来执行", "我来直接", "正在执行",
+			"写代码 +", "执行验证", "以下是", "包含操作",
+			"我将", "我现在", "开始执行",
+			"我直接执行", "这个 featherweight", "这个任务",
+			"为你创建", "帮你写", "这是",
+			// 英文
+			"Here are", "Let me", "I will", "I'm going",
+			"Executing", "Creating", "Writing",
+			"I'll create", "I'll write", "I'll now",
+			"I've created", "I've written",
+			"This is a", "This task",
+			"Here's the", "The program",
+			"The code", "The file",
+		}
+		isSkip := false
+		for _, prefix := range skipPrefixes {
+			if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(prefix)) {
+				isSkip = true; break
+			}
+		}
+		if isSkip { continue }
+
+		// 保留 🪶 标记的行（这是正式汇报）
+		clean = append(clean, trimmed)
+	}
+
+	result := strings.Join(clean, "\n")
+	// 如果结果太长（>200字符），截取最后部分作为总结
+	if len(result) > 200 {
+		lines := strings.Split(result, "\n")
+		if len(lines) > 3 {
+			result = strings.Join(lines[len(lines)-3:], "\n")
+		}
+	}
+	return result
 }
 
 func (c *ArgusCore) extractCompletedSummary(response string) string {

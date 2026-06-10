@@ -7481,7 +7481,9 @@ func (m *Manager) pushSSEEvent(eventType string, data interface{}) {
 		return
 	}
 	m.sseBridge.PushEvent(eventType, data)
-	fmt.Printf("[SSE] → %s | data=%v\n", eventType, data)
+	// 同时写入 conversation.log（CLI/SSE 模式调试用）
+	dataJSON, _ := json.Marshal(data)
+	m.WriteDebugLog(fmt.Sprintf("[SSE] → %s | %s", eventType, string(dataJSON)))
 }
 
 func (m *Manager) syncBackendStatus(stage string, event string) {

@@ -245,6 +245,52 @@ Message Source Identification (IMPORTANT):
 - 注意用户的工作强度（今天工作了{{TodayWorkHours}}小时），适当关心
 - 保持自然，像真同事/老朋友一样
 - 关系越深（{{RelationshipPhase}}），表达可以越真诚
+
+---
+
+## 🪶 [v0.8] PM直执模式（Featherweight任务）
+
+### 你现在具备 SE 的全部执行能力！
+
+当任务属于 **Featherweight 级别**（单文件/<100行/无依赖）时，你不再需要 @SE，而是**自己直接执行**：
+
+#### 你的执行工具
+- **write_file**: 创建/覆写文件（如 hello.go）
+- **exec**: 执行命令（如 go run hello.go）
+- **read_file**: 读取文件内容
+- **edit_file**: 编辑文件（字符串替换）
+- **list_files**: 列出工作目录文件
+- **search_files**: 搜索文件
+- **delete_file**: 删除文件
+- 以及其他所有文档处理工具（read_pdf, write_docx 等）
+
+#### 分级判断标准
+
+| 级别 | 标准 | 你的行为 |
+|------|------|----------|
+| **Featherweight** 🪶 | 单文件 / <100行 / 无依赖 | **你自己直接干！** 用工具写代码+执行+汇报 |
+| **Lightweight** ⚡ | 2-5文件 / <500行 / 单一功能 | @SE 分配任务 |
+| **Medium** | 多模块 / <5000行 / 有内部依赖 | @SE 分配任务 |
+| **Heavy** | 大型项目 | @SE 分派任务 |
+
+> 用户也可以用 /level featherweight 强制指定级别，用户指定优先。
+
+#### Featherweight 任务执行规范（必须遵守）
+
+1. **一次搞定**：在一次 Tool Call 响应中返回完整的 actions（write_file + exec）
+2. **必须包含 exec 验证**：写完代码后必须 exec（go run xxx.go）验证
+3. **结果汇报**：在你的 Content 文本中包含简洁的结果总结，格式：
+   - 🪶 已完成 xxx (N个操作): ✅ write_file xxx.go (N bytes)
+   - 如果 exec 有输出结果，也一并列出
+4. **不换角色、不换工位**：全程以 PM 身份执行和汇报
+5. **出错时重试**：如果 exec 失败，重新生成修正后的 actions 再试
+
+#### 典型 Featherweight 示例
+- "创建 hello world" → write_file(hello.go) + exec(go run hello.go)
+- "写个斐波那契" → write_file(fib.go) + exec(go run fib.go)
+- "创建计数器" → write_file(counter.go) + exec(go run counter.go)
+
+⚠️ **只有 Featherweight 任务才自己直接执行。其他级别必须 @SE 分配任务！**
 `
 
 // PMProcessor PM处理器
@@ -567,6 +613,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	// [v0.7.2] 使用 ChatWithTools 让 PM 能调用 add_todo/update_todo
 	maxToolRounds := 5
 	var finalContent string
+	var hasToolCalls bool // [v0.8] 记录是否有ToolCalls
 
 	for round := 0; round < maxToolRounds; round++ {
 		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
@@ -586,7 +633,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			if finalContent != "" && !strings.Contains(finalContent, msg.Content) {
 				finalContent += "\n" + msg.Content
 			} else if finalContent == "" {
-				finalContent = msg.Content
+				finalContent += msg.Content
 			}
 		}
 
@@ -594,6 +641,9 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		if len(msg.ToolCalls) == 0 {
 			break
 		}
+
+		// [v0.8] 记录PM是否有ToolCalls（用于Featherweight分流判断）
+		hasToolCalls = true
 
 		// 处理工具调用（add_todo / update_todo）
 		aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
@@ -622,6 +672,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		Content:      finalContent,
 		Tasks:        tasks,
 		HasTasks:     tasks != nil,
+		HasToolCalls: hasToolCalls, // [v0.8]
 		ReviewResult: reviewResult,
 		ReviewReason: reviewReason,
 	}, nil
@@ -1176,6 +1227,7 @@ type PMResponse struct {
 	Content      string
 	Tasks        *types.Board
 	HasTasks     bool
+	HasToolCalls bool   // [v0.8] PM响应中是否包含ToolCalls（用于Featherweight分流判断）
 	ReviewResult string // AI结构化判断结果: "approve" 或 "reject"
 	ReviewReason string // AI判断的理由
 }

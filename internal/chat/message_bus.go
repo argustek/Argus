@@ -198,6 +198,10 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	// 发送给前端
 	mb.emitToFrontend(eventName, msgId, role, path, tag, sourceLoc, data)
 
+	// [v0.8.0] 注意：日志不在 Send 时写，而在 Ack（收到前端确认）后写
+	// 这样才能确保"所见即所得"——只有用户真正在对话框看到的消息才记入 conversation.log
+	// 见 Ack() 方法的实现
+
 	// 高频日志已降级（每条消息都打会导致刷屏），需要调试时取消注释
 	// trackingMark := "📢(no-track)"
 	// if needTracking { trackingMark = "⏳" }
@@ -473,7 +477,30 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 	
 	mb.receivedMap[msgId] = received
 	delete(mb.pendingQueue, msgId)
-	
+
+	// [v0.8.0] 所见即所得：前端确认收到后才写 conversation.log
+	// 只有用户在对话框里真正能看到的内容才记日志（pm/se/ap回复 + 用户输入）
+	// 这样确保日志与前端显示 100% 一致
+	if mb.writeDebugLog != nil {
+		switch pending.Tag.Path {
+		case PathPMToUser:
+			mb.writeDebugLog(fmt.Sprintf("PM: %s", pending.Content))
+		case PathSEToUser:
+			mb.writeDebugLog(fmt.Sprintf("SE: %s", pending.Content))
+		case PathAPToUser:
+			mb.writeDebugLog(fmt.Sprintf("AP: %s", pending.Content))
+		case PathUserInput:
+			mb.writeDebugLog(fmt.Sprintf("USER: %s", pending.Content))
+		case PathPMStream, PathSEStream:
+			// 流式消息的批量确认：记录批次摘要
+			if received.BatchAck != nil {
+				mb.writeDebugLog(fmt.Sprintf("[STREAM-BATCH] %s: %d msgs confirmed (seq=%d~%d)",
+					pending.Role, received.BatchAck.AckCount,
+					received.BatchAck.StartSeq, received.BatchAck.EndSeq))
+			}
+		}
+	}
+
 	return true
 }
 

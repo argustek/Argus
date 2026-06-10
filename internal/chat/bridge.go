@@ -78,7 +78,14 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 	// Action events (exec_start/done/output/completed) → MessageBus
 	b.argus.SetOnActionEvent(func(eventName string, data interface{}) {
 		if bus != nil && b.ctx != nil {
-			bus.Send("se", eventName, eventName, PathSEExec, "Bridge:action:"+eventName, data)
+			// [v0.8] 从 data 中动态获取 executor（PM直执时为 "pm"，否则默认 "se"）
+			executor := "se"
+			if m, ok := data.(map[string]interface{}); ok {
+				if e, exists := m["executor"]; exists {
+					if s, ok := e.(string); ok && s != "" { executor = s }
+				}
+			}
+			bus.Send(executor, eventName, eventName, PathSEExec, "Bridge:action:"+eventName, data)
 		}
 	})
 }
@@ -396,4 +403,17 @@ func (b *Bridge) SetContext(ctx context.Context) {
 	defer b.mu.Unlock()
 	b.ctx = ctx
 	b.argus.SetContext(ctx)
+}
+
+// UpdateClient 热更新 LLM 客户端（SaveConfig 切换模型时调用）
+// 同步更新 ArgusCore.client 和 Bridge.PMProcessor，确保 pmDirectExecute 等路径用新模型
+func (b *Bridge) UpdateClient(newClient *ai.Client, workDir string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.argus.SetClient(newClient)
+	// 重建 PMProcessor（持有 client 指针，必须替换）
+	pmProc := ai.NewPMProcessor(newClient, workDir, func(state int) {
+		fmt.Printf("[Bridge-PM] 项目状态更新: %d\n", state)
+	})
+	b.argus.SetPMProcessor(pmProc)
 }

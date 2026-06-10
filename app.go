@@ -574,21 +574,38 @@ func (a *App) initChatManager() {
 	if a.ctx != nil {
 		a.chatManager.SetContext(a.ctx)
 	}
-	// 初始化AP配置
-	if a.config.APEnabled {
-		if a.config.APConfig != nil && a.config.APConfig.BaseURL != "" && a.config.APConfig.APIKey != "" {
-			// AP使用独立API
-			a.chatManager.UpdateAPConfig(types.APIConfig{
-				Provider: a.config.APConfig.Provider,
-				BaseURL:  a.config.APConfig.BaseURL,
-				APIKey:   a.config.APConfig.APIKey,
-				Model:    a.config.APConfig.ModelName,
+	// 初始化各角色独立模型配置（与 SaveConfig 热更新逻辑保持一致）
+	if a.config.UseSeparateModels {
+		// 独立模式：按 ConfigID 分别设置
+		if pmCfg := a.findAPIConfigByID(a.config.PMConfigID); pmCfg != nil {
+			chatManager.UpdatePMConfig(types.APIConfig{
+				Provider: pmCfg.Provider, BaseURL: pmCfg.BaseURL,
+				APIKey: pmCfg.APIKey, Model: pmCfg.ModelName,
 			})
-			a.addLog(fmt.Sprintf("【ChatManager】AP已启用，使用独立API: %s", a.config.APConfig.BaseURL))
-		} else {
-			a.chatManager.UpdateAPConfig(types.APIConfig{})
-			a.addLog("【ChatManager】AP已启用，使用PM的API配置（共用模式）")
+			a.addLog(fmt.Sprintf("【ChatManager】PM独立模型: %s (%s)", pmCfg.ModelName, pmCfg.BaseURL))
 		}
+		if seCfg := a.findAPIConfigByID(a.config.SEConfigID); seCfg != nil {
+			chatManager.UpdateSEConfig(types.APIConfig{
+				Provider: seCfg.Provider, BaseURL: seCfg.BaseURL,
+				APIKey: seCfg.APIKey, Model: seCfg.ModelName,
+			})
+		}
+		if a.config.APEnabled {
+			if apCfg := a.findAPIConfigByID(a.config.APConfigID); apCfg != nil {
+				chatManager.UpdateAPConfig(types.APIConfig{
+					Provider: apCfg.Provider, BaseURL: apCfg.BaseURL,
+					APIKey: apCfg.APIKey, Model: apCfg.ModelName,
+				})
+				a.addLog(fmt.Sprintf("【ChatManager】AP独立模型: %s (%s)", apCfg.ModelName, apCfg.BaseURL))
+			} else {
+				chatManager.UpdateAPConfig(types.APIConfig{})
+				a.addLog("【ChatManager】AP已启用，使用PM的API配置（共用模式）")
+			}
+		}
+	} else if a.config.APEnabled {
+		// 共享模式：AP跟随共享配置
+		chatManager.UpdateAPConfig(types.APIConfig{})
+		a.addLog("【ChatManager】AP已启用，使用PM的API配置（共用模式）")
 	} else {
 		a.addLog("【ChatManager】AP未启用")
 	}
@@ -819,21 +836,36 @@ func (a *App) initChatManagerCLI() {
 	if a.ctx != nil {
 		a.chatManager.SetContext(a.ctx)
 	}
-	// 初始化AP配置
-	if a.config.APEnabled {
-		if a.config.APConfig != nil && a.config.APConfig.BaseURL != "" && a.config.APConfig.APIKey != "" {
-			// AP使用独立API
-			a.chatManager.UpdateAPConfig(types.APIConfig{
-				Provider: a.config.APConfig.Provider,
-				BaseURL:  a.config.APConfig.BaseURL,
-				APIKey:   a.config.APConfig.APIKey,
-				Model:    a.config.APConfig.ModelName,
+	// 初始化各角色独立模型配置（与 SaveConfig 热更新逻辑保持一致）
+	if a.config.UseSeparateModels {
+		if pmCfg := a.findAPIConfigByID(a.config.PMConfigID); pmCfg != nil {
+			chatManager.UpdatePMConfig(types.APIConfig{
+				Provider: pmCfg.Provider, BaseURL: pmCfg.BaseURL,
+				APIKey: pmCfg.APIKey, Model: pmCfg.ModelName,
 			})
-			fmt.Printf("[CLI] AP已启用，使用独立API: %s\n", a.config.APConfig.BaseURL)
-		} else {
-			a.chatManager.UpdateAPConfig(types.APIConfig{})
-			fmt.Println("[CLI] AP已启用，使用PM的API配置（共用模式）")
+			fmt.Printf("[CLI] PM独立模型: %s (%s)\n", pmCfg.ModelName, pmCfg.BaseURL)
 		}
+		if seCfg := a.findAPIConfigByID(a.config.SEConfigID); seCfg != nil {
+			chatManager.UpdateSEConfig(types.APIConfig{
+				Provider: seCfg.Provider, BaseURL: seCfg.BaseURL,
+				APIKey: seCfg.APIKey, Model: seCfg.ModelName,
+			})
+		}
+		if a.config.APEnabled {
+			if apCfg := a.findAPIConfigByID(a.config.APConfigID); apCfg != nil {
+				chatManager.UpdateAPConfig(types.APIConfig{
+					Provider: apCfg.Provider, BaseURL: apCfg.BaseURL,
+					APIKey: apCfg.APIKey, Model: apCfg.ModelName,
+				})
+				fmt.Printf("[CLI] AP独立模型: %s (%s)\n", apCfg.ModelName, apCfg.BaseURL)
+			} else {
+				chatManager.UpdateAPConfig(types.APIConfig{})
+				fmt.Println("[CLI] AP已启用，使用PM的API配置（共用模式）")
+			}
+		}
+	} else if a.config.APEnabled {
+		chatManager.UpdateAPConfig(types.APIConfig{})
+		fmt.Println("[CLI] AP已启用，使用PM的API配置（共用模式）")
 	} else {
 		fmt.Println("[CLI] AP未启用")
 	}
@@ -1066,6 +1098,10 @@ func (a *App) SaveConfig(config Config) error {
 				APIKey:   sharedCfg.APIKey,
 				Model:    sharedCfg.ModelName,
 			})
+			// [HOTFIX] 同步更新 Bridge/ArgusCore 的 client（pmDirectExecute 路径走的是 c.client）
+			if a.bridge != nil {
+				a.bridge.UpdateClient(a.chatManager.GetAIClient(), a.config.WorkDir)
+			}
 		}
 
 		// 2. PM独立模型
