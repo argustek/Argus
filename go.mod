@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/go-git/go-git/v5 v5.19.0
-	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/open-dingtalk/dingtalk-stream-sdk-go v0.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/wailsapp/wails/v2 v2.12.0

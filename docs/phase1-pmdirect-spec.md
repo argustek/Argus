@@ -35,7 +35,7 @@
 
 | 级别 | 标准 | 流程 |
 |------|------|------|
-| **Featherweight** 🪶 | 单文件 / <100行 / 无依赖 | pmDirectExecute（PM直执） |
+| **Featherweight** ⚡ | 单文件 / <100行 / 无依赖 | pmDirectExecute（PM直执） |
 | **Lightweight** ⚡ | 2-5文件 / <500行 / 单一功能 | PM → SE → AP 快速验证 |
 | **Medium** | 多模块 / <5000行 / 有内部依赖 | PM → SE → Review(循环) → AP → **PM总结** |
 | **Heavy** | 大型项目 / 多团队协作 / 长周期 | 全套 + K Tool 影响分析 → AP → **PM总结** |
@@ -161,7 +161,7 @@ Step 5: 错误重试（最多 3 次，共可尝试第2/3/4次 LLM 调用）
 - **PM 的 Content 文本**（第1次 LLM 响应自带）作为 summary 展示
 - **exec 命令输出**也直接展示给用户
 - **不额外调用 LLM 生成 summary**
-- 格式：`@USR 🪶 [PM汇报文本]` + `[exec输出（如有）]`
+- 格式：`@USR ⚡ [PM汇报文本]` + `[exec输出（如有）]`
 - **不换帽子、不换工位** — 全程 PM 角色
 
 ### 4.6 Featherweight 不做的事
@@ -216,7 +216,7 @@ pmDirectExecute 全程必须显示 **PM 角色**，不能出现 SE。
 ```
 输入: "Create a hello world Go program"
 预期:
-  - 日志显示 [Core:Level] 🪶 Featherweight (PM直执)
+  - 日志显示 [Core:Level] ⚡ Featherweight (PM直执)
   - conversation.log 显示 "PM:" 不是 "SE:"
   - 前端显示 PM 角色
   - hello.go 文件已创建且可运行
