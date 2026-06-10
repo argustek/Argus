@@ -45,6 +45,14 @@
     
     <!-- 主内容区 -->
     <div class="main-content">
+      <!-- 左侧：文件树 -->
+      <FileTree
+        v-if="activeWindows.fileTree"
+        :work-dir="workDir"
+        @select-file="openFile"
+        class="file-tree-panel"
+      />
+
       <!-- 左侧：对话区 -->
       <ChatPanel
         ref="chatPanelRef"
@@ -169,6 +177,7 @@ import EditorWindow from './components/EditorWindow.vue'
 import TerminalWindow from './components/TerminalWindow.vue'
 import ChangesWindow from './components/ChangesWindow.vue'
 import GitWindow from './components/GitWindow.vue'
+import FileTree from './components/FileTree.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 import DiffPreviewDialog from './components/DiffPreviewDialog.vue'
 import DebugPanel from './components/DebugPanel.vue'
@@ -414,10 +423,14 @@ onMounted(async () => {
     }
   })
 
-  // [v0.8.1] 全局 ACK git:repo-info，防止 GitWindow 未打开时触发 message_lost
+  // [v0.8.1] 全局 ACK git 事件 — GitWindow 关闭时没人监听会导致 message_lost 报警
   EventsOff('git:repo-info')
   EventsOn('git:repo-info', (raw: any) => {
-    ackMessage(raw?._msgId || '')
+    if (raw?._msgId) ackMessage(raw._msgId)
+  })
+  EventsOff('git:status')
+  EventsOn('git:status', (raw: any) => {
+    if (raw?._msgId) ackMessage(raw._msgId)
   })
 
   // [v0.7.3] Context Management events moved into onMounted (Wails runtime must be ready)
@@ -1640,6 +1653,12 @@ body {
   flex: 1;
   display: flex;
   overflow: hidden;
+}
+
+.file-tree-panel {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-color);
 }
 
 .chat-panel {

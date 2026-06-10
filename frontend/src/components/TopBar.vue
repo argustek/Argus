@@ -155,6 +155,52 @@ const remoteLoading = ref(false)
 const credUser = ref('')
 const credPass = ref('')
 
+// ========== 工作目录菜单 ==========
+function toggleMenu() { showMenu.value = !showMenu.value }
+function closeMenu() { showMenu.value = false }
+
+function openFileExplorer() {
+  emit('toggle-window', 'fileTree')
+}
+
+function openFolder() {
+  closeMenu()
+  emit('select-project', 'browse')
+}
+
+function connectRemote() {
+  closeMenu()
+  showRemoteDialog.value = true
+}
+
+function openWorkDirInExplorer() {
+  closeMenu()
+  // @ts-ignore
+  window.go.main.App.OpenFileLocation(props.workDir)
+}
+
+function clearWorkDir() {
+  closeMenu()
+  emit('select-project', '')
+}
+
+function selectProject(project: string) {
+  closeMenu()
+  emit('select-project', project)
+}
+
+// 项目徽章辅助函数
+function getInitials(path: string): string {
+  const parts = path.replace(/\\/g, '/').split('/')
+  return parts[parts.length - 1]?.substring(0, 2).toUpperCase() || '??'
+}
+function getName(path: string): string {
+  const parts = path.replace(/\\/g, '/').split('/')
+  return parts[parts.length - 1] || path
+}
+
+const colors = ['#6366f1','#8b5cf6','#a855f7','#d946ef','#ec4899','#f43f5e','#ef4444','#f97316','#eab308','#84cc16','#22c55e','#10b981','#14b8a6','#06b6d4','#0ea5e9','#3b82f6']
+
 // 即时贴相关
 const STICKY_STORAGE_KEY = 'argus_sticky_note'
 

@@ -312,11 +312,17 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 onMounted(() => {
   // 注册 Git 结果监听器（后端 goroutine 执行完后推送结果，不阻塞前端）
-  EventsOn('git:repo-info', (raw: string) => {
-    try { const info = JSON.parse(raw); if (info) Object.assign(repoInfo, info) } catch {}
+  EventsOn('git:repo-info', (raw: any) => {
+    try {
+      const data = typeof raw === 'string' ? JSON.parse(raw) : (raw?.data ? JSON.parse(raw.data) : raw)
+      if (data) Object.assign(repoInfo, data)
+    } catch {}
   })
-  EventsOn('git:status', (raw: string) => {
-    try { entries.value = JSON.parse(raw) || [] } catch {}
+  EventsOn('git:status', (raw: any) => {
+    try {
+      const data = typeof raw === 'string' ? JSON.parse(raw) : (raw?.data ? JSON.parse(raw.data) : raw)
+      entries.value = data || []
+    } catch {}
     loading.value = false
   })
   refreshAll()
@@ -327,8 +333,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
-  EventsOff('git:repo-info')
-  EventsOff('git:status')
+  // 不调用 EventsOff — App.vue 全局 ACK 常驻，防止 GitWindow 关闭后消息丢失
 })
 
 onErrorCaptured((err: any) => {
