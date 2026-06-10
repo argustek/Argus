@@ -25,6 +25,7 @@ type Bridge struct {
 
 	onMessage func(msg *Message)
 	onChunk   func(delta string)
+	onProjectStateChange func(state string) // [FIX-v0.8.1] 项目状态回调（running/done/error）
 	ctx       context.Context
 	cancel    func()
 
@@ -100,6 +101,13 @@ func (b *Bridge) SetOnChunk(fn func(delta string)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.onChunk = fn
+}
+
+// [FIX-v0.8.1] 设置项目状态变更回调（Bridge.Process 调用，通知 CMonitor → 前端）
+func (b *Bridge) SetOnProjectStateChange(fn func(state string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onProjectStateChange = fn
 }
 
 func (b *Bridge) SetDebugLogWriter(fn func(content string)) {
@@ -284,6 +292,11 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 
 	b.emitStatus("phase:pm|role:pm|status:busy")
 
+	// [FIX-v0.8.1] 推送项目状态 running（V2 Bridge 绕过 handleToPM，需手动触发）
+	if b.onProjectStateChange != nil {
+		b.onProjectStateChange("running")
+	}
+
 	if b.writeDebugLog != nil {
 		b.writeDebugLog(fmt.Sprintf("USER: %s", userMsg))
 	}
@@ -315,6 +328,17 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 	}
 
 	result := b.argus.Process(userMsg)
+
+	// [v0.8.1] 推送项目级别到前端（short/normal/full）
+	if result.Level != "" && b.onMessage != nil {
+		b.onMessage(&Message{
+			From:    "system",
+			To:      "frontend",
+			Role:    "project_level",
+			Content: result.Level,
+			Timestamp: time.Now(),
+		})
+	}
 
 	// [v0.7.2] ContextWindow: 记录 PM 响应 + 推送 Token 统计
 	if b.contextWindow != nil && result.Success && len(result.Phases) > 0 {
@@ -362,8 +386,16 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 
 	if result.Success {
 		b.emitStatus("phase:done|role:none|status:idle")
+		// [FIX-v0.8.1] 推送项目状态 done
+		if b.onProjectStateChange != nil {
+			b.onProjectStateChange("done")
+		}
 	} else {
 		b.emitStatus("phase:error|role:none|status:error")
+		// [FIX-v0.8.1] 推送项目状态 error
+		if b.onProjectStateChange != nil {
+			b.onProjectStateChange("error")
+		}
 	}
 
 	return result, result.Error

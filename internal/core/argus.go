@@ -54,6 +54,7 @@ const (
 
 type ProcessResult struct {
 	Success  bool
+	Level    string // [v0.8.1] 项目级别: short-process / normal-process / full-process
 	Actions  []ai.SEAction
 	Outputs  []string
 	Error    error
@@ -497,19 +498,19 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	// 2. 判断是否为 Featherweight
 	isFeatherweight := false
 
-	// 条件A：用户显示指定 /level featherweight
-	if userLevel == "featherweight" || userLevel == "feather" || userLevel == "🪶" {
+	// 条件A：用户显示指定 /level short
+	if userLevel == "short" || userLevel == "short" || userLevel == "⚡" {
 		isFeatherweight = true
-		fmt.Printf("[Core:Level] 🪶 用户强制指定 Featherweight\n")
+		fmt.Printf("[Core:Level] ⚡ 用户强制指定 Featherweight\n")
 	}
 
-	// 条件B：PM 明确标记了 featherweight
-	if !isFeatherweight && (strings.Contains(pmResponse, `"level":"featherweight"`) ||
-		strings.Contains(pmResponse, `"level":"feather"`) ||
-		strings.Contains(pmResponse, "🪶") ||
+	// 条件B：PM 明确标记了 short
+	if !isFeatherweight && (strings.Contains(pmResponse, `"level":"short"`) ||
+		strings.Contains(pmResponse, `"level":"short"`) ||
+		strings.Contains(pmResponse, "⚡") ||
 		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]")) {
 		isFeatherweight = true
-		fmt.Printf("[Core:Level] 🪶 PM标记 Featherweight\n")
+		fmt.Printf("[Core:Level] ⚡ PM标记 Featherweight\n")
 	}
 
 	// 条件C：启发式检测 — 用户消息明显是简单编码任务
@@ -521,7 +522,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 			strings.Contains(lowerUserMsg, "fibonacci") ||
 			strings.Contains(lowerUserMsg, "counter") ||
 			strings.Contains(lowerUserMsg, "单文件") ||
-			strings.Contains(lowerUserMsg, "featherweight")) &&
+			strings.Contains(lowerUserMsg, "short")) &&
 			(strings.Contains(lowerUserMsg, "create") ||
 				strings.Contains(lowerUserMsg, "write") ||
 				strings.Contains(lowerUserMsg, "创建") ||
@@ -537,17 +538,19 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 		if isCodingTask {
 			isFeatherweight = true
-			fmt.Printf("[Core:Level] 🪶 启发式检测→Featherweight (coding task detected)\n")
+			fmt.Printf("[Core:Level] ⚡ 启发式检测→Featherweight (coding task detected)\n")
 		}
 	}
 
 	// 3. Featherweight → pmDirectExecute（跳过 SE/Review/AP）
 	if isFeatherweight {
-		fmt.Printf("[Core:分流] 🪶 Featherweight → PM直执模式\n")
+		result.Level = "short-process"
+		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执模式\n")
 		return c.pmDirectExecute(userMsg, pmResponse, result)
 	}
 
 	// 非Featherweight：清理内部标记后再展示 PM 原始响应
+	result.Level = "normal-process" // [v0.8.1] 默认 normal（PM→SE 标准流程）
 	cleanPMResponse := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
 	cleanPMResponse = strings.TrimSpace(cleanPMResponse)
 	displayText := c.extractDisplayText(cleanPMResponse)
@@ -1744,7 +1747,7 @@ func findMatchingBracket(s string) int {
 // 不换帽子、不换工位、不走SE/Review/AP
 // LLM调用：正常1次，出错最多重试3次（共4次）
 func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *ProcessResult) *ProcessResult {
-	fmt.Printf("[Core:Feather] 🪶 PM直执模式启动\n")
+	fmt.Printf("[Core:Feather] ⚡ PM直执模式启动\n")
 
 	// [v0.8] 静默模式：抑制所有中间action事件到前端（一条消息搞定）
 	prevSilent := c.silent
@@ -1764,7 +1767,7 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 要求：
 1. 一次返回完整 actions（write_file 写代码 + exec 执行验证）
-2. 在 Content 中包含结果汇报文本（🪶 格式）
+2. 在 Content 中包含结果汇报文本（⚡ 格式）
 3. exec 必须验证代码能运行`, userMsg, pmResponse)
 
 	var actions []ai.SEAction
@@ -1779,14 +1782,14 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	if callErr != nil {
 		result.Error = fmt.Errorf("pmDirectExecute LLM call failed: %w", callErr)
-		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 PM直执失败: %v", callErr))
+		c.emit("pm_to_user", fmt.Sprintf("@USR PM直执失败: %v", callErr))
 		c.emitStatus("error", "pm", "idle")
 		return result
 	}
 
 	if len(resp.Choices) == 0 {
 		result.Error = fmt.Errorf("pmDirectExecute: no response from AI")
-		c.emit("pm_to_user", "@USR 🪶 无响应")
+		c.emit("pm_to_user", "@USR 无响应")
 		c.emitStatus("error", "pm", "idle")
 		return result
 	}
@@ -1812,7 +1815,7 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	// 如果没有 actions（PM 只返回了文本），直接展示
 	if len(actions) == 0 {
-		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", displayContent))
+		c.emit("pm_to_user", fmt.Sprintf("@USR %s", displayContent))
 		c.memory.Add(RolePM, msg.Content)
 		c.emitStatus("done", "none", "idle")
 		result.Success = true
@@ -1893,10 +1896,10 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	// Step 4: 调用 LLM 生成自然语言最终总结（利用PM的总结能力）
 	if result.Error != nil {
-		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 ❌ %v", result.Error))
+		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
 	} else if len(execResults) > 0 {
 		// 用 LLM 生成自然语言摘要（不是手动拼字符串）
-		summaryPrompt := fmt.Sprintf(`用1-2句话向用户汇报你完成的工作（你是PM，直接对用户说话，用🪶标记）：
+		summaryPrompt := fmt.Sprintf(`用1-2句话向用户汇报你完成的工作（你是PM，直接对用户说话）：
 
 用户任务：%s
 你执行的操作和结果：
@@ -1912,13 +1915,13 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			// fallback: 简洁的 exec 结果
 			finalSummary = fmt.Sprintf("✅ 完成 (%d 个操作): %s", len(actions), strings.Join(execResults, "\n"))
 		}
-		c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", finalSummary))
+		c.emit("pm_to_user", fmt.Sprintf("@USR %s", finalSummary))
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)
 		if cleanSummary != "" {
-			c.emit("pm_to_user", fmt.Sprintf("@USR 🪶 %s", cleanSummary))
+			c.emit("pm_to_user", fmt.Sprintf("@USR %s", cleanSummary))
 		} else {
-			c.emit("pm_to_user", "@USR 🪶 ✅ 完成")
+			c.emit("pm_to_user", "@USR ✅ 完成")
 		}
 	}
 
@@ -2346,7 +2349,7 @@ func (c *ArgusCore) extractCleanSummary(content string) string {
 			"让我执行", "我来执行", "我来直接", "正在执行",
 			"写代码 +", "执行验证", "以下是", "包含操作",
 			"我将", "我现在", "开始执行",
-			"我直接执行", "这个 featherweight", "这个任务",
+			"我直接执行", "这个 short", "这个任务",
 			"为你创建", "帮你写", "这是",
 			// 英文
 			"Here are", "Let me", "I will", "I'm going",
@@ -2365,7 +2368,7 @@ func (c *ArgusCore) extractCleanSummary(content string) string {
 		}
 		if isSkip { continue }
 
-		// 保留 🪶 标记的行（这是正式汇报）
+		// 保留 ⚡ 标记的行（这是正式汇报）
 		clean = append(clean, trimmed)
 	}
 

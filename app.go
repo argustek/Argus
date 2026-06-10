@@ -620,6 +620,7 @@ func (a *App) initChatManager() {
 	})
 	// 设置项目状态变更回调
 	a.chatManager.SetOnProjectStateChanged(func(state string) {
+		fmt.Printf(">>> [DEBUG-PROJ-STATE] onProjectStateChanged called! state=%s\n", state)
 		a.addLog(fmt.Sprintf("[OnProjectStateChanged] 状态变更: %s", state))
 		a.status.ProjectState = state
 		a.emitToFrontend("project-state-changed", state, "Project:StateChange", chat.PathSystem)
@@ -715,6 +716,22 @@ func (a *App) initChatManager() {
 				if a.compressor != nil {
 					a.bridge.SetCompressor(a.compressor)
 				}
+				// [FIX-v0.8.1] Bridge 项目状态回调 → CMonitor → 前端
+				// 注意：V2 Bridge 处理的是 short/Featherweight 任务（PM直执，无SE/AP）
+				// 所以 success 时用 approved(3) 而非 done(2)，避免 CMonitor 强制触发 AP 审批
+				a.bridge.SetOnProjectStateChange(func(state string) {
+					if cm := a.chatManager.GetCMonitor(); cm != nil {
+						switch state {
+						case "running":
+							cm.UpdateProjectState(types.ProjectStateRunning)
+						case "done":
+							// short 任务无 AP 流程，直接 approved（跳过 CMonitor.handleProjectDone）
+							cm.UpdateProjectState(types.ProjectStateApproved)
+						case "error":
+							cm.UpdateProjectState(types.ProjectStateError)
+						}
+					}
+				})
 				a.chatManager.GetMessageBus().SetOnStateChange(func(state core.RoleState) {
 					a.emitToFrontend("role-state", state, "MessageBus:State", chat.PathStatus)
 				})
@@ -733,6 +750,12 @@ func (a *App) initChatManager() {
 					a.aiThinking = false
 				}
 				a.emitToFrontend("role-status", msg.Content, "Bridge:Status", chat.PathStatus)
+				return
+			}
+
+			// [v0.8.1] 项目级别指示器（short/normal/full）
+			if msg.Role == "project_level" {
+				a.emitToFrontend("project-level", msg.Content, "Bridge:ProjectLevel", chat.PathStatus)
 				return
 			}
 

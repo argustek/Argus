@@ -8,6 +8,7 @@
       :recent-projects="recentProjects"
       :c-monitor-enabled="cMonitorEnabled"
       :project-state="projectState"
+      :project-level="projectLevel"
       :message-count="messages.length"
       :git-status-count="gitStatusCount"
       @toggle-window="toggleWindow"
@@ -270,6 +271,7 @@ const aiStatus = reactive({
 // C监控状态
 const cMonitorEnabled = ref(true) // 默认开启
 const projectState = ref('idle') // idle, running, error, done
+const projectLevel = ref('') // short-process / normal-process / full-process (项目重量)
 
 // Git 状态计数
 const gitStatusCount = ref(0)
@@ -401,6 +403,14 @@ onMounted(async () => {
         playUrgentSound()
         showSystemTrayNotification(t('app.notificationTaskErrorTitle'), t('app.notificationTaskErrorBody'))
       }
+    }
+  })
+
+  // [v0.8.1] 监听项目级别变更事件（后端 Bridge 推送）
+  EventsOn('project-level', (data: string | { data?: string; _msgId?: string }) => {
+    const level = typeof data === 'string' ? data : (data.data || '')
+    if (level) {
+      projectLevel.value = level
     }
   })
 
@@ -745,11 +755,6 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('pm_started', (data: { _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    aiThinking.value = true
-  })
-
   // [V2-LabVIEW] 结构化角色状态（MessageBus RoleState → 前面板投影）
   EventsOn('role-state', (data: { _msgId?: string; phase?: string; pm?: string; se?: string; ap?: string; mc?: boolean; task?: string; [key: string]: any }) => {
     ackMessage(data._msgId || '')
@@ -784,10 +789,6 @@ onMounted(async () => {
         else if (role === 'none' || status === 'error') { aiStatus.pmStatus = 'idle'; aiStatus.seStatus = 'idle'; aiStatus.apStatus = 'idle' }
       }
     }
-  })
-
-  EventsOn('se_task_assigned', (data: { task?: string; steps?: number; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
   })
 
   EventsOn('error', (data: { error?: string; stage?: string; _msgId?: string }) => {

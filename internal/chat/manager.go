@@ -36,27 +36,48 @@ func filterDuplicateMentions(content string) string {
 	if len(mentions) <= 1 {
 		return content
 	}
-
 	// 只保留第一个@，移除后面的所有@
 	seen := make(map[string]bool)
-	var firstMention string
-	for _, m := range mentions {
-		if !seen[m] {
-			seen[m] = true
-			if firstMention == "" {
-				firstMention = m
-			}
+	result := content
+	for _, mention := range mentions[1:] {
+		if seen[mention] {
+			continue
 		}
+		seen[mention] = true
+		result = strings.ReplaceAll(result, mention, "")
 	}
+	return result
+}
 
-	// 替换所有@为占位符，然后只还原第一个
-	temp := re.ReplaceAllString(content, "«MENTION»")
-	// 只替换第一个占位符为第一个@
-	temp = strings.Replace(temp, "«MENTION»", firstMention, 1)
-	// 移除剩余的占位符及其后面的空格
-	temp = regexp.MustCompile(`«MENTION»\s*`).ReplaceAllString(temp, "")
-
-	return strings.TrimSpace(temp)
+// [v0.8.1] 项目级别轻量检测（与 argus.go Process() 的启发式对齐）
+// 仅基于用户消息内容判断，不依赖 PM 响应（handleToPM 入口阶段）
+// 返回值: "short-process" / "normal-process" / "full-process"
+func detectProjectLevel(userMsg string) string {
+	lowerMsg := strings.ToLower(userMsg)
+	// 用户显式指定 short
+	if strings.Contains(lowerMsg, "/level short") || strings.Contains(lowerMsg, "⚡") {
+		return "short-process"
+	}
+	// 启发式：简单单文件编程任务 → short
+	isTinyTask := (strings.Contains(lowerMsg, "hello world") ||
+		strings.Contains(lowerMsg, "fibonacci") ||
+		strings.Contains(lowerMsg, "counter") ||
+		strings.Contains(lowerMsg, "单文件") ||
+		strings.Contains(lowerMsg, "short")) &&
+		(strings.Contains(lowerMsg, "create") ||
+			strings.Contains(lowerMsg, "write") ||
+			strings.Contains(lowerMsg, "创建") ||
+			strings.Contains(lowerMsg, "写个") ||
+			strings.Contains(lowerMsg, "写一个"))
+	isCodingTask := isTinyTask ||
+		(strings.Contains(lowerMsg, " and ") &&
+			(strings.Contains(lowerMsg, "go program") || strings.Contains(lowerMsg, ".go"))) ||
+		(strings.Contains(lowerMsg, "create") && strings.Contains(lowerMsg, "run"))
+	if isCodingTask {
+		return "short-process"
+	}
+	// 默认 normal（full 需要更复杂的判断，暂不自动检测）
+	return "normal-process"
 }
 
 // isStatusOnlyMessage 判断PM回复是否为纯状态确认消息（不推动工作进展）
@@ -907,6 +928,7 @@ func (m *Manager) initCMonitor() {
 	m.cMonitor = monitor.NewCMonitor(m.workDir, pmRestarter, messageSender, alertFunc)
 
 	m.cMonitor.SetOnStateChange(func(state int) {
+		fmt.Printf(">>> [DEBUG-CMONITOR] SetOnStateChange fired! state=%d\n", state)
 		if m.onProjectStateChanged != nil {
 			stateStr := "idle"
 			switch state {
@@ -916,6 +938,8 @@ func (m *Manager) initCMonitor() {
 				stateStr = "running"
 			case 2:
 				stateStr = "done"
+			case 3:
+				stateStr = "approved"
 			case 4:
 				stateStr = "error"
 			}
@@ -1582,6 +1606,12 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.seProcessor.SetContext(pmCtx)
 	}
 
+	// [v0.8.1] 项目级别检测 + 推送到前端（与 Bridge 路径对齐）
+	level := detectProjectLevel(content)
+	if level != "" {
+		m.msgBusSend("system", "", "project-level", PathStatus, "handleToPM:level", map[string]string{"content": level})
+	}
+
 	fmt.Printf("[handleToPM] 开始处理消息: %s (时间: %s)\n", content, time.Now().Format("15:04:05"))
 
 	m.currentRole = "pm"
@@ -1631,17 +1661,14 @@ func (m *Manager) handleToPM(content string) (err error) {
 		}
 	}
 
-	// 🔴 Wails事件: PM开始处理（前端用 runtime.EventsOn 监听）
-	if m.ctx != nil {
-		m.msgBusSend("pm", "", "pm_started", PathPMStream, "ProcessMessage:pm_started", map[string]string{})
-	}
-
 	// 更新PM状态为busy + 项目状态
 	// 🔴 [FIX-20260530] 审核场景保持Done状态，防止PM再次@SE分配任务
 	if m.seReportedComplete || isReviewScenario {
 		fmt.Printf("[handleToPM] 🛡️ 审核模式: seReportedComplete=%v isReview=%v, 保持Done状态\n", m.seReportedComplete, isReviewScenario)
 	} else {
+		fmt.Printf(">>> [DEBUG-HANDLE-PM] About to call UpdateProjectState(Running)!\n")
 		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
+		fmt.Printf(">>> [DEBUG-HANDLE-PM] UpdateProjectState(Running) returned!\n")
 	}
 	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
 	// 注意：API配置错误时不改变项目状态，只有真正的项目执行错误才改变
@@ -2079,6 +2106,12 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 	m.syncBackendStatus("pm_chat", "PM闲聊回复")
+
+	// [FIX-v0.8.1] 防止项目卡在 running：闲聊回复时如果项目仍为 running，自动回退
+	if state, _ := m.cMonitor.ReadState(); state.ProjectState == types.ProjectStateRunning {
+		fmt.Printf("[handleToPM] 🛡️ 闲聊分支检测到项目仍running，自动回退done\n")
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone)
+	}
 
 	go func() {
 		defer func() {
@@ -5486,10 +5519,6 @@ func (m *Manager) addPMToSEMsg(content string) {
 	fmt.Printf("[PM→SE] %s\n", content)
 
 	m.msgBusSend("pm", content, "pm_message", PathPMStream, "addPMToSEMsg", map[string]string{"delta": content})
-	m.msgBusSend("pm", content, "se_task_assigned", PathPMStream, "addPMToSEMsg", map[string]interface{}{
-		"task":  strings.TrimPrefix(content, "@SE "),
-		"steps": 0,
-	})
 }
 
 // ensureSEToUSR 确保SE消息带@USR前缀
@@ -6381,9 +6410,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 	m.richBuilder.UpdateTask(pmTaskId, 0, "done")
 	m.pmProcessor.SetTaskContext(pmTaskId, 1)
 
-	if m.ctx != nil {
-		m.msgBusSend("pm", "", "pm_started", PathPMStream, "handleToPM:pm_started", map[string]string{})
-	}
 	m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
 
@@ -7499,8 +7525,25 @@ func (m *Manager) syncBackendStatus(stage string, event string) {
 	m.backendStatus.SEStatus = state.SeStatus
 	m.backendStatus.ProjectState = state.ProjectState
 	m.backendStatus.CurrentRole = m.currentRole
-	m.backendStatus.CurrentSETask = m.currentSETask // [FIX-20260529] 同步SE任务描述
-	m.pushSSEEvent("status_update", m.backendStatus)
+	m.backendStatus.CurrentSETask = m.currentSETask
+
+	// [FIX-v0.8.1] 统一通过 MessageBus 推送 role-status 到前端（唯一通道）
+	pmStatus := state.PmStatus
+	seStatus := state.SeStatus
+
+	// PM 状态推送（content 放入 data 以确保到达前端 EventsOn）
+	if pmStatus == types.RoleStatusBusy {
+		m.msgBusSend("system", "", "role-status", PathStatus, "syncBackendStatus:pm_busy", map[string]string{"content": fmt.Sprintf("phase:%s|role:pm|status:busy", stage)})
+	} else {
+		m.msgBusSend("system", "", "role-status", PathStatus, "syncBackendStatus:pm_idle", map[string]string{"content": fmt.Sprintf("phase:%s|role:pm|status:idle", stage)})
+	}
+
+	// SE 状态推送
+	if seStatus == types.RoleStatusBusy {
+		m.msgBusSend("system", "", "role-status", PathStatus, "syncBackendStatus:se_busy", map[string]string{"content": fmt.Sprintf("phase:%s|role:se|status:busy", stage)})
+	} else {
+		m.msgBusSend("system", "", "role-status", PathStatus, "syncBackendStatus:se_idle", map[string]string{"content": fmt.Sprintf("phase:%s|role:se|status:idle", stage)})
+	}
 }
 
 // GetConfigStatus 获取配置系统状态（供 C 监控调用）

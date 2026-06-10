@@ -74,6 +74,7 @@
     </div>
     
     <div class="right-section">
+      <span v-if="projectLevel" class="project-level-badge" :class="'level-' + projectLevel" :title="'Project Level: ' + projectLevel">[{{ projectLevel }}]</span>
       <div class="project-status-indicator" :class="projectStatusClass || 'idle'" :title="projectStatusText">
         <span class="status-light"></span>
         <span class="status-label">{{ projectStatusLabel }}</span>
@@ -138,6 +139,7 @@ const props = defineProps<{
   recentProjects: string[]
   cMonitorEnabled: boolean
   projectState: string
+  projectLevel: string // [v0.8.1] short / normal / full
   messageCount: number
   gitStatusCount: number
 }>()
@@ -792,6 +794,32 @@ const projectStatusText = computed(() => {
 @keyframes approved-pulse {
   0%, 100% { box-shadow: 0 0 8px #10b981; }
   50% { box-shadow: 0 0 16px #34d399, 0 0 24px rgba(52, 211, 153, 0.3); }
+}
+
+/* [v0.8.1] 项目级别指示器 */
+.project-level-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-right: 6px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+.level-short-process {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+}
+.level-normal-process {
+  color: #60a5fa;
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+}
+.level-full-process {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.12);
+  border: 1px solid rgba(249, 115, 22, 0.25);
 }
 
 /* 空闲/就绪 - 黄色 */
