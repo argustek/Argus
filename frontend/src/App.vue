@@ -414,6 +414,12 @@ onMounted(async () => {
     }
   })
 
+  // [v0.8.1] 全局 ACK git:repo-info，防止 GitWindow 未打开时触发 message_lost
+  EventsOff('git:repo-info')
+  EventsOn('git:repo-info', (raw: any) => {
+    ackMessage(raw?._msgId || '')
+  })
+
   // [v0.7.3] Context Management events moved into onMounted (Wails runtime must be ready)
   // Registered below in onMounted block
 
