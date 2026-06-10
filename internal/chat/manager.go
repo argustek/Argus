@@ -1697,15 +1697,19 @@ func (m *Manager) handleToPM(content string) (err error) {
 	m.seDebugLog(fmt.Sprintf("[handleToPM] 🔧 PM model=%s baseURL=%s (pmClient=%v)",
 		m.config.PMConfig.Model, m.config.PMConfig.BaseURL, m.pmClient != nil))
 	
+	// [FIX-v0.8.1] 流式回调中检查复位世代，过期则不推送（防止幽灵输出）
+	pmStreamCallback := func(delta string) {
+		if m.isGhostCall(aiGen) {
+			return // 复位后的幽灵调用，丢弃 delta
+		}
+		m.emitStreamChunk("pm", delta)
+	}
+
 	if isReviewScenario {
 		fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
-		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, func(delta string) {
-			m.emitStreamChunk("pm", delta)
-		})
+		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, pmStreamCallback)
 	} else {
-		resp, err = m.pmProcessor.ProcessStream(content, pmHistory, func(delta string) {
-			m.emitStreamChunk("pm", delta)
-		})
+		resp, err = m.pmProcessor.ProcessStream(content, pmHistory, pmStreamCallback)
 	}
 	if err != nil {
 		fmt.Printf("[handleToPM] PMProcessor调用失败: %v (isReview=%v)\n", err, isReviewScenario)
@@ -2801,10 +2805,16 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			m.WriteDebugLog("[ContextBridge] ✅ SE 任务输入已写入 ContextWindow + TokenStats 已推送")
 		}
 
-		resp, err = m.seProcessor.ProcessTaskWithTools(taskDesc, func(delta string) {
+		// [FIX-v0.8.1] 流式回调中检查复位世代，过期则不推送
+		seStreamCallback := func(delta string) {
+			if m.isGhostCall(aiGen) {
+				return // 复位后的幽灵调用，丢弃 delta
+			}
 			m.cMonitor.UpdateSeChunkTime()
 			m.emitStreamChunk("se", delta)
-		})
+		}
+
+		resp, err = m.seProcessor.ProcessTaskWithTools(taskDesc, seStreamCallback)
 		fmt.Printf("[PROBE-CALL] ✅ ProcessTaskWithTools已返回 (时间:%s)\n", time.Now().Format("15:04:05.000"))
 
 		if attempt == 0 {
@@ -7027,6 +7037,9 @@ func (m *Manager) ExecuteReset(reason string, trigger string) error {
 		"reason":  reason,
 		"trigger": string(trigger),
 	})
+
+	// [FIX-v0.8.1] 复位时通知前端所有角色状态归 idle（修复复位后 PM 仍显示 busy）
+	m.msgBusSend("system", "", "role-status", PathStatus, "ResetController:status_idle", map[string]string{"content": "phase:reset|role:none|status:idle"})
 
 	fmt.Printf("[RESET] ✅ 复位完成\n")
 	return nil

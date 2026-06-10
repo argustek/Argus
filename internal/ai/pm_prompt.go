@@ -961,6 +961,13 @@ func (p *PMProcessor) autoVerifyFallback() string {
 }
 
 func (p *PMProcessor) executeTool(name, argsJSON string) string {
+	// [FIX-v0.8.1] 工具执行 panic 保护 — 防止 web_search 等工具崩溃导致进程闪崩
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[executeTool] ⚠️ 工具 %s 执行 panic: %v\n", name, r)
+		}
+	}()
+
 	switch name {
 	case "read_file":
 		var args struct {
@@ -1366,6 +1373,11 @@ func pmWebSearch(query string) string {
 
 	for _, eng := range engines {
 		go func(name, u string) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("[web_search] ⚠️ %s 搜索 panic: %v\n", name, r)
+				}
+			}()
 			text := fetchAndExtractText(client, u, name)
 			if text != "" {
 				ch <- result{name, text}

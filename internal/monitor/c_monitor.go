@@ -78,7 +78,7 @@ type CMonitor struct {
 // NewCMonitor 创建C监控
 func NewCMonitor(workDir string, pmRestarter func() error, messageSender func(string), alertFunc func(string)) *CMonitor {
 	return &CMonitor{
-		stateFile:         ".argus/state.json",
+		stateFile:         "config/state.json",
 		workDir:           workDir,
 		checkInterval:     30 * time.Second,
 		gitTimeout:        300 * time.Second,

@@ -110,7 +110,7 @@ func loadTestConfig(t *testing.T) pdcaConfig {
 
 // waitForCompletion 等待任务完成，通过 state.json 检测
 func waitForCompletion(m *Manager, workDir string, timeout time.Duration) (bool, int, string) {
-	statePath := filepath.Join(workDir, ".argus", "state.json")
+	statePath := filepath.Join(workDir, "config", "state.json")
 	logPath := filepath.Join(workDir, "logs", "conversation.log")
 
 	// 预期输出文件列表（SE 通常创建其中之一）
