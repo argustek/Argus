@@ -214,17 +214,59 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 
 		s.history = append(s.history, msg)
 
+		var readTools, writeTools []ToolCall
+		var completeTc *ToolCall
 		for _, tc := range msg.ToolCalls {
 			action := s.toolCallToSEAction(tc)
 			allActions = append(allActions, action)
-
 			if tc.Function.Name == "complete_task" {
+				completeTc = &tc
 				formatCompleteFromAction(action, completeResult)
 				s.seLog("[SE Tools] complete_task called: files=%v summary=%s\n",
 					completeFilesFromAction(action), completeSummaryFromAction(action))
-				goto done
+				continue
 			}
+			if seIsReadTool(tc.Function.Name) {
+				readTools = append(readTools, tc)
+			} else {
+				writeTools = append(writeTools, tc)
+			}
+		}
 
+		// 读工具并行执行
+		if len(readTools) > 0 {
+			type readResult struct {
+				index int
+				tc    ToolCall
+				res   string
+			}
+			ch := make(chan readResult, len(readTools))
+			for i, tc := range readTools {
+				go func(i int, tc ToolCall) {
+					ch <- readResult{i, tc, s.executeSETool(tc.Function.Name, tc.Function.Arguments)}
+				}(i, tc)
+			}
+			results := make([]readResult, len(readTools))
+			for range readTools {
+				r := <-ch
+				results[r.index] = r
+			}
+			for _, r := range results {
+				if onChunk != nil {
+					preview := r.res
+					if len(preview) > 300 {
+						preview = preview[:300] + "..."
+					}
+					onChunk(fmt.Sprintf("```\n%s\n```\n", preview))
+				}
+				s.history = append(s.history, Message{
+					Role: "tool", Content: r.res, ToolCallID: r.tc.ID,
+				})
+			}
+		}
+
+		// 写工具串行执行
+		for _, tc := range writeTools {
 			toolResult := s.executeSETool(tc.Function.Name, tc.Function.Arguments)
 			if onChunk != nil {
 				preview := toolResult
@@ -234,10 +276,12 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 				onChunk(fmt.Sprintf("```\n%s\n```\n", preview))
 			}
 			s.history = append(s.history, Message{
-				Role:       "tool",
-				Content:    toolResult,
-				ToolCallID: tc.ID,
+				Role: "tool", Content: toolResult, ToolCallID: tc.ID,
 			})
+		}
+
+		if completeTc != nil {
+			goto done
 		}
 
 		taskDesc = "[继续执行下一步操作]"
@@ -309,7 +353,9 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 	// [G-DEBUG] 记录原始ToolCall参数，排查JSON解析问题
 	s.seLog("[SE-RAW] tool=%q | args_len=%d | raw=%s\n", tc.Function.Name, len(argsStr),
 		func() string {
-			if len(argsStr) > 300 { return argsStr[:300] + "..." }
+			if len(argsStr) > 300 {
+				return argsStr[:300] + "..."
+			}
 			return argsStr
 		}())
 
@@ -344,7 +390,9 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			if codeExts[ext] {
 				s.seLog("[SE-WARN] ⚠️ 可疑截断: write_file %s content仅 %d bytes! raw_args前200字符: %s\n",
 					action.Path, len(action.Content), func() string {
-						if len(argsStr) > 200 { return argsStr[:200] + "..." }
+						if len(argsStr) > 200 {
+							return argsStr[:200] + "..."
+						}
 						return argsStr
 					}())
 			}
@@ -678,6 +726,17 @@ func formatCompleteFromAction(a SEAction, c *SECompletion) {
 	c.TechnicalNotes = a.Command
 }
 
+// seIsReadTool 判断工具是否只读（可并行执行）
+func seIsReadTool(name string) bool {
+	switch name {
+	case "read_file", "list_files", "search_files", "glob",
+		"web_search", "fetch_url", "semantic_search",
+		"go_to_definition", "find_references", "hover_info", "diagnostics":
+		return true
+	}
+	return false
+}
+
 func (s *SEProcessor) executeSETool(name, argsJSON string) string {
 	switch name {
 	case "read_file":
@@ -906,7 +965,9 @@ type searchEngine struct {
 var searchEngines = []searchEngine{
 	{
 		Name: "DuckDuckGo",
-		URL:  func(q string) string { return fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(q)) },
+		URL: func(q string) string {
+			return fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(q))
+		},
 	},
 	{
 		Name: "Bing",
@@ -914,7 +975,9 @@ var searchEngines = []searchEngine{
 	},
 	{
 		Name: "Google",
-		URL:  func(q string) string { return fmt.Sprintf("https://www.google.com/search?q=%s&hl=en", url.QueryEscape(q)) },
+		URL: func(q string) string {
+			return fmt.Sprintf("https://www.google.com/search?q=%s&hl=en", url.QueryEscape(q))
+		},
 	},
 }
 
@@ -1045,8 +1108,8 @@ func (s *SEProcessor) parseBing(html string, max int) []searchResult {
 
 		if titleMatch != nil {
 			result := searchResult{
-				Title:   stripHTML(titleMatch[2]),
-				URL:     titleMatch[1],
+				Title: stripHTML(titleMatch[2]),
+				URL:   titleMatch[1],
 			}
 			if pMatch != nil {
 				result.Snippet = stripHTML(pMatch[1])
@@ -1471,21 +1534,21 @@ type SEAction struct {
 	Extra           string   `json:"extra,omitempty"` // 额外JSON数据（如tags/code等）
 
 	// ========== 文档处理工具参数 ==========
-	UseOCR          bool     `json:"use_ocr,omitempty"`       // read_pdf: 是否使用OCR
-	DocContent      string   `json:"doc_content,omitempty"`    // write_docx: 文档内容JSON
-	ComparePathB    string   `json:"compare_path_b,omitempty"` // compare_docs: 第二个文件路径
-	ToolName        string   `json:"tool_name,omitempty"`      // ensure_tool: 要检测的工具名
-	PkgName         string   `json:"pkg_name,omitempty"`       // install_pkg: 包名
-	PkgManager      string   `json:"pkg_manager,omitempty"`    // install_pkg: 包管理器(pip/npm/cargo/go)
+	UseOCR       bool   `json:"use_ocr,omitempty"`        // read_pdf: 是否使用OCR
+	DocContent   string `json:"doc_content,omitempty"`    // write_docx: 文档内容JSON
+	ComparePathB string `json:"compare_path_b,omitempty"` // compare_docs: 第二个文件路径
+	ToolName     string `json:"tool_name,omitempty"`      // ensure_tool: 要检测的工具名
+	PkgName      string `json:"pkg_name,omitempty"`       // install_pkg: 包名
+	PkgManager   string `json:"pkg_manager,omitempty"`    // install_pkg: 包管理器(pip/npm/cargo/go)
 
 	// ========== DAP 断点调试工具参数 ==========
-	Args            []string `json:"args,omitempty"`           // debug_start: 程序参数
-	Program         string   `json:"program,omitempty"`        // debug_start: 要调试的程序/测试包
-	DebugMode       string   `json:"debug_mode,omitempty"`     // debug_start: "debug" 或 "test"
-	DebugStopOnEntry bool    `json:"debug_stop_on_entry,omitempty"` // debug_start: 入口暂停
-	FilePath        string   `json:"file_path,omitempty"`      // debug_set_breakpoint: 源文件路径
-	Condition       string   `json:"condition,omitempty"`       // debug_set_breakpoint: 条件表达式
-	Expression      string   `json:"expression,omitempty"`      // debug_evaluate: 要计算的表达式
+	Args             []string `json:"args,omitempty"`                // debug_start: 程序参数
+	Program          string   `json:"program,omitempty"`             // debug_start: 要调试的程序/测试包
+	DebugMode        string   `json:"debug_mode,omitempty"`          // debug_start: "debug" 或 "test"
+	DebugStopOnEntry bool     `json:"debug_stop_on_entry,omitempty"` // debug_start: 入口暂停
+	FilePath         string   `json:"file_path,omitempty"`           // debug_set_breakpoint: 源文件路径
+	Condition        string   `json:"condition,omitempty"`           // debug_set_breakpoint: 条件表达式
+	Expression       string   `json:"expression,omitempty"`          // debug_evaluate: 要计算的表达式
 }
 
 type SECompletion struct {
@@ -1496,10 +1559,10 @@ type SECompletion struct {
 
 // SemanticCheckResult 智能终止检测结果（多维度）
 type SemanticCheckResult struct {
-	IsComplete   bool    // 是否判定为完成
+	IsComplete  bool    // 是否判定为完成
 	Confidence  float64 // 置信度 0.0-1.0
-	Reason       string  // 判定原因
-	ActionScore  int     // 最近N轮动作有效性得分
+	Reason      string  // 判定原因
+	ActionScore int     // 最近N轮动作有效性得分
 }
 
 // CheckSemanticComplete 智能终止检测：多维度评估SE是否真的完成了任务
@@ -1532,7 +1595,7 @@ func (s *SEProcessor) CheckSemanticComplete(response string) *SemanticCheckResul
 		}
 	}
 	if kwFound > 0 {
-	 // 强关键词直接给高基础分，弱关键词补充
+		// 强关键词直接给高基础分，弱关键词补充
 		base := 0.40
 		if hasStrongKW {
 			base = 0.50 // "任务完成"/"done" 等强关键词 → 基础0.5
@@ -1591,17 +1654,17 @@ func (s *SEProcessor) CheckSemanticComplete(response string) *SemanticCheckResul
 	}
 
 	if totalRecentActions > 0 {
-	 readOnlyRatio := float64(readOnlyActions) / float64(totalRecentActions)
-	 // 只读比例高 + 有写操作历史 = 收尾阶段
-	 if readOnlyRatio >= 0.7 && writeOrExecActions > 0 {
-		 result.Confidence += 0.25
-		 result.Reason += fmt.Sprintf("[收敛:%d/%d只读]", readOnlyActions, totalRecentActions)
-	 } else if readOnlyRatio >= 0.9 && totalRecentActions >= 3 {
-		 // 纯只读但无写操作 = 可能还没开始干，降低置信度
-		 result.Confidence -= 0.15
-		 result.Reason += "[纯只读-未执行]"
-	 }
-	 result.ActionScore = writeOrExecActions*10 + readOnlyActions
+		readOnlyRatio := float64(readOnlyActions) / float64(totalRecentActions)
+		// 只读比例高 + 有写操作历史 = 收尾阶段
+		if readOnlyRatio >= 0.7 && writeOrExecActions > 0 {
+			result.Confidence += 0.25
+			result.Reason += fmt.Sprintf("[收敛:%d/%d只读]", readOnlyActions, totalRecentActions)
+		} else if readOnlyRatio >= 0.9 && totalRecentActions >= 3 {
+			// 纯只读但无写操作 = 可能还没开始干，降低置信度
+			result.Confidence -= 0.15
+			result.Reason += "[纯只读-未执行]"
+		}
+		result.ActionScore = writeOrExecActions*10 + readOnlyActions
 	}
 
 	// --- 维度4: 内容质量/长度信号 (权重 10%) ---
@@ -1627,15 +1690,15 @@ func (s *SEProcessor) CheckSemanticComplete(response string) *SemanticCheckResul
 	if result.Confidence >= 0.60 {
 		result.IsComplete = true
 	} else if result.Confidence >= 0.40 {
-	 // 边界情况：有关键词但动作不够收敛 → 标记为可能完成，让PM决定
-	 result.IsComplete = true
-	 result.Reason += "[边界-需PM确认]"
+		// 边界情况：有关键词但动作不够收敛 → 标记为可能完成，让PM决定
+		result.IsComplete = true
+		result.Reason += "[边界-需PM确认]"
 	} else {
 		result.IsComplete = false
 		if kwFound > 0 {
-		 result.Reason += "[假阳性-关键词匹配但无实质动作]"
+			result.Reason += "[假阳性-关键词匹配但无实质动作]"
 		} else {
-		 result.Reason += "[未完成]"
+			result.Reason += "[未完成]"
 		}
 	}
 
@@ -1990,7 +2053,7 @@ var SETools = []Tool{
 			Name:        "list_changes",
 			Description: "列出所有可撤销的文件变更记录。显示每个文件的编辑历史（操作类型、时间、大小），帮助判断哪些修改可以回滚。",
 			Parameters: map[string]interface{}{
-				"type": "object",
+				"type":       "object",
 				"properties": map[string]interface{}{},
 			},
 		},
@@ -2247,8 +2310,8 @@ var SETools = []Tool{
 						"description": "要分析的文件或目录路径（如 main.go 或 ./internal/ai）",
 					},
 					"categories": map[string]interface{}{
-						"type": "array",
-						"items": map[string]interface{}{"type": "string"},
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
 						"description": "检查的分类过滤，可选值: nil_safety, bounds, resource, concurrency, error_handling, logic, security, performance, style。不传则检查全部",
 					},
 					"min_level": map[string]interface{}{
@@ -2397,9 +2460,9 @@ var SETools = []Tool{
 			Name:        "debug_continue",
 			Description: "继续执行：从当前断点恢复程序运行，直到遇到下一个断点或程序结束。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2409,9 +2472,9 @@ var SETools = []Tool{
 			Name:        "debug_step_over",
 			Description: "单步跳过(Step Over)：执行当前行，不进入函数内部。用于逐行跟踪代码逻辑。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2421,9 +2484,9 @@ var SETools = []Tool{
 			Name:        "debug_step_into",
 			Description: "单步进入(Step Into)：如果当前行是函数调用，则进入函数内部。用于深入追踪函数执行过程。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2433,9 +2496,9 @@ var SETools = []Tool{
 			Name:        "debug_step_out",
 			Description: "单步跳出(Step Out)：执行完当前函数剩余部分，返回到调用者。用于快速退出不关心的函数。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2445,9 +2508,9 @@ var SETools = []Tool{
 			Name:        "debug_pause",
 			Description: "暂停正在运行的程序。当程序陷入死循环或长时间运行时使用。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2457,9 +2520,9 @@ var SETools = []Tool{
 			Name:        "debug_stop",
 			Description: "停止调试会话，终止被调试进程并释放所有资源。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2469,9 +2532,9 @@ var SETools = []Tool{
 			Name:        "debug_stacktrace",
 			Description: "获取当前调用栈信息。显示函数调用链、文件名、行号。在断点暂停后使用。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},
@@ -2481,9 +2544,9 @@ var SETools = []Tool{
 			Name:        "debug_variables",
 			Description: "获取当前作用域的局部变量和参数值。显示变量名、类型、值。在断点暂停后使用。支持展开结构体/切片/映射等复合类型。",
 			Parameters: map[string]interface{}{
-				"type": "object",
-				"properties":    map[string]interface{}{},
-				"required":      []string{},
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{},
 			},
 		},
 	},

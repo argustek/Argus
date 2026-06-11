@@ -218,6 +218,16 @@ func (p *PMProcessor) getSystemPrompt() string {
 	return p.systemPrompt
 }
 
+// pmIsReadTool 判断PM工具是否只读（可并行执行）
+func pmIsReadTool(name string) bool {
+	switch name {
+	case "read_file", "list_files", "web_search", "fetch_url",
+		"grep_content", "find_files":
+		return true
+	}
+	return false
+}
+
 // PMTools PM可用的工具列表
 var PMTools = []Tool{
 	{
@@ -562,19 +572,54 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		// [v0.8] 记录PM是否有ToolCalls（用于Featherweight分流判断）
 		hasToolCalls = true
 
-		// 处理工具调用（add_todo / update_todo）
+		// [v0.8.5] 读工具并行执行，写工具串行执行
 		aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
 		aiHistory = append(aiHistory, msg)
 
+		var readTools, writeTools []ToolCall
 		for _, tc := range msg.ToolCalls {
+			if pmIsReadTool(tc.Function.Name) {
+				readTools = append(readTools, tc)
+			} else {
+				writeTools = append(writeTools, tc)
+			}
+		}
+
+		if len(readTools) > 0 {
+			type readRes struct {
+				index int
+				tc    ToolCall
+				res   string
+			}
+			ch := make(chan readRes, len(readTools))
+			for i, tc := range readTools {
+				go func(i int, tc ToolCall) {
+					r := p.executeTool(tc.Function.Name, tc.Function.Arguments)
+					ch <- readRes{i, tc, r}
+				}(i, tc)
+			}
+			results := make([]readRes, len(readTools))
+			for range readTools {
+				r := <-ch
+				results[r.index] = r
+			}
+			for _, r := range results {
+				if onChunk != nil {
+					onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", r.tc.Function.Name))
+				}
+				aiHistory = append(aiHistory, Message{
+					Role: "tool", Content: r.res, ToolCallID: r.tc.ID,
+				})
+			}
+		}
+
+		for _, tc := range writeTools {
 			if onChunk != nil {
 				onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", tc.Function.Name))
 			}
 			toolResult := p.executeTool(tc.Function.Name, tc.Function.Arguments)
 			aiHistory = append(aiHistory, Message{
-				Role:       "tool",
-				Content:    toolResult,
-				ToolCallID: tc.ID,
+				Role: "tool", Content: toolResult, ToolCallID: tc.ID,
 			})
 		}
 
@@ -688,7 +733,51 @@ func (p *PMProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 		aiHistory = append(aiHistory, Message{Role: "user", Content: reviewMsg})
 		aiHistory = append(aiHistory, msg)
 
+		// [v0.8.5] 读工具并行，写工具串行
+		var readTools, writeTools []ToolCall
 		for _, tc := range msg.ToolCalls {
+			if pmIsReadTool(tc.Function.Name) {
+				readTools = append(readTools, tc)
+			} else {
+				writeTools = append(writeTools, tc)
+			}
+		}
+
+		if len(readTools) > 0 {
+			type readRes struct {
+				index int
+				tc    ToolCall
+				res   string
+			}
+			ch := make(chan readRes, len(readTools))
+			for i, tc := range readTools {
+				go func(i int, tc ToolCall) {
+					ch <- readRes{i, tc, p.executeTool(tc.Function.Name, tc.Function.Arguments)}
+				}(i, tc)
+			}
+			results := make([]readRes, len(readTools))
+			for range readTools {
+				r := <-ch
+				results[r.index] = r
+			}
+			for _, r := range results {
+				if onChunk != nil {
+					onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", r.tc.Function.Name))
+				}
+				if onChunk != nil {
+					preview := r.res
+					if len(preview) > 200 {
+						preview = preview[:200] + "..."
+					}
+					onChunk(fmt.Sprintf("✅ **工具结果** (%d bytes):\n```\n%s\n```\n\n", len(r.res), preview))
+				}
+				aiHistory = append(aiHistory, Message{
+					Role: "tool", Content: r.res, ToolCallID: r.tc.ID,
+				})
+			}
+		}
+
+		for _, tc := range writeTools {
 			if onChunk != nil {
 				onChunk(fmt.Sprintf("🔧 **调用工具**: `%s`\n", tc.Function.Name))
 			}
