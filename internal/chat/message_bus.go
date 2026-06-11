@@ -113,7 +113,7 @@ func NewMessageBus(ctx context.Context) *MessageBus {
 		receivedMap:   make(map[string]*ReceivedMessage),
 		lostMessages:  make([]*PendingMessage, 0),
 		checkInterval: 2 * time.Second,  // 每2秒检查一次
-		timeout:       5 * time.Second,   // 5秒超时
+		timeout:       15 * time.Second,  // 15秒超时（前端流式渲染期间ACK可能延迟）
 		enabled:       true,
 		streamSampleN: 10,                // 每10个chunk打包一批
 		streamBatches: make(map[string]*StreamBatch),
@@ -390,8 +390,9 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 			// 临时方案：重要事件（如 agent-thought）改用 PathSystem 发送
 
 	case PathPMStream, PathSEStream:
-		// 流式消息：全部入批缓冲（不单独追踪），由批量机制统一管理
-		return true
+		// [FIX-v0.8.3] 流式消息不追踪：高频低价值，前端累积显示
+		// 批次机制导致个体msgId与batch msgId不匹配，ACK永远失败 → 大量"消息丢失"误报
+		return false
 
 	case PathUserInput:
 		return true
