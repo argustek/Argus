@@ -1,8 +1,8 @@
 # Argus 当前状态文档
 
-**最后更新：** 2026-06-10  
-**当前版本：** v0.8.0  
-**最新 Commit：** `820333a` (main) + 本地 MessageBus 独立追踪修改  
+**最后更新：** 2026-06-12  
+**当前版本：** v0.8.5  
+**最新 Commit：** `16a682a` (main)  
 **分支：** `main`
 
 ---
@@ -40,6 +40,15 @@
 
 `ab3ec1a` 从 `PathCoreOutput` 中移除了 `PathSEExec` 追踪限制，SE 执⾏事件（exec_start/done/output）现在正确追踪。
 
+### 2.4 PM 提示词全面重写 (v0.8.5)
+
+**核心改动**：
+- **去矛盾**：旧 prompt 同时说"所有编程必须 @SE"和"Featherweight 自己干"，模型矛盾。新 prompt 用决策树统一
+- **第一原则锚定**：prompt 开头写"永远用工具做事，绝不纯文本回复"，解决 ToolCalls=0
+- **新增工具**：write_file, edit_file, delete_file — PM 可以直接执行 featherweight 任务
+- **ToolCalls=0 兜底**：ProcessStream 中检测到无工具调用时注入系统提醒，让模型重试一次
+- **exec 超时**：30s → 60s
+
 ---
 
 ## 3. 待处理问题
@@ -70,6 +79,8 @@
 | `521810f` | ToolCalls=0 重试逻辑 (max 2 次) | ✅ 已完成 |
 | `ab3ec1a` | ACK 超时 5s→15s + PathSEExec 恢复 | ✅ 已完成 |
 | `820333a` | GitHub ⽹络排查⽂档 | ✅ ⽂档已补充 |
+| `351b7dc` | **v0.8.4**: CMonitor 双空闲复位 / MessageBus 2s / FileTree 绝对路径 | ✅ 已发布 |
+| `5a0acbc` | **v0.8.5**: PM 提示词重写 + write_file/edit_file/delete_file 工具 + ToolCalls=0 兜底 | ✅ 已发布 |
 
 ### 半截⼦⼯作
 
@@ -88,3 +99,5 @@
 | `v0.7.3` | `79a75f6` | 热重载修复 + MessageBus 可靠性 |
 | `v0.8.0` | `5975593` | PM 直执 / 智能化分级 / Bridge 重构 |
 | — | `820333a` | 4 个 fix commit + ⽹络排查⽂档 |
+| `v0.8.4` | `351b7dc` | CMonitor 双空闲复位 / MessageBus 2s / FileTree 绝对路径 |
+| `v0.8.5` | `5a0acbc` | PM 提示词重写 + 新工具 + ToolCalls=0 兜底 |
