@@ -565,6 +565,12 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	if isFeatherweight {
 		result.Level = "short-process"
 		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执模式\n")
+		// [v0.8.5] 先发PM的文本回复到前端，避免直执失败后前端没任何显示
+		pmText := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
+		pmText = strings.TrimSpace(pmText)
+		if pmText != "" {
+			c.emit("pm_to_user", pmText)
+		}
 		return c.pmDirectExecute(userMsg, pmResponse, result)
 	}
 
