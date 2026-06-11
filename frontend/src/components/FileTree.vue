@@ -14,6 +14,7 @@
         :key="item.name + item.path"
         :item="item"
         :selected-path="selectedPath"
+        :work-dir="workDir"
         @select="onSelectFile"
         @context="onContextAction"
       />

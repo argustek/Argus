@@ -15,47 +15,47 @@ import (
 type MessagePath string
 
 const (
-	PathPMToUser    MessagePath = "pm_to_user"     // PM→用户（addPMToUserMsg）
-	PathPMStream    MessagePath = "pm_stream"       // PM流式输出（emitStreamChunk）
-	PathSEToUser    MessagePath = "se_to_user"      // SE→用户（addSEToUserMsg）
-	PathSEStream    MessagePath = "se_stream"       // SE流式输出（emitStreamChunk）
-	PathSEExec      MessagePath = "se_exec"         // SE执行操作（exec_start/done/output）
-	PathAPToUser    MessagePath = "ap_to_user"      // AP→用户（AP审批结果）
-	PathUserInput   MessagePath = "user_input"      // 用户输入（new-message）
-	PathSystem      MessagePath = "system"          // 系统消息（错误/状态）
-	PathCoreOutput  MessagePath = "core_output"     // V2 ArgusCore输出（Bridge统一推送）
-	PathStatus      MessagePath = "status"          // V2 状态同步（PM/SE/AP灯 + 阶段切换）
+	PathPMToUser   MessagePath = "pm_to_user"  // PM→用户（addPMToUserMsg）
+	PathPMStream   MessagePath = "pm_stream"   // PM流式输出（emitStreamChunk）
+	PathSEToUser   MessagePath = "se_to_user"  // SE→用户（addSEToUserMsg）
+	PathSEStream   MessagePath = "se_stream"   // SE流式输出（emitStreamChunk）
+	PathSEExec     MessagePath = "se_exec"     // SE执行操作（exec_start/done/output）
+	PathAPToUser   MessagePath = "ap_to_user"  // AP→用户（AP审批结果）
+	PathUserInput  MessagePath = "user_input"  // 用户输入（new-message）
+	PathSystem     MessagePath = "system"      // 系统消息（错误/状态）
+	PathCoreOutput MessagePath = "core_output" // V2 ArgusCore输出（Bridge统一推送）
+	PathStatus     MessagePath = "status"      // V2 状态同步（PM/SE/AP灯 + 阶段切换）
 )
 
 // MessageTag 消息标签（包含路径+校验信息）
 type MessageTag struct {
-	Path      MessagePath `json:"path"`                // 消息来源路径
-	Checksum  string      `json:"checksum"`            // 内容校验码（长度+首尾字符）
-	Timestamp int64       `json:"timestamp"`           // 发送时间戳
-	SeqNum    int64       `json:"seq_num"`             // 全局序列号
-	SourceLoc string      `json:"source_loc"`          // 代码位置（函数名:行号）
+	Path      MessagePath `json:"path"`       // 消息来源路径
+	Checksum  string      `json:"checksum"`   // 内容校验码（长度+首尾字符）
+	Timestamp int64       `json:"timestamp"`  // 发送时间戳
+	SeqNum    int64       `json:"seq_num"`    // 全局序列号
+	SourceLoc string      `json:"source_loc"` // 代码位置（函数名:行号）
 }
 
 // PendingMessage 待确认消息
 type PendingMessage struct {
-	MsgId     string      // 消息ID
-	Role      string      // 角色
-	Content   string      // 内容
-	EventName string      // 事件名称
-	Tag       MessageTag  // 标签
-	SentAt    time.Time   // 发送时间
+	MsgId      string     // 消息ID
+	Role       string     // 角色
+	Content    string     // 内容
+	EventName  string     // 事件名称
+	Tag        MessageTag // 标签
+	SentAt     time.Time  // 发送时间
 	RetryCount int        // 重试次数
 }
 
 // ReceivedMessage 前端已接收消息
 type ReceivedMessage struct {
-	MsgId      string          // 消息ID（批次ID或单条ID）
-	Role       string          // 角色
-	Content    string          // 内容
-	EventName  string          // 事件名称
-	ReceivedAt time.Time       // 接收时间
-	Latency    time.Duration   // 网络延迟
-	BatchAck   *BatchAckInfo   // 非nil表示这是批量确认（含起止seq范围）
+	MsgId      string        // 消息ID（批次ID或单条ID）
+	Role       string        // 角色
+	Content    string        // 内容
+	EventName  string        // 事件名称
+	ReceivedAt time.Time     // 接收时间
+	Latency    time.Duration // 网络延迟
+	BatchAck   *BatchAckInfo // 非nil表示这是批量确认（含起止seq范围）
 }
 
 // BatchAckInfo 批量确认信息（前端回传，覆盖起止范围）
@@ -67,9 +67,9 @@ type BatchAckInfo struct {
 
 // StreamBatch 流式消息缓冲批（"一碗米"）
 type StreamBatch struct {
-	BatchId     string    // 批次ID（= 第一条消息的msgId）
-	Role        string    // 角色 (pm/se)
-	EventName   string    // 事件名
+	BatchId     string // 批次ID（= 第一条消息的msgId）
+	Role        string // 角色 (pm/se)
+	EventName   string // 事件名
 	Path        MessagePath
 	SourceLoc   string
 	MsgIds      []string  // 这批包含的所有消息ID
@@ -86,21 +86,22 @@ type RoleState = core.RoleState
 // MessageBus 统一消息总线组件（LabVIEW式前后一致性保障）
 type MessageBus struct {
 	ctx           context.Context
-	pendingQueue  map[string]*PendingMessage // msgId → 待确认消息
+	pendingQueue  map[string]*PendingMessage  // msgId → 待确认消息
 	receivedMap   map[string]*ReceivedMessage // msgId → 已确认消息
-	lostMessages  []*PendingMessage         // 丢失消息记录
+	lostMessages  []*PendingMessage           // 丢失消息记录
 	mu            sync.RWMutex
-	seqNum        int64                    // 全局序列号生成器
-	lastMsgId     string                   // 最后发送的消息ID
-	frontendReady bool                     // 前端是否就绪（OnDomReady之前不追踪）
-	checkInterval time.Duration            // 检查间隔
-	timeout       time.Duration            // 确认超时
-	enabled       bool                     // 是否启用
-	state         RoleState                // 当前角色状态（后面板控件）
-	onStateChange func(RoleState)          // 状态变更回调
-	streamCounter int64                    // 流式消息计数器
-	streamSampleN int                      // 每凑够N个chunk打包一批（默认10）
-	streamBatches map[string]*StreamBatch  // 按 role+event 分组的当前缓冲批（key: "pm_pm_stream")
+	seqNum        int64                   // 全局序列号生成器
+	lastMsgId     string                  // 最后发送的消息ID
+	frontendReady bool                    // 前端是否就绪（OnDomReady之前不追踪）
+	checkInterval time.Duration           // 检查间隔
+	timeout       time.Duration           // 确认超时（普通消息）
+	streamTimeout time.Duration           // 流式消息超时（更短，防pendingQueue膨胀）
+	enabled       bool                    // 是否启用
+	state         RoleState               // 当前角色状态（后面板控件）
+	onStateChange func(RoleState)         // 状态变更回调
+	streamCounter int64                   // 流式消息计数器
+	streamSampleN int                     // 每凑够N个chunk打包一批（默认10）
+	streamBatches map[string]*StreamBatch // 按 role+event 分组的当前缓冲批（key: "pm_pm_stream")
 	batchMu       sync.RWMutex            // 批次缓冲专用锁（避免与主锁竞争）
 	writeDebugLog func(content string)    // [v0.7.2] 写入 conversation.log（与Bridge一致）
 }
@@ -112,13 +113,14 @@ func NewMessageBus(ctx context.Context) *MessageBus {
 		pendingQueue:  make(map[string]*PendingMessage),
 		receivedMap:   make(map[string]*ReceivedMessage),
 		lostMessages:  make([]*PendingMessage, 0),
-		checkInterval: 2 * time.Second,  // 每2秒检查一次
-		timeout:       15 * time.Second,  // 15秒超时（前端流式渲染期间ACK可能延迟）
+		checkInterval: 2 * time.Second, // 每2秒检查一次
+		timeout:       2 * time.Second, // 2秒超时（普通消息）
+		streamTimeout: 5 * time.Second, // 5秒超时（流式消息，快速释放防膨胀）
 		enabled:       true,
-		streamSampleN: 10,                // 每10个chunk打包一批
+		streamSampleN: 10, // 每10个chunk打包一批
 		streamBatches: make(map[string]*StreamBatch),
 	}
-	
+
 	go mb.backgroundChecker()
 	return mb
 }
@@ -167,18 +169,9 @@ func (mb *MessageBus) Send(role, content, eventName string, path MessagePath, so
 	needTracking := mb.shouldTrack(path)
 
 	if needTracking {
-		// 流式消息走批量缓冲（"一碗碗"模式）
-		if path == PathPMStream || path == PathSEStream {
-			batchKey := fmt.Sprintf("%s_%s", role, eventName)
-			flushed := mb.bufferToBatch(batchKey, role, eventName, path, sourceLoc, msgId, tag, content, now)
-			if !flushed {
-				// 还没凑够一批，消息已入缓冲，不单独进 pendingQueue
-				// 但仍需发给前端
-				mb.emitToFrontend(eventName, msgId, role, path, tag, sourceLoc, data)
-				return msgId
-			}
-			// flushed=true: 已凑够一批，flushBatch 已处理 pendingQueue
-		}
+		// [v0.8.4] 统一独立追踪：流式消息不再走 batch 缓冲
+		// batch 机制保留（bufferToBatch/flushBatchLocked/FlushStreamBatch）作为降级方案备用
+		// 性能保障由 CheckPending 快速路径承担（短超时+轻量扫描）
 
 		pending := &PendingMessage{
 			MsgId:      msgId,
@@ -298,10 +291,10 @@ func (mb *MessageBus) flushBatchLocked(batchKey string, batch *StreamBatch) {
 		batch.MsgIds[0], batch.MsgIds[len(batch.MsgIds)-1])
 
 	pending := &PendingMessage{
-		MsgId:      batch.BatchId,
-		Role:       batch.Role,
-		Content:    batchContent,
-		EventName:  batch.EventName,
+		MsgId:     batch.BatchId,
+		Role:      batch.Role,
+		Content:   batchContent,
+		EventName: batch.EventName,
 		Tag: MessageTag{
 			Path:      batch.Path,
 			Checksum:  fmt.Sprintf("batch_%d_%d", batch.StartSeqNum, batch.EndSeqNum),
@@ -380,19 +373,20 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	switch path {
 	case PathCoreOutput:
 		return false // ⚠️ TECH-DEBT: 高频通道不能追踪！
-			// 2026-06 血的教训：PathStatus 改为 return true 后，
-			// pendingQueue 爆炸 → 前端完全卡死，AI 全部不动。
-			// 根因：高频事件（status/chunk/thought）每秒几十条进 pendingQueue，
-			// CheckPending O(n) 扫描 + 超时检测把 CPU 吃满。
-			// TODO: 方案A) pendingQueue 改为 ring buffer + 异步清理
-			//       方案B) 高频路径采样追踪（每N条追1条）
-			//       方案C) shouldTrack 加频率限制（同路径 >QPS阈值自动降级）
-			// 临时方案：重要事件（如 agent-thought）改用 PathSystem 发送
+		// 2026-06 血的教训：PathStatus 改为 return true 后，
+		// pendingQueue 爆炸 → 前端完全卡死，AI 全部不动。
+		// 根因：高频事件（status/chunk/thought）每秒几十条进 pendingQueue，
+		// CheckPending O(n) 扫描 + 超时检测把 CPU 吃满。
+		// TODO: 方案A) pendingQueue 改为 ring buffer + 异步清理
+		//       方案B) 高频路径采样追踪（每N条追1条）
+		//       方案C) shouldTrack 加频率限制（同路径 >QPS阈值自动降级）
+		// 临时方案：重要事件（如 agent-thought）改用 PathSystem 发送
 
 	case PathPMStream, PathSEStream:
-		// [FIX-v0.8.3] 流式消息不追踪：高频低价值，前端累积显示
-		// 批次机制导致个体msgId与batch msgId不匹配，ACK永远失败 → 大量"消息丢失"误报
-		return false
+		// [FIX-v0.8.4] 流式消息独立追踪（统一架构）
+		// v0.8.3 的 batch 机制导致个体 msgId 与 batch msgId 不匹配 → ACK 永远失败
+		// 现改为独立追踪 + CheckPending 快速路径（短超时+轻量扫描）解决性能问题
+		return true
 
 	case PathUserInput:
 		return true
@@ -430,17 +424,17 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 	if !mb.enabled {
 		return false
 	}
-	
+
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
-	
+
 	pending, exists := mb.pendingQueue[msgId]
 	if !exists {
 		// 高频日志已降级
 		// fmt.Printf("[✅MSG] ACK重复或未知: id=%s\n", msgId)
 		return false
 	}
-	
+
 	now := time.Now()
 	latency := now.Sub(pending.SentAt)
 
@@ -475,7 +469,7 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 		// fmt.Printf("[🥤MSG] 收到确认 id=%s role=%s latency=%.0fms pending=%d\n",
 		// 	msgId, pending.Role, latency.Seconds()*1000, len(mb.pendingQueue))
 	}
-	
+
 	mb.receivedMap[msgId] = received
 	delete(mb.pendingQueue, msgId)
 
@@ -506,6 +500,7 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 }
 
 // CheckPending 检查未确认消息（可被前端调用查看状态）
+// [v0.8.4] 性能优化：流式消息走快速路径（短超时+轻量扫描+容量上限）
 func (mb *MessageBus) CheckPending() []map[string]interface{} {
 	if !mb.enabled {
 		return []map[string]interface{}{}
@@ -516,12 +511,63 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 
 	now := time.Now()
 	var pendingList []map[string]interface{}
+	streamLost := 0 // 流式丢失计数（静默处理，不每条都报警）
+
+	// [v0.8.4] 容量保护：pendingQueue 超过 500 条时，优先清理最老的流式消息
+	const maxPending = 500
+	if len(mb.pendingQueue) > maxPending {
+		var oldestStream string
+		oldestTime := now
+		for msgId, p := range mb.pendingQueue {
+			if p.Tag.Path == PathPMStream || p.Tag.Path == PathSEStream {
+				if p.SentAt.Before(oldestTime) {
+					oldestTime = p.SentAt
+					oldestStream = msgId
+				}
+			}
+		}
+		if oldestStream != "" {
+			delete(mb.pendingQueue, oldestStream)
+		}
+	}
 
 	for msgId, pending := range mb.pendingQueue {
 		elapsed := now.Sub(pending.SentAt)
-		isTimeout := elapsed > mb.timeout
+
+		// [v0.8.4] 流式快速路径：短超时 + 轻量扫描
+		isStream := pending.Tag.Path == PathPMStream || pending.Tag.Path == PathSEStream
+		effTimeout := mb.timeout
+		if isStream {
+			effTimeout = mb.streamTimeout
+		}
+
+		isTimeout := elapsed > effTimeout
 		isNewLoss := isTimeout && pending.RetryCount == 0
 
+		// 流式消息：轻量 item（跳过内容截断）
+		if isStream {
+			item := map[string]interface{}{
+				"msgId":      msgId,
+				"role":       pending.Role,
+				"event":      pending.EventName,
+				"path":       string(pending.Tag.Path),
+				"elapsedSec": elapsed.Seconds(),
+				"isTimeout":  isTimeout,
+				"isNewLoss":  isNewLoss,
+			}
+			pendingList = append(pendingList, item)
+
+			if isNewLoss {
+				pending.RetryCount++
+				streamLost++
+				// 流式丢失静默处理：不写 lostMessages、不打 LOST 日志
+				// （单条 chunk 丢失不影响用户体验，前端已累积显示）
+				delete(mb.pendingQueue, msgId)
+			}
+			continue // 流式消息到此为止，不走下面的通用路径
+		}
+
+		// === 非流式消息：完整扫描（原有逻辑） ===
 		contentPreview := pending.Content
 		if len(contentPreview) > 80 {
 			contentPreview = contentPreview[:80] + "..."
@@ -550,12 +596,19 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 			mb.lostMessages = append(mb.lostMessages, pending)
 			// [v0.7.3] Enhanced LOST alert with data preview for debugging
 			contentPreview := pending.Content
-			if len(contentPreview) > 200 { contentPreview = contentPreview[:200] + "..." }
+			if len(contentPreview) > 200 {
+				contentPreview = contentPreview[:200] + "..."
+			}
 			if mb.writeDebugLog != nil {
 				mb.writeDebugLog(fmt.Sprintf("[MessageBus-LOST] 🚨 %s/%s msgId=%s 等待%.1fs | 发送者:%s | 数据: %s",
 					pending.EventName, pending.Tag.Path, msgId, elapsed.Seconds(), pending.Tag.SourceLoc, contentPreview))
 			}
 		}
+	}
+
+	// 流式丢失汇总日志（每轮最多打一条）
+	if streamLost > 0 {
+		fmt.Printf("[💧MSG] 📊 Stream cleanup: %d chunks expired (>5s), silently dropped\n", streamLost)
 	}
 
 	return pendingList
@@ -565,17 +618,17 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 func (mb *MessageBus) GetLostMessages() []map[string]interface{} {
 	mb.mu.RLock()
 	defer mb.mu.RUnlock()
-	
+
 	result := make([]map[string]interface{}, 0, len(mb.lostMessages))
 	for _, lost := range mb.lostMessages {
 		result = append(result, map[string]interface{}{
-			"msgId":     lost.MsgId,
-			"role":      lost.Role,
-			"event":     lost.EventName,
-			"path":      lost.Tag.Path,
-			"source":    lost.Tag.SourceLoc,
-			"sentAt":    lost.SentAt.Format("15:04:05.000"),
-			"content":   lost.Content[:min(100, len(lost.Content))],
+			"msgId":   lost.MsgId,
+			"role":    lost.Role,
+			"event":   lost.EventName,
+			"path":    lost.Tag.Path,
+			"source":  lost.Tag.SourceLoc,
+			"sentAt":  lost.SentAt.Format("15:04:05.000"),
+			"content": lost.Content[:min(100, len(lost.Content))],
 		})
 	}
 	return result
@@ -596,14 +649,14 @@ func (mb *MessageBus) GetStats() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"pending":         len(mb.pendingQueue),
-		"received":        len(mb.receivedMap),
-		"lost":            len(mb.lostMessages),
-		"totalSent":       mb.seqNum,
-		"enabled":         mb.enabled,
-		"pendingBatches":  pendingBatchCount,   // 当前缓冲中的批次数
-		"bufferedMsgs":    totalBuffered,        // 缓冲中尚未flush的消息数
-		"batchSize":       mb.streamSampleN,     // 每批大小
+		"pending":        len(mb.pendingQueue),
+		"received":       len(mb.receivedMap),
+		"lost":           len(mb.lostMessages),
+		"totalSent":      mb.seqNum,
+		"enabled":        mb.enabled,
+		"pendingBatches": pendingBatchCount, // 当前缓冲中的批次数
+		"bufferedMsgs":   totalBuffered,     // 缓冲中尚未flush的消息数
+		"batchSize":      mb.streamSampleN,  // 每批大小
 	}
 }
 

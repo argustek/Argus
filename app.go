@@ -117,22 +117,22 @@ type IMConfig struct {
 
 // Config 配置结构
 type Config struct {
-	APIConfigs        []APIConfig    `json:"apiConfigs"`
-	IMConfigs         []IMConfig     `json:"imConfigs"`
-	ShowCodeBlocks    bool           `json:"showCodeBlocks"`
-	ShowThinking      bool           `json:"showThinking"`
-	PmDecisionAlert   bool           `json:"pmDecisionAlert"`
-	WorkDir           string         `json:"workDir"`
-	RecentProjects    []string       `json:"recentProjects"`
-	DingTalk          DingTalkConfig `json:"dingtalk,omitempty"`
-	HTTP              HTTPConfig     `json:"http"`
-	APEnabled         bool           `json:"apEnabled"`
-	APConfig          *APIConfig     `json:"apConfig,omitempty"`       // [deprecated] 旧AP独立配置对象，v1.0.22后改用APConfigID
-	PMConfigID        string         `json:"pmConfigId,omitempty"`     // PM绑定的模型ID（空=用默认）
-	SEConfigID        string         `json:"seConfigId,omitempty"`     // SE绑定的模型ID（空=用默认）
-	APConfigID        string         `json:"apConfigId,omitempty"`     // AP绑定的模型ID（空=用默认）
-	UseSeparateModels bool           `json:"useSeparateModels"`        // 是否各角色使用不同模型
-	MCPServers         []types.MCPServerConfig `json:"mcpServers,omitempty"`   // [v0.7.1] MCP Server 配置列表
+	APIConfigs        []APIConfig             `json:"apiConfigs"`
+	IMConfigs         []IMConfig              `json:"imConfigs"`
+	ShowCodeBlocks    bool                    `json:"showCodeBlocks"`
+	ShowThinking      bool                    `json:"showThinking"`
+	PmDecisionAlert   bool                    `json:"pmDecisionAlert"`
+	WorkDir           string                  `json:"workDir"`
+	RecentProjects    []string                `json:"recentProjects"`
+	DingTalk          DingTalkConfig          `json:"dingtalk,omitempty"`
+	HTTP              HTTPConfig              `json:"http"`
+	APEnabled         bool                    `json:"apEnabled"`
+	APConfig          *APIConfig              `json:"apConfig,omitempty"`   // [deprecated] 旧AP独立配置对象，v1.0.22后改用APConfigID
+	PMConfigID        string                  `json:"pmConfigId,omitempty"` // PM绑定的模型ID（空=用默认）
+	SEConfigID        string                  `json:"seConfigId,omitempty"` // SE绑定的模型ID（空=用默认）
+	APConfigID        string                  `json:"apConfigId,omitempty"` // AP绑定的模型ID（空=用默认）
+	UseSeparateModels bool                    `json:"useSeparateModels"`    // 是否各角色使用不同模型
+	MCPServers        []types.MCPServerConfig `json:"mcpServers,omitempty"` // [v0.7.1] MCP Server 配置列表
 }
 
 // ChatMessage 聊天消息
@@ -724,9 +724,11 @@ func (a *App) initChatManager() {
 						switch state {
 						case "running":
 							cm.UpdateProjectState(types.ProjectStateRunning)
+							cm.UpdatePmStatus(types.RoleStatusBusy)
 						case "done":
 							// short 任务无 AP 流程，直接 approved（跳过 CMonitor.handleProjectDone）
 							cm.UpdateProjectState(types.ProjectStateApproved)
+							cm.UpdateSeStatus(types.RoleStatusIdle)
 						case "error":
 							cm.UpdateProjectState(types.ProjectStateError)
 						}
@@ -738,42 +740,42 @@ func (a *App) initChatManager() {
 			}
 
 			a.bridge.SetOnMessage(func(msg *chat.Message) {
-			if msg == nil || msg.Content == "" {
-				return
-			}
-
-			if msg.Role == "status" || msg.From == "status" {
-				fmt.Printf("[Bridge-Status] %s\n", msg.Content)
-				if strings.Contains(msg.Content, "status:busy") {
-					a.aiThinking = true
-				} else {
-					a.aiThinking = false
+				if msg == nil || msg.Content == "" {
+					return
 				}
-				a.emitToFrontend("role-status", msg.Content, "Bridge:Status", chat.PathStatus)
-				return
-			}
 
-			// [v0.8.1] 项目级别指示器（short/normal/full）
-			if msg.Role == "project_level" {
-				a.emitToFrontend("project-level", msg.Content, "Bridge:ProjectLevel", chat.PathStatus)
-				return
-			}
+				if msg.Role == "status" || msg.From == "status" {
+					fmt.Printf("[Bridge-Status] %s\n", msg.Content)
+					if strings.Contains(msg.Content, "status:busy") {
+						a.aiThinking = true
+					} else {
+						a.aiThinking = false
+					}
+					a.emitToFrontend("role-status", msg.Content, "Bridge:Status", chat.PathStatus)
+					return
+				}
 
-			a.msgIDCounter++
-			chatMsg := a.newChatMessage(msg.Role, msg.Content)
-			chatMsg.ID = a.msgIDCounter
-			a.messages = append(a.messages, chatMsg)
-			a.saveMessages()
+				// [v0.8.1] 项目级别指示器（short/normal/full）
+				if msg.Role == "project_level" {
+					a.emitToFrontend("project-level", msg.Content, "Bridge:ProjectLevel", chat.PathStatus)
+					return
+				}
 
-			switch msg.Role {
-			case "pm":
-				a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
-			default:
-				a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
-			}
-		})
+				a.msgIDCounter++
+				chatMsg := a.newChatMessage(msg.Role, msg.Content)
+				chatMsg.ID = a.msgIDCounter
+				a.messages = append(a.messages, chatMsg)
+				a.saveMessages()
 
-		a.addLog("【V2 Bridge】✅ ArgusCore 已初始化 (全链路走MessageBus+校验)")
+				switch msg.Role {
+				case "pm":
+					a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+				default:
+					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+				}
+			})
+
+			a.addLog("【V2 Bridge】✅ ArgusCore 已初始化 (全链路走MessageBus+校验)")
 		}
 	}
 
@@ -916,11 +918,15 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 	if msgBus != nil {
 		checksum := fmt.Sprintf("%d:%s:%s", len(payloadStr),
 			func() string {
-				if len(payloadStr) > 0 { return string(payloadStr[0]) }
+				if len(payloadStr) > 0 {
+					return string(payloadStr[0])
+				}
 				return ""
 			}(),
 			func() string {
-				if len(payloadStr) > 1 { return string(payloadStr[len(payloadStr)-1]) }
+				if len(payloadStr) > 1 {
+					return string(payloadStr[len(payloadStr)-1])
+				}
 				return ""
 			}())
 
@@ -1083,7 +1089,12 @@ func (a *App) SaveConfig(config Config) error {
 
 	fmt.Printf("[SaveConfig] HTTP配置保存: enabled=%v, port=%d, apiToken=%s, allowRemote=%v\n",
 		config.HTTP.Enabled, config.HTTP.Port,
-		func() string { if config.HTTP.APIToken != "" { return "***" }; return "" }(),
+		func() string {
+			if config.HTTP.APIToken != "" {
+				return "***"
+			}
+			return ""
+		}(),
 		config.HTTP.AllowRemote)
 
 	a.config = config
@@ -3369,10 +3380,14 @@ func (a *App) SendMessage(content string) error {
 			if err != nil {
 				a.addLog(fmt.Sprintf("【V2-Error】%v", err))
 				detail := ""
-				if len(result.Outputs) > 0 { detail = strings.Join(result.Outputs, "\n") }
+				if len(result.Outputs) > 0 {
+					detail = strings.Join(result.Outputs, "\n")
+				}
 				if len(result.Phases) > 0 {
 					for _, p := range result.Phases {
-						if p.Output != "" { detail += "\n---\n" + p.Output }
+						if p.Output != "" {
+							detail += "\n---\n" + p.Output
+						}
 					}
 				}
 				errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v\n\n%s", err, detail))
@@ -3705,14 +3720,14 @@ func (a *App) getProjectDir() string {
 	if a.config.WorkDir != "" {
 		absWorkDir, _ := filepath.Abs(a.config.WorkDir)
 		fmt.Printf("[getProjectDir] 使用配置的 WorkDir: %s (abs: %s)\n", a.config.WorkDir, absWorkDir)
-		
+
 		if a.isDangerousWorkDir(absWorkDir) {
 			fallback := filepath.Join(os.TempDir(), "argus-workspace")
 			os.MkdirAll(fallback, 0755)
 			fmt.Printf("[getProjectDir] ⚠️ WorkDir 在危险路径中，强制使用: %s\n", fallback)
 			return fallback
 		}
-		
+
 		return a.config.WorkDir
 	}
 
@@ -3724,14 +3739,14 @@ func (a *App) getProjectDir() string {
 	if a.useCWD {
 		if err == nil {
 			absCwd, _ := filepath.Abs(cwd)
-			
+
 			if a.isDangerousWorkDir(absCwd) {
 				fallback := filepath.Join(os.TempDir(), "argus-workspace")
 				os.MkdirAll(fallback, 0755)
 				fmt.Printf("[getProjectDir] ⚠️ CLI模式下 cwd在危险路径中，强制使用: %s\n", fallback)
 				return fallback
 			}
-			
+
 			fmt.Printf("[getProjectDir] CLI模式，使用 cwd: %s\n", cwd)
 			return cwd
 		}
@@ -4089,13 +4104,19 @@ func (a *App) MCPCallTool(toolName string, arguments map[string]interface{}) (in
 	// 遍历所有服务器查找工具
 	servers := a.mcpManager.ListServers()
 	for _, s := range servers {
-		if !s.Initialized { continue }
+		if !s.Initialized {
+			continue
+		}
 		tools, err := a.mcpManager.RefreshTools(s.Name)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		for _, t := range tools {
 			if t.Name == toolName {
 				result, err := a.mcpManager.CallTool(s.Name, toolName, arguments)
-				if err != nil { return nil, err }
+				if err != nil {
+					return nil, err
+				}
 				return result.Content, nil
 			}
 		}
@@ -4185,20 +4206,28 @@ func (a *App) DebugPause(sessionID string) error {
 }
 
 func (a *App) DebugStacktrace(sessionID string, depth int) (interface{}, error) {
-	if depth <= 0 { depth = 20 }
+	if depth <= 0 {
+		depth = 20
+	}
 	frames, err := a.debuggerMgr.GetCallStack(sessionOrDefault(sessionID, a))
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{"frames": frames, "count": len(frames)}, nil
 }
 
 func (a *App) DebugVariables(sessionID string, scope string) (interface{}, error) {
 	vars, err := a.debuggerMgr.GetVariables(sessionOrDefault(sessionID, a))
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return vars, nil
 }
 
 func (a *App) DebugEvaluate(sessionID, expression string) (interface{}, error) {
 	v, err := a.debuggerMgr.EvaluateExpression(sessionOrDefault(sessionID, a), expression)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return v, nil
 }

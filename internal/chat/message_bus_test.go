@@ -14,8 +14,8 @@ func TestNewMessageBus(t *testing.T) {
 	if !mb.enabled {
 		t.Fatal("MessageBus should be enabled by default")
 	}
-	if mb.timeout != 5*time.Second {
-		t.Fatalf("Expected timeout 5s, got %v", mb.timeout)
+	if mb.timeout != 2*time.Second {
+		t.Fatalf("Expected timeout 2s, got %v", mb.timeout)
 	}
 }
 

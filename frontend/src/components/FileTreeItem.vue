@@ -44,6 +44,7 @@ import { ref, computed, reactive, onBeforeUnmount } from 'vue'
 const props = defineProps<{
   item: any
   selectedPath?: string
+  workDir?: string
 }>()
 
 const emit = defineEmits(['select', 'context'])
@@ -82,8 +83,10 @@ async function ctxAction(action: string) {
       emit('select', item)
       break
     case 'copy-path': {
-      // @ts-ignore
-      await navigator.clipboard.writeText(item.path)
+      const sep = '\\'
+      const dir = props.workDir ? props.workDir.replace(/\/$/, '').replace(/\\$/, '') : ''
+      const absPath = dir ? dir + sep + item.path.replace(/\//g, sep) : item.path
+      await navigator.clipboard.writeText(absPath)
       break
     }
     case 'delete':

@@ -62,7 +62,7 @@ type CMonitor struct {
 	maxResetCount int          // 最大自动复位次数（默认3次）
 
 	// [FIX-20260528-D] SE完成状态检测
-	seCompletedChecker func() bool // 检查SE是否已报告完成任务
+	seCompletedChecker func() bool   // 检查SE是否已报告完成任务
 	workDirChecker     func() string // 获取工作目录（用于文件检测）
 
 	// 交接安全网
@@ -242,7 +242,7 @@ func (c *CMonitor) ensureSafeGitRepo() bool {
 	// 情况1: .git不存在 → 自动初始化本地仓库（不设remote）
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
 		fmt.Printf("[C] 📁 工作目录无Git，初始化本地仓库: %s\n", c.workDir)
-		
+
 		initCmd := exec.Command("git", "init")
 		initCmd.Dir = c.workDir
 		initCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -250,7 +250,7 @@ func (c *CMonitor) ensureSafeGitRepo() bool {
 			fmt.Printf("[C] ❌ git init 失败: %v, output: %s\n", err, string(out))
 			return false
 		}
-		
+
 		fmt.Printf("[C] ✅ 本地Git仓库已初始化（无远程）\n")
 		return true
 	}
@@ -259,13 +259,13 @@ func (c *CMonitor) ensureSafeGitRepo() bool {
 	configPath := filepath.Join(gitDir, "config")
 	if data, err := os.ReadFile(configPath); err == nil {
 		configContent := string(data)
-		
+
 		// 危险的remote模式（指向主项目仓库）
 		dangerousPatterns := []string{
 			"github.com/argustek/Argus",
 			"argustek/Argus",
 		}
-		
+
 		for _, pattern := range dangerousPatterns {
 			if strings.Contains(configContent, pattern) {
 				fmt.Printf("[C] 🚨 危险！工作目录的Git remote指向主项目仓库(%s)\n", pattern)
@@ -273,14 +273,14 @@ func (c *CMonitor) ensureSafeGitRepo() bool {
 				return false // 阻止auto-commit
 			}
 		}
-		
+
 		// 检查是否有remote（有的话提醒但允许）
 		if strings.Contains(configContent, "[remote ") || strings.Contains(configContent, "[remote\"") {
 			fmt.Printf("[C] ℹ️  工作目录有remote配置，确保它指向你自己的仓库\n")
 		} else {
 			fmt.Printf("[C] ✅ 工作目录是纯本地Git仓库（无remote），安全\n")
 		}
-		
+
 		return true
 	}
 
@@ -396,6 +396,8 @@ func (c *CMonitor) handleProjectError() {
 	}
 	c.alertedError = true
 	c.alertedDone = false
+	c.doubleIdleStartTime = 0
+	c.idleAlertedTime = 0
 	fmt.Println("[C] 项目出错或需用户介入")
 	c.alertFunc("项目出错或需用户介入，请检查")
 }
@@ -471,80 +473,80 @@ func (c *CMonitor) handleProjectRunning(state types.State, now int64) {
 			seBusyDuration := now - seBusySince
 			fmt.Printf("[C] SE无chunk持续时间: %d秒\n", seBusyDuration)
 			if seBusyDuration > int64(c.noProgressTimeout.Seconds()) {
-			if c.CanAutoReset() && c.retryCallback != nil {
-				c.resetCount++
-				remaining := c.maxResetCount - c.resetCount
-				fmt.Printf("[C] SE无进展超过6分钟，延迟10s后自动reset (第%d/%d次)\n", c.resetCount, c.maxResetCount)
+				if c.CanAutoReset() && c.retryCallback != nil {
+					c.resetCount++
+					remaining := c.maxResetCount - c.resetCount
+					fmt.Printf("[C] SE无进展超过6分钟，延迟10s后自动reset (第%d/%d次)\n", c.resetCount, c.maxResetCount)
 
-			// 🔴 [FIX-20260528-D] 正确判断：通过SE完成状态+文件检测
-				shouldForceRouteToPM := false
-				forceStepName := ""
+					// 🔴 [FIX-20260528-D] 正确判断：通过SE完成状态+文件检测
+					shouldForceRouteToPM := false
+					forceStepName := ""
 
-				// 方法1: SE完成状态检测器（最准确）
-				if c.seCompletedChecker != nil && c.seCompletedChecker() {
-					shouldForceRouteToPM = true
-					forceStepName = "se_to_pm"
-					fmt.Printf("[C] 🛡️ SE已报告完成(seReportedComplete=true)但仍在busy\n")
+					// 方法1: SE完成状态检测器（最准确）
+					if c.seCompletedChecker != nil && c.seCompletedChecker() {
+						shouldForceRouteToPM = true
+						forceStepName = "se_to_pm"
+						fmt.Printf("[C] 🛡️ SE已报告完成(seReportedComplete=true)但仍在busy\n")
 					} else if c.workDirChecker != nil {
-					// 方法2: 文件存在性检测（备选方案）
-					workDir := c.workDirChecker()
-					if workDir != "" {
-						// 检查工作目录是否有最近修改的文件（15分钟内）
-						// 注意：SE完成任务到C监控触发可能需要6-10分钟
-						files, err := os.ReadDir(workDir)
-						if err == nil {
-							recentFileCount := 0
-							now := time.Now().Unix()
-							for _, f := range files {
-								if info, err := f.Info(); err == nil {
-									modTime := info.ModTime().Unix()
-									if now-modTime < 900 && !f.IsDir() { // 15分钟内修改的非目录文件 [FIX-时间窗口]
-										recentFileCount++
+						// 方法2: 文件存在性检测（备选方案）
+						workDir := c.workDirChecker()
+						if workDir != "" {
+							// 检查工作目录是否有最近修改的文件（15分钟内）
+							// 注意：SE完成任务到C监控触发可能需要6-10分钟
+							files, err := os.ReadDir(workDir)
+							if err == nil {
+								recentFileCount := 0
+								now := time.Now().Unix()
+								for _, f := range files {
+									if info, err := f.Info(); err == nil {
+										modTime := info.ModTime().Unix()
+										if now-modTime < 900 && !f.IsDir() { // 15分钟内修改的非目录文件 [FIX-时间窗口]
+											recentFileCount++
+										}
 									}
 								}
-							}
-							if recentFileCount > 0 {
-								shouldForceRouteToPM = true
-								forceStepName = "se_to_pm"
-								fmt.Printf("[C] 🛡️ [文件检测] 工作目录有%d个最近文件(15min窗口)，SE可能已完成\n", recentFileCount)
+								if recentFileCount > 0 {
+									shouldForceRouteToPM = true
+									forceStepName = "se_to_pm"
+									fmt.Printf("[C] 🛡️ [文件检测] 工作目录有%d个最近文件(15min窗口)，SE可能已完成\n", recentFileCount)
+								}
 							}
 						}
 					}
-				}
 
-				if !shouldForceRouteToPM {
-					fmt.Printf("[C] 📋 SE未完成或检测器不可用，准备执行正常reset\n")
-				}
+					if !shouldForceRouteToPM {
+						fmt.Printf("[C] 📋 SE未完成或检测器不可用，准备执行正常reset\n")
+					}
 
-				time.Sleep(10 * time.Second)
+					time.Sleep(10 * time.Second)
 
-				if shouldForceRouteToPM && c.handoverForceAction != nil {
-					// ✅ SE已完成（项目done）→ 强制推进交接流程（不reset！）
-					fmt.Printf("[C] 🔧 强制推进交接: %s (基于项目状态判断)\n", forceStepName)
-					if err := c.handoverForceAction(forceStepName, true); err != nil {
-						fmt.Printf("[C] ❌ 强制推进失败: %v，回退到reset\n", err)
+					if shouldForceRouteToPM && c.handoverForceAction != nil {
+						// ✅ SE已完成（项目done）→ 强制推进交接流程（不reset！）
+						fmt.Printf("[C] 🔧 强制推进交接: %s (基于项目状态判断)\n", forceStepName)
+						if err := c.handoverForceAction(forceStepName, true); err != nil {
+							fmt.Printf("[C] ❌ 强制推进失败: %v，回退到reset\n", err)
+							if err := c.retryCallback(); err != nil {
+								fmt.Printf("[C] 自动重试失败: %v\n", err)
+							}
+						} else {
+							fmt.Println("[C] ✅ 已强制推进交接流程（基于项目状态）")
+							c.messageSender(fmt.Sprintf("[C自动重试] SE已完成但交接卡住，已强制推进到%s审核", forceStepName))
+						}
+					} else {
+						// 原有逻辑：正常reset（SE未完成的情况）
 						if err := c.retryCallback(); err != nil {
 							fmt.Printf("[C] 自动重试失败: %v\n", err)
+						} else {
+							fmt.Println("[C] 自动重试完成")
 						}
-					} else {
-						fmt.Println("[C] ✅ 已强制推进交接流程（基于项目状态）")
-						c.messageSender(fmt.Sprintf("[C自动重试] SE已完成但交接卡住，已强制推进到%s审核", forceStepName))
+						c.retriedOnce = true
+						c.mu.Lock()
+						c.seBusySince = time.Now().Unix()
+						c.lastSeChunkTime = 0
+						c.mu.Unlock()
+						c.messageSender(fmt.Sprintf("[C自动重试] SE卡住已自动reset (剩余%d次)，请PM重新分配任务", remaining))
 					}
 				} else {
-					// 原有逻辑：正常reset（SE未完成的情况）
-					if err := c.retryCallback(); err != nil {
-						fmt.Printf("[C] 自动重试失败: %v\n", err)
-					} else {
-						fmt.Println("[C] 自动重试完成")
-					}
-					c.retriedOnce = true
-					c.mu.Lock()
-					c.seBusySince = time.Now().Unix()
-					c.lastSeChunkTime = 0
-					c.mu.Unlock()
-					c.messageSender(fmt.Sprintf("[C自动重试] SE卡住已自动reset (剩余%d次)，请PM重新分配任务", remaining))
-				}
-			} else {
 					fmt.Println("[C] SE无进展超过6分钟，已达最大复位次数或无回调，提醒PM")
 					c.messageSender("SE无进展超过6分钟，已达最大自动复位次数，请手动处理")
 					c.mu.Lock()
@@ -698,6 +700,8 @@ func (c *CMonitor) ResetSessionState() error {
 	state.SeStatus = types.RoleStatusIdle
 	state.LastUserMessage = ""
 	state.LastInteractionTime = 0
+	c.doubleIdleStartTime = 0
+	c.idleAlertedTime = 0
 	return c.writeStateLocked(state)
 }
 
@@ -852,11 +856,11 @@ func (c *CMonitor) gitChangedFiles() int {
 }
 
 const (
-	handoverNudge1Interval = 15  // 第1次催促: 15秒
-	handoverNudge2Interval = 30  // 第2次催促: 30秒
-	handoverNudge3Interval = 60  // 第3次催促: 1分钟
-	handoverForceInterval  = 90  // 强制执行: 1.5分钟(3次催促后)
-	maxHandoverNudges      = 3   // 最大催促次数
+	handoverNudge1Interval = 15 // 第1次催促: 15秒
+	handoverNudge2Interval = 30 // 第2次催促: 30秒
+	handoverNudge3Interval = 60 // 第3次催促: 1分钟
+	handoverForceInterval  = 90 // 强制执行: 1.5分钟(3次催促后)
+	maxHandoverNudges      = 3  // 最大催促次数
 )
 
 // checkHandoverTimeout 检查交接超时（三层安全网）
