@@ -197,6 +197,10 @@ func (c *ArgusCore) SetOnActionEvent(fn func(eventName string, data interface{})
 }
 
 func (c *ArgusCore) emit(source, content string) {
+	// [v0.8.1] Featherweight静默模式：抑制所有中间消息（只保留最终总结）
+	if c.silent {
+		return
+	}
 	if c.onMessage != nil {
 		c.onMessage(source, content)
 	}
@@ -206,8 +210,10 @@ func (c *ArgusCore) emitStatus(phase, role, status string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// [v0.8.1] 状态更新始终发出（C监控依赖此判断PM/SE是否busy）
+	// silent模式只抑制emit()消息，不抑制状态
+
 	c.state.Phase = phase
-	c.state.Task = phase
 
 	// 🔧 关键修复：done/error阶段强制重置所有角色状态（无论传入的role是什么）
 	if phase == "done" || phase == "error" {
@@ -429,6 +435,19 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	totalStart := time.Now()
 	result := &ProcessResult{
 		Phases: make([]PhaseResult, 0, 3),
+	}
+
+	// [v0.8.1] 自动检测用户消息语言：英文消息→en，中文/其他→zh
+	englishChars := 0
+	for _, r := range userMsg {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			englishChars++
+		}
+	}
+	if englishChars > len([]rune(userMsg))/2 {
+		c.language = "en"
+	} else {
+		c.language = "zh"
 	}
 
 	defer func() {
@@ -1815,7 +1834,11 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	// 如果没有 actions（PM 只返回了文本），直接展示
 	if len(actions) == 0 {
-		c.emit("pm_to_user", fmt.Sprintf("@USR %s", displayContent))
+		dc := displayContent
+		if strings.HasPrefix(dc, "@USR") {
+			dc = strings.TrimSpace(strings.TrimPrefix(dc, "@USR"))
+		}
+		c.emit("pm_to_user", fmt.Sprintf("@USR %s", dc))
 		c.memory.Add(RolePM, msg.Content)
 		c.emitStatus("done", "none", "idle")
 		result.Success = true
@@ -1895,6 +1918,9 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 	}
 
 	// Step 4: 调用 LLM 生成自然语言最终总结（利用PM的总结能力）
+	// [v0.8.1] 退出静默模式，允许最终总结和 done 状态发送到前端
+	c.silent = false
+
 	if result.Error != nil {
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
 	} else if len(execResults) > 0 {
@@ -1908,17 +1934,26 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 直接输出汇报文本即可（不要太长，用自然语言）。`, userMsg, strings.Join(execResults, "\n"))
 
 		summaryCtx, summaryCancel := context.WithTimeout(c.ctx, c.timeout)
-		finalSummary, summaryErr := c.client.ChatStream(summaryCtx, c.prompts.Get(RolePM), nil, summaryPrompt, "zh", nil, nil)
+		var finalSummary string
+		var summaryErr error
+		finalSummary, summaryErr = c.client.ChatStream(summaryCtx, c.prompts.Get(RolePM), nil, summaryPrompt, c.language, nil, nil)
 		summaryCancel()
 
 		if summaryErr != nil || len(strings.TrimSpace(finalSummary)) < 3 {
 			// fallback: 简洁的 exec 结果
 			finalSummary = fmt.Sprintf("✅ 完成 (%d 个操作): %s", len(actions), strings.Join(execResults, "\n"))
 		}
+		// [v0.8.1] 防止重复 @USR（LLM summary 可能已包含）
+		if strings.HasPrefix(finalSummary, "@USR") {
+			finalSummary = strings.TrimSpace(strings.TrimPrefix(finalSummary, "@USR"))
+		}
 		c.emit("pm_to_user", fmt.Sprintf("@USR %s", finalSummary))
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)
 		if cleanSummary != "" {
+			if strings.HasPrefix(cleanSummary, "@USR") {
+				cleanSummary = strings.TrimSpace(strings.TrimPrefix(cleanSummary, "@USR"))
+			}
 			c.emit("pm_to_user", fmt.Sprintf("@USR %s", cleanSummary))
 		} else {
 			c.emit("pm_to_user", "@USR ✅ 完成")

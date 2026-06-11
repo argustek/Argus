@@ -1469,9 +1469,9 @@ async function saveConfig(newConfig: any) {
       apEnabled: newConfig.apEnabled ?? false,
       apConfig: newConfig.apConfig ?? null,
       useSeparateModels: newConfig.useSeparateModels ?? currentConfig.useSeparateModels,
-      pmConfigId: newConfig.pmConfigId ?? currentConfig.pmConfigID,
-      seConfigId: newConfig.seConfigId ?? currentConfig.seConfigID,
-      apConfigId: newConfig.apConfigId ?? currentConfig.apConfigID,
+      pmConfigId: newConfig.pmConfigId ?? currentConfig.pmConfigId,
+      seConfigId: newConfig.seConfigId ?? currentConfig.seConfigId,
+      apConfigId: newConfig.apConfigId ?? currentConfig.apConfigId,
     })
     alert('配置保存成功！')
     updateMultimodalStatus(newConfig)
