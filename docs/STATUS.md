@@ -55,11 +55,11 @@
 
 ### 3.1 TopBar 级别指示器 `[short]`/`[normal]`/`[full]`
 
-后端 `argus.go` 通过 `MessageBus.Send()` 已推送 `project-level` 事件，但**前端未实现渲染**。⽤户看不到当前级别。
+**状态**：✅ 已实现（v0.8.1）
 
-- 后端：`argus.go` `emitLevelEvent()` 已实现，EventName=`project-level`
-- 前端：`App.vue:429` EventsOn(`project-level`) **只 ack 不渲染**
-- 需要：TopBar 上出现 `[short]` / `[normal]` / `[full]` Badge
+- 后端：`argus.go` `emitLevelEvent()` → MessageBus `project-level` ✅
+- 前端：`TopBar.vue:77` `<span class="project-level-badge">` 渲染 ✅
+- `App.vue:429` EventsOn(`project-level`) 接收并传递 prop
 
 ### 3.2 通知报警前后不对应
 
@@ -88,7 +88,8 @@
 |------|------|----------|----------|
 | `_status.txt` | 0 字节 | 仅创建 | 没写内容 |
 | `cmd/testdb/main.go` | 90 ⾏ | 数据库测试 code | 未集成、未运⾏ |
-| `docs/ui_plan_api_settings.md` | ~100 ⾏ | API 设置⻚⾯设计 稿 | 前端代码⼀⾏没写 |
+
+~~`docs/ui_plan_api_settings.md`~~ — ✅ **已实现**（`SettingsPanel.vue` 两张表 + 角色绑定完整实现）
 
 ---
 
