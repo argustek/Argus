@@ -1829,6 +1829,59 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 		}
 	}
 
+	// [v0.8.2] ToolCalls=0 重试：LLM 可能返回纯文本而非工具调用，重试强制使用工具
+	maxToolRetries := 2
+	for toolAttempt := 0; toolAttempt <= maxToolRetries; toolAttempt++ {
+		if len(msg.ToolCalls) > 0 {
+			break // 有 tool calls，正常继续
+		}
+		if toolAttempt == maxToolRetries {
+			break // 重试耗尽，走文本回退路径
+		}
+		fmt.Printf("[Core:Feather] ⚠️ LLM未返回ToolCalls (attempt %d/%d), 重试...\n", toolAttempt+1, maxToolRetries)
+
+		// 强化 prompt 强制使用工具
+		forcePrompt := fmt.Sprintf(`【重要】你必须使用工具调用（function call）来完成此任务！
+
+用户请求：%s
+
+你上次返回了纯文本而没有使用工具。这是错误的！
+请务必使用以下工具：
+1. write_file - 创建代码文件（必须）
+2. exec - 执行命令验证（必须）
+
+返回格式示例：
+- function_call: write_file(path="hello.go", content="...")
+- function_call: exec(command="go run hello.go")
+
+现在请重新执行，直接返回工具调用！`, userMsg)
+
+		forceCtx, forceCancel := context.WithTimeout(c.ctx, c.timeout)
+		var resp2 *ai.ChatResponse
+		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, []ai.Message{}, forcePrompt, ai.SETools)
+		forceCancel()
+
+		if callErr != nil || len(resp2.Choices) == 0 {
+			continue // 重试
+		}
+		msg = resp2.Choices[0].Message
+		displayContent = msg.Content
+
+		if len(msg.ToolCalls) > 0 {
+			actions = nil
+			for _, tc := range msg.ToolCalls {
+				var args map[string]interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				action := ai.SEAction{Type: tc.Function.Name}
+				if p, ok := args["path"].(string); ok { action.Path = p }
+				if ct, ok := args["content"].(string); ok { action.Content = ct }
+				if cmd, ok := args["command"].(string); ok { action.Command = cmd }
+				actions = append(actions, action)
+			}
+			fmt.Printf("[Core:Feather] ✅ ToolCalls重试成功 (attempt %d)\n", toolAttempt+1)
+		}
+	}
+
 	phaseFE := PhaseResult{Phase: PhaseExecute, Role: RolePM, Input: execPrompt, Output: msg.Content, Raw: msg.Content, Duration: time.Since(start)}
 	result.Phases = append(result.Phases, phaseFE)
 
