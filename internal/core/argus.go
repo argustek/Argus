@@ -19,23 +19,23 @@ import (
 
 // RoleState LabVIEW式角色状态（后面板控件值，前面板只读投影）
 type RoleState struct {
-	Phase     string `json:"phase"`               // idle, pm, se, ap, review, done, error
-	PM        string `json:"pm"`                  // idle, busy
-	SE        string `json:"se"`                  // idle, busy
-	AP        string `json:"ap"`                  // idle, busy
-	MC        bool   `json:"mc"`                  // C监控运行中
-	Task      string `json:"task,omitempty"`      // 当前任务描述
-	Progress  string `json:"progress,omitempty"`  // 进度信息
-	UpdatedAt int64  `json:"updated_at"`          // 时间戳
+	Phase     string `json:"phase"`              // idle, pm, se, ap, review, done, error
+	PM        string `json:"pm"`                 // idle, busy
+	SE        string `json:"se"`                 // idle, busy
+	AP        string `json:"ap"`                 // idle, busy
+	MC        bool   `json:"mc"`                 // C监控运行中
+	Task      string `json:"task,omitempty"`     // 当前任务描述
+	Progress  string `json:"progress,omitempty"` // 进度信息
+	UpdatedAt int64  `json:"updated_at"`         // 时间戳
 }
 
 // ThoughtEvent AI思考链事件（用于前端Dashboard展示）
 type ThoughtEvent struct {
-	Type      string                 `json:"type"`               // "thinking" | "step" | "tool_start" | "tool_done"
-	Role      string                 `json:"role"`               // "pm" | "se" | "ap"
-	Content   string                 `json:"content,omitempty"`  // 思考内容/步骤描述/工具输出
-	Timestamp int64                  `json:"timestamp"`          // Unix秒
-	Metadata  map[string]interface{} `json:"meta,omitempty"`      // 扩展(工具名/步骤号/耗时等)
+	Type      string                 `json:"type"`              // "thinking" | "step" | "tool_start" | "tool_done"
+	Role      string                 `json:"role"`              // "pm" | "se" | "ap"
+	Content   string                 `json:"content,omitempty"` // 思考内容/步骤描述/工具输出
+	Timestamp int64                  `json:"timestamp"`         // Unix秒
+	Metadata  map[string]interface{} `json:"meta,omitempty"`    // 扩展(工具名/步骤号/耗时等)
 }
 
 type AICaller interface {
@@ -91,7 +91,7 @@ type ArgusCore struct {
 	executor *executor.Executor
 	memory   *SharedMemory
 	prompts  *PromptKit
-	todo     *TodoManager  // 动态任务列表管理器
+	todo     *TodoManager // 动态任务列表管理器
 
 	pmProcessor *ai.PMProcessor // [v0.7.2] PM处理器（带 add_todo/update_todo Function Call）
 
@@ -100,11 +100,11 @@ type ArgusCore struct {
 
 	debuggerMgr *debugger.DebugSessionManager // DAP 调试会话管理器
 
-	onMessage      func(source, content string)
-	onChunk        func(delta string)
-	onThought      func(evt map[string]interface{}) // 思考链回调（Dashboard可视化）
-	onStateChange  func(RoleState)
-	onActionEvent  func(eventName string, data interface{})
+	onMessage     func(source, content string)
+	onChunk       func(delta string)
+	onThought     func(evt map[string]interface{}) // 思考链回调（Dashboard可视化）
+	onStateChange func(RoleState)
+	onActionEvent func(eventName string, data interface{})
 
 	silent bool // [v0.8] Featherweight静默模式：抑制所有中间emit，只发最终总结
 
@@ -120,17 +120,17 @@ type ArgusCore struct {
 func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *ArgusCore {
 	ctx, cancel := context.WithCancel(context.Background())
 	core := &ArgusCore{
-		client:     client,
-		executor:   exec,
-		memory:     NewSharedMemory(100),
+		client:      client,
+		executor:    exec,
+		memory:      NewSharedMemory(100),
 		prompts:     NewPromptKit(workDir),
-		todo:       NewTodoManager(),
-		workDir:    workDir,
-		language:   "zh",
-		ctx:        ctx,
-		cancel:     cancel,
-		maxRetries: 3,
-		timeout:    120 * time.Second,
+		todo:        NewTodoManager(),
+		workDir:     workDir,
+		language:    "zh",
+		ctx:         ctx,
+		cancel:      cancel,
+		maxRetries:  3,
+		timeout:     120 * time.Second,
 		debuggerMgr: debugger.NewDebugSessionManager(exec, workDir),
 	}
 
@@ -518,14 +518,14 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	isFeatherweight := false
 
 	// 条件A：用户显示指定 /level short
-	if userLevel == "short" || userLevel == "short" || userLevel == "⚡" {
+	if userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡" {
 		isFeatherweight = true
 		fmt.Printf("[Core:Level] ⚡ 用户强制指定 Featherweight\n")
 	}
 
 	// 条件B：PM 明确标记了 short
 	if !isFeatherweight && (strings.Contains(pmResponse, `"level":"short"`) ||
-		strings.Contains(pmResponse, `"level":"short"`) ||
+		strings.Contains(pmResponse, `"level":"featherweight"`) ||
 		strings.Contains(pmResponse, "⚡") ||
 		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]")) {
 		isFeatherweight = true
@@ -604,47 +604,47 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	for _, ext := range []string{".go", ".py", ".rs", ".js", ".ts", ".java", ".c", ".cpp"} {
 		if strings.Contains(pmResponse, ext) {
 			switch ext {
-				case ".go":
-					detectedLang = "go"
-				case ".py":
-					detectedLang = "python"
-				case ".rs":
-					detectedLang = "rust"
-				case ".js", ".ts":
-					detectedLang = "nodejs"
-				case ".java":
-					detectedLang = "java"
-				case ".c", ".cpp":
-					detectedLang = "c/c++"
-				}
-				break
+			case ".go":
+				detectedLang = "go"
+			case ".py":
+				detectedLang = "python"
+			case ".rs":
+				detectedLang = "rust"
+			case ".js", ".ts":
+				detectedLang = "nodejs"
+			case ".java":
+				detectedLang = "java"
+			case ".c", ".cpp":
+				detectedLang = "c/c++"
 			}
+			break
 		}
+	}
 
-		if detectedLang != "" {
-			available, missing, hints := c.checkToolAvailability(detectedLang)
-			if len(missing) > 0 {
-				// 🔧 关键改进：检测到环境缺失时，暂停流程并询问用户
-				blockMsg := fmt.Sprintf("🛑 **环境阻断**: 目标语言 [%s] 缺少必要工具!\n\n❌ 缺失工具: %s\n✅ 已有工具: %s\n\n**请选择处理方式:**\n1️⃣ 自动安装 (运行: %s)\n2️⃣ 改用其他语言 (如Python/Go)\n3️⃣ 取消任务\n\n回复数字选择或输入新指令。",
-					detectedLang,
-					strings.Join(missing, ", "),
-					strings.Join(available, ", "),
-					strings.Join(hints, "\n   或 "))
-				c.emit("pm_to_user", blockMsg)
-				c.emitStatus("env-blocked", "none", "idle") // 特殊状态：环境阻断
-				result.Phases = append(result.Phases, PhaseResult{
-					Phase:    PhaseAnalyze,
-					Role:     RolePM,
-					Input:    userMsg,
-					Output:   blockMsg,
-					Raw:      blockMsg,
-					Duration: time.Since(totalStart),
-				})
-				return result // 🔑 阻断！不继续执行SE
-			} else {
-				fmt.Printf("[Core:EnvCheck] ✅ %s toolchain OK: %s\n", detectedLang, strings.Join(available, ", "))
-			}
+	if detectedLang != "" {
+		available, missing, hints := c.checkToolAvailability(detectedLang)
+		if len(missing) > 0 {
+			// 🔧 关键改进：检测到环境缺失时，暂停流程并询问用户
+			blockMsg := fmt.Sprintf("🛑 **环境阻断**: 目标语言 [%s] 缺少必要工具!\n\n❌ 缺失工具: %s\n✅ 已有工具: %s\n\n**请选择处理方式:**\n1️⃣ 自动安装 (运行: %s)\n2️⃣ 改用其他语言 (如Python/Go)\n3️⃣ 取消任务\n\n回复数字选择或输入新指令。",
+				detectedLang,
+				strings.Join(missing, ", "),
+				strings.Join(available, ", "),
+				strings.Join(hints, "\n   或 "))
+			c.emit("pm_to_user", blockMsg)
+			c.emitStatus("env-blocked", "none", "idle") // 特殊状态：环境阻断
+			result.Phases = append(result.Phases, PhaseResult{
+				Phase:    PhaseAnalyze,
+				Role:     RolePM,
+				Input:    userMsg,
+				Output:   blockMsg,
+				Raw:      blockMsg,
+				Duration: time.Since(totalStart),
+			})
+			return result // 🔑 阻断！不继续执行SE
+		} else {
+			fmt.Printf("[Core:EnvCheck] ✅ %s toolchain OK: %s\n", detectedLang, strings.Join(available, ", "))
 		}
+	}
 
 	c.emit("pm_to_se", pmResponse)
 	c.emitStatus("execute", "se", "busy")
@@ -874,7 +874,7 @@ Output ONLY this exact JSON structure:
 	c.memory.Add(RoleSE, fmt.Sprintf("SE completed. Actions: %d, Results: %v", len(actions), execResults))
 
 	// 📋 TODO: SE执行完成，标记Review为doing
-	c.todo.CompleteCurrent() // SE done
+	c.todo.CompleteCurrent()  // SE done
 	c.todo.MarkCurrentDoing() // Review start
 
 	// --- Phase 2-3 Loop: SE Execution + PM Review with Retry ---
@@ -1292,14 +1292,14 @@ func (c *ArgusCore) ensureExecAction(actions []ai.SEAction) []ai.SEAction {
 func (c *ArgusCore) checkToolAvailability(language string) (available []string, missing []string, hints []string) {
 	// 常见语言→编译器/解释器映射
 	toolMap := map[string][]string{
-		"go":       {"go"},
-		"python":   {"python", "python3"},
-		"rust":     {"rustc", "cargo"},
-		"nodejs":   {"node", "npm"},
-		"java":     {"javac", "java"},
-		"c/c++":    {"gcc", "g++", "clang"},
-		"ruby":     {"ruby"},
-		"php":      {"php"},
+		"go":     {"go"},
+		"python": {"python", "python3"},
+		"rust":   {"rustc", "cargo"},
+		"nodejs": {"node", "npm"},
+		"java":   {"javac", "java"},
+		"c/c++":  {"gcc", "g++", "clang"},
+		"ruby":   {"ruby"},
+		"php":    {"php"},
 	}
 
 	lowerLang := strings.ToLower(language)
@@ -1459,9 +1459,9 @@ func (c *ArgusCore) parsePMResponse(response string) (bool, string) {
 		if endIdx != -1 {
 			jsonStr := response[jsonIdx : jsonIdx+endIdx+1]
 			var task struct {
-				Task        string `json:"task"`
-				IsProgramming bool  `json:"is_programming"`
-				Files       []string `json:"files"`
+				Task          string   `json:"task"`
+				IsProgramming bool     `json:"is_programming"`
+				Files         []string `json:"files"`
 			}
 			if json.Unmarshal([]byte(jsonStr), &task) == nil && task.IsProgramming {
 				return true, task.Task
@@ -1481,7 +1481,9 @@ func (c *ArgusCore) parsePMResponse(response string) (bool, string) {
 
 func (c *ArgusCore) parseSEResponse(response string) ([]ai.SEAction, bool) {
 	fmt.Printf("[parseSE] raw_len=%d first_400=%q\n", len(response), func() string {
-		if len(response) > 400 { return response[:400] }
+		if len(response) > 400 {
+			return response[:400]
+		}
 		return response
 	}())
 	jsonIdx := strings.Index(response, `"actions"`)
@@ -1533,11 +1535,21 @@ func (c *ArgusCore) parseSEResponse(response string) ([]ai.SEAction, bool) {
 						actions := make([]ai.SEAction, 0, len(actionList))
 						for _, a := range actionList {
 							action := ai.SEAction{Type: fmt.Sprintf("%v", a["type"])}
-							if v, ok := a["path"].(string); ok { action.Path = v }
-							if v, ok := a["content"].(string); ok { action.Content = v }
-							if v, ok := a["command"].(string); ok { action.Command = v }
-							if v, ok := a["old_str"].(string); ok { action.OldStr = v }
-							if v, ok := a["new_str"].(string); ok { action.NewStr = v }
+							if v, ok := a["path"].(string); ok {
+								action.Path = v
+							}
+							if v, ok := a["content"].(string); ok {
+								action.Content = v
+							}
+							if v, ok := a["command"].(string); ok {
+								action.Command = v
+							}
+							if v, ok := a["old_str"].(string); ok {
+								action.OldStr = v
+							}
+							if v, ok := a["new_str"].(string); ok {
+								action.NewStr = v
+							}
 							actions = append(actions, action)
 						}
 						if len(actions) > 0 {
@@ -1822,9 +1834,15 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			var args map[string]interface{}
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			action := ai.SEAction{Type: tc.Function.Name}
-			if p, ok := args["path"].(string); ok { action.Path = p }
-			if ct, ok := args["content"].(string); ok { action.Content = ct }
-			if cmd, ok := args["command"].(string); ok { action.Command = cmd }
+			if p, ok := args["path"].(string); ok {
+				action.Path = p
+			}
+			if ct, ok := args["content"].(string); ok {
+				action.Content = ct
+			}
+			if cmd, ok := args["command"].(string); ok {
+				action.Command = cmd
+			}
 			actions = append(actions, action)
 		}
 	}
@@ -1873,9 +1891,15 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 				var args map[string]interface{}
 				json.Unmarshal([]byte(tc.Function.Arguments), &args)
 				action := ai.SEAction{Type: tc.Function.Name}
-				if p, ok := args["path"].(string); ok { action.Path = p }
-				if ct, ok := args["content"].(string); ok { action.Content = ct }
-				if cmd, ok := args["command"].(string); ok { action.Command = cmd }
+				if p, ok := args["path"].(string); ok {
+					action.Path = p
+				}
+				if ct, ok := args["content"].(string); ok {
+					action.Content = ct
+				}
+				if cmd, ok := args["command"].(string); ok {
+					action.Command = cmd
+				}
 				actions = append(actions, action)
 			}
 			fmt.Printf("[Core:Feather] ✅ ToolCalls重试成功 (attempt %d)\n", toolAttempt+1)
@@ -1924,7 +1948,9 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 		// 重试：带上错误信息让 PM 修复
 		feedbackErr := "<no error>"
-		if execErr != nil { feedbackErr = execErr.Error() }
+		if execErr != nil {
+			feedbackErr = execErr.Error()
+		}
 		fmt.Printf("[Core:Feather] 🔄 PM重试 #%d/%d: %s\n", attempt, maxRetries, feedbackErr)
 
 		fixPrompt := fmt.Sprintf(`⚠️ 上次执行出错，请修复后重新返回 actions。
@@ -1948,19 +1974,29 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			fmt.Printf("[Core:Feather] ⚠️ 重试LLM调用失败: %v\n", err2)
 			continue
 		}
-		if len(resp2.Choices) == 0 { continue }
+		if len(resp2.Choices) == 0 {
+			continue
+		}
 
 		msg2 := resp2.Choices[0].Message
-		if len(msg2.Content) > 20 { displayContent = msg2.Content } // 更新汇报文本
+		if len(msg2.Content) > 20 {
+			displayContent = msg2.Content
+		} // 更新汇报文本
 
 		actions = nil
 		for _, tc := range msg2.ToolCalls {
 			var args map[string]interface{}
 			json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			a := ai.SEAction{Type: tc.Function.Name}
-			if p, ok := args["path"].(string); ok { a.Path = p }
-			if ct, ok := args["content"].(string); ok { a.Content = ct }
-			if cmd, ok := args["command"].(string); ok { a.Command = cmd }
+			if p, ok := args["path"].(string); ok {
+				a.Path = p
+			}
+			if ct, ok := args["content"].(string); ok {
+				a.Content = ct
+			}
+			if cmd, ok := args["command"].(string); ok {
+				a.Command = cmd
+			}
 			actions = append(actions, a)
 		}
 		if len(actions) > 0 {
@@ -2338,7 +2374,12 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction, executor string) ([]st
 			"type":     action.Type,
 			"label":    label,
 			"status":   status,
-			"error":    func() string { if err != nil { return err.Error() }; return "" }(),
+			"error": func() string {
+				if err != nil {
+					return err.Error()
+				}
+				return ""
+			}(),
 		})
 
 		outputs = append(outputs, output)
@@ -2412,7 +2453,9 @@ func (c *ArgusCore) extractDisplayText(response string) string {
 // extractCleanSummary [v0.8] 从PM直执的LLM响应中提取干净的汇报文本
 // 过滤掉：JSON代码块、中间思考过程、工具调用说明
 func (c *ArgusCore) extractCleanSummary(content string) string {
-	if content == "" { return "" }
+	if content == "" {
+		return ""
+	}
 
 	lines := strings.Split(content, "\n")
 	var clean []string
@@ -2420,16 +2463,24 @@ func (c *ArgusCore) extractCleanSummary(content string) string {
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" { continue }
+		if trimmed == "" {
+			continue
+		}
 
 		// 跳过 JSON 代码块
 		if strings.HasPrefix(trimmed, "```") {
 			inJSONBlock = !inJSONBlock
 			continue
 		}
-		if inJSONBlock { continue }
-		if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, `"type"`) { continue }
-		if strings.HasPrefix(trimmed, "[") { continue }
+		if inJSONBlock {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, `"type"`) {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			continue
+		}
 
 		// 跳过中间过程/思考文本
 		skipPrefixes := []string{
@@ -2451,10 +2502,13 @@ func (c *ArgusCore) extractCleanSummary(content string) string {
 		isSkip := false
 		for _, prefix := range skipPrefixes {
 			if strings.HasPrefix(strings.ToLower(trimmed), strings.ToLower(prefix)) {
-				isSkip = true; break
+				isSkip = true
+				break
 			}
 		}
-		if isSkip { continue }
+		if isSkip {
+			continue
+		}
 
 		// 保留 ⚡ 标记的行（这是正式汇报）
 		clean = append(clean, trimmed)
