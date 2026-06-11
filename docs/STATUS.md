@@ -86,7 +86,6 @@
 
 | ⽂件 | ⼤⼩ | 做了什么 | 还差什么 |
 |------|------|----------|----------|
-| `_status.txt` | 0 字节 | 仅创建 | 没写内容 |
 | `cmd/testdb/main.go` | 90 ⾏ | 数据库测试 code | 未集成、未运⾏ |
 
 ~~`docs/ui_plan_api_settings.md`~~ — ✅ **已实现**（`SettingsPanel.vue` 两张表 + 角色绑定完整实现）
