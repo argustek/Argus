@@ -554,9 +554,11 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			}
 		}
 
-		// [v0.8.4] 没有工具调用 → 提醒一次后重试，避免纯文本回复不做事
+		// [v0.8.4] 没有工具调用 → 判断是否应结束
+		// 如果之前已经有 ToolCalls 执行过，说明任务已完成，直接结束
+		// 如果从未有过 ToolCalls，可能 LLM 在纯文本回复，提醒一次
 		if len(msg.ToolCalls) == 0 {
-			if toolNagCount == 0 {
+			if !hasToolCalls && toolNagCount == 0 {
 				toolNagCount++
 				nagMsg := "[系统提示] ⚠️ 你没有调用任何工具就直接回复了。用户请求可能需要你调用工具来处理（write_file/exec/read_file等）。请重新分析：这属于 Featherweight 直接执行还是需要 @SE 分配任务？如果是 Featherweight，请调用 write_file + exec；如果不是，请 @SE 分配。"
 				aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
@@ -565,7 +567,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 				userInput = "[请分析是否需要调用工具执行任务]"
 				continue
 			}
-			// 提醒后仍无工具调用 → 结束，用已有内容
+			// 已有 ToolCalls（任务已执行）或已提醒过 → 结束
 			break
 		}
 

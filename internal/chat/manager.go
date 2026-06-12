@@ -104,6 +104,11 @@ func (m *Manager) isDingTalkEnabled() bool {
 	return m.dingTalkEnabled
 }
 
+// [v0.8.6] SetBridgeBusyChecker 设置Bridge繁忙检测函数（C Monitor防中断用）
+func (m *Manager) SetBridgeBusyChecker(fn func() bool) {
+	m.bridgeBusyFunc = fn
+}
+
 func (m *Manager) SetDingTalkEnabled(enabled bool) {
 	fmt.Fprintln(os.Stderr, "[dingtalk] SetDingTalkEnabled:", m.dingTalkEnabled, "->", enabled)
 	m.dingTalkEnabled = enabled
@@ -276,6 +281,9 @@ type Manager struct {
 	contextWindow   *memory.ContextWindow // Token 监控 + 窗口管理（TokenMonitor 面板数据源）
 	contextBuilder *memory.ContextBuilder // 任务上下文组装器（注入 PM/SE system prompt）
 	compressor     *memory.Compressor    // 对话压缩器（自动裁剪旧对话）
+
+	// [v0.8.6] Bridge繁忙检测（C Monitor调用handleToPM前检查，防止中断Featherweight）
+	bridgeBusyFunc func() bool
 }
 
 type TodoItem struct {
@@ -893,6 +901,11 @@ func (m *Manager) initCMonitor() {
 
 	// 消息发送函数（发给PM，通过钉钉）
 	messageSender := func(msg string) {
+		// [v0.8.6] Bridge繁忙时跳过，防止C Monitor中断Featherweight执行
+		if m.bridgeBusyFunc != nil && m.bridgeBusyFunc() {
+			fmt.Printf("[Argus-MC→PM] ⏭️ Bridge繁忙，跳过MC消息: %s\n", msg)
+			return
+		}
 		// 打印日志
 		fmt.Printf("[Argus-MC→PM] %s\n", msg)
 		// 添加到Argus消息历史（MC发给PM的消息）

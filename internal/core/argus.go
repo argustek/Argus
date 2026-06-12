@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -458,15 +459,60 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	c.memory.Add(RoleUser, userMsg)
 
+	// [v0.8.6] 前置分流：只依赖 userMsg 的启发式检测（条件A+条件C）
+	// 条件A：用户 /level 命令
+	userLevel := ""
+	if strings.Contains(userMsg, "/level ") {
+		parts := strings.SplitN(userMsg, "/level ", 2)
+		if len(parts) == 2 {
+			userLevel = strings.TrimSpace(strings.Fields(parts[1])[0])
+			fmt.Printf("[Core:Level] 用户指定级别: %s\n", userLevel)
+		}
+	}
+
+	preFeatherweight := userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡"
+
+	// 条件C：启发式检测
+	if !preFeatherweight {
+		lowerUserMsg := strings.ToLower(userMsg)
+		isTinyTask := (strings.Contains(lowerUserMsg, "hello world") ||
+			strings.Contains(lowerUserMsg, "fibonacci") ||
+			strings.Contains(lowerUserMsg, "counter") ||
+			strings.Contains(lowerUserMsg, "单文件") ||
+			strings.Contains(lowerUserMsg, "short")) &&
+			(strings.Contains(lowerUserMsg, "create") ||
+				strings.Contains(lowerUserMsg, "write") ||
+				strings.Contains(lowerUserMsg, "创建") ||
+				strings.Contains(lowerUserMsg, "写个") ||
+				strings.Contains(lowerUserMsg, "写一个"))
+
+		isCodingTask := isTinyTask ||
+			(strings.Contains(lowerUserMsg, " and ") &&
+				(strings.Contains(lowerUserMsg, "go program") ||
+					strings.Contains(lowerUserMsg, ".go"))) ||
+			(strings.Contains(lowerUserMsg, "create") && strings.Contains(lowerUserMsg, "run"))
+
+		if isCodingTask {
+			preFeatherweight = true
+			fmt.Printf("[Core:Level] ⚡ 启发式检测→Featherweight (coding task detected)\n")
+		}
+	}
+
+	// 前置Featherweight → 直接 pmDirectExecute，跳过 PM ProcessReview
+	if preFeatherweight {
+		result.Level = "short-process"
+		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执（跳过PM分析）\n")
+		return c.pmDirectExecute(userMsg, "", result)
+	}
+
+	// ===== 非Featherweight：走完整 PM 分析 =====
 	var pmResponse string
 	var pmErr error
 
 	if c.pmProcessor != nil {
-		// [v0.7.2] 带工具调用的 PM（add_todo/update_todo 可用，ChatWithTools）
-		history := []ai.ChatMessage{} // 新对话，无历史
+		history := []ai.ChatMessage{}
 		var resp *ai.PMResponse
 		resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
-			// [v0.8] 过滤空delta和纯JSON delta（避免前端显示空消息）
 			trimmed := strings.TrimSpace(delta)
 			if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
 				return
@@ -477,7 +523,6 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		})
 		if pmErr == nil && resp != nil {
 			pmResponse = resp.Content
-			// [v0.8] 暴露 HasToolCalls 给分流器使用
 			if resp.HasToolCalls {
 				pmResponse += "\n[HAS_TOOL_CALLS]"
 			}
@@ -503,69 +548,13 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	c.memory.Add(RolePM, pmResponse)
 
-	// ===== [v0.8] 项目分级分流器 =====
-	// 1. 解析用户 /level 命令（用户优先权）
-	userLevel := ""
-	if strings.Contains(userMsg, "/level ") {
-		parts := strings.SplitN(userMsg, "/level ", 2)
-		if len(parts) == 2 {
-			userLevel = strings.TrimSpace(strings.Fields(parts[1])[0])
-			fmt.Printf("[Core:Level] 用户指定级别: %s\n", userLevel)
-		}
-	}
-
-	// 2. 判断是否为 Featherweight
-	isFeatherweight := false
-
-	// 条件A：用户显示指定 /level short
-	if userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡" {
-		isFeatherweight = true
-		fmt.Printf("[Core:Level] ⚡ 用户强制指定 Featherweight\n")
-	}
-
-	// 条件B：PM 明确标记了 short
-	if !isFeatherweight && (strings.Contains(pmResponse, `"level":"short"`) ||
+	// 条件B：PM 标记了 short（需 PM 返回后才能判断）
+	if strings.Contains(pmResponse, `"level":"short"`) ||
 		strings.Contains(pmResponse, `"level":"featherweight"`) ||
 		strings.Contains(pmResponse, "⚡") ||
-		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]")) {
-		isFeatherweight = true
-		fmt.Printf("[Core:Level] ⚡ PM标记 Featherweight\n")
-	}
-
-	// 条件C：启发式检测 — 用户消息明显是简单编码任务
-	// 即使 PM 说了 @SE（因为它没有工具），仍然强制走 Featherweight
-	if !isFeatherweight {
-		lowerUserMsg := strings.ToLower(userMsg)
-		// 明显是单文件简单任务的模式
-		isTinyTask := (strings.Contains(lowerUserMsg, "hello world") ||
-			strings.Contains(lowerUserMsg, "fibonacci") ||
-			strings.Contains(lowerUserMsg, "counter") ||
-			strings.Contains(lowerUserMsg, "单文件") ||
-			strings.Contains(lowerUserMsg, "short")) &&
-			(strings.Contains(lowerUserMsg, "create") ||
-				strings.Contains(lowerUserMsg, "write") ||
-				strings.Contains(lowerUserMsg, "创建") ||
-				strings.Contains(lowerUserMsg, "写个") ||
-				strings.Contains(lowerUserMsg, "写一个"))
-
-		// "and run" / "and execute" 进一步确认是编程任务
-		isCodingTask := isTinyTask ||
-			(strings.Contains(lowerUserMsg, " and ") &&
-				(strings.Contains(lowerUserMsg, "go program") ||
-					strings.Contains(lowerUserMsg, ".go"))) ||
-			(strings.Contains(lowerUserMsg, "create") && strings.Contains(lowerUserMsg, "run"))
-
-		if isCodingTask {
-			isFeatherweight = true
-			fmt.Printf("[Core:Level] ⚡ 启发式检测→Featherweight (coding task detected)\n")
-		}
-	}
-
-	// 3. Featherweight → pmDirectExecute（跳过 SE/Review/AP）
-	if isFeatherweight {
+		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]") {
 		result.Level = "short-process"
-		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执模式\n")
-		// [v0.8.5] 先发PM的文本回复到前端，避免直执失败后前端没任何显示
+		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执（PM标记）\n")
 		pmText := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
 		pmText = strings.TrimSpace(pmText)
 		if pmText != "" {
@@ -1786,11 +1775,6 @@ func findMatchingBracket(s string) int {
 func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *ProcessResult) *ProcessResult {
 	fmt.Printf("[Core:Feather] ⚡ PM直执模式启动\n")
 
-	// [v0.8] 静默模式：抑制所有中间action事件到前端（一条消息搞定）
-	prevSilent := c.silent
-	c.silent = true
-	defer func() { c.silent = prevSilent }()
-
 	c.emitStatus("execute", "pm", "busy")
 
 	start := time.Now()
@@ -1929,9 +1913,45 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 	}
 
 	// Step 2: 执行 actions（executor="pm"）
+	t2 := time.Now()
 	execResults, execErr := c.executeActions(actions, "pm")
+	os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\n", time.Since(t2))), 0644)
 	result.Outputs = execResults
 	result.Actions = actions
+
+	// [v0.8.2] 自动补 exec：LLM只写了代码没运行，根据文件类型自动执行（不消耗LLM调用）
+	if execErr == nil {
+		hasWriteFile := false
+		hasExec := false
+		var lastPath string
+		for _, a := range actions {
+			if a.Type == "write_file" || a.Type == "edit_file" {
+				hasWriteFile = true
+				if a.Path != "" {
+					lastPath = a.Path
+				}
+			}
+			if a.Type == "exec" {
+				hasExec = true
+			}
+		}
+		if hasWriteFile && !hasExec && lastPath != "" {
+			cmd := inferExecCommand(lastPath)
+			if cmd != "" {
+				ta := time.Now()
+				autoAction := ai.SEAction{Type: "exec", Command: cmd}
+				autoResult, _ := c.executeActions([]ai.SEAction{autoAction}, "pm")
+				os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\nfirst: %v\nauto-exec: %v\n", time.Since(t2), time.Since(t2), time.Since(ta))), 0644)
+				execResults = append(execResults, autoResult...)
+				actions = append(actions, autoAction)
+				result.Actions = actions
+				result.Outputs = execResults
+				if len(autoResult) > 0 && strings.HasPrefix(autoResult[0], "✅") {
+					execErr = nil
+				}
+			}
+		}
+	}
 
 	// Step 3: 检查结果 + 重试（最多3次）
 	maxRetries := 3
@@ -2012,50 +2032,30 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 		}
 	}
 
-	// Step 4: 调用 LLM 生成自然语言最终总结（利用PM的总结能力）
-	// [v0.8.1] 退出静默模式，允许最终总结和 done 状态发送到前端
-	c.silent = false
-
+	// Step 4: 汇报结果（emit到前端 + 存memory供上下文）
 	if result.Error != nil {
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
+		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", result.Error))
 	} else if len(execResults) > 0 {
-		// 用 LLM 生成自然语言摘要（不是手动拼字符串）
-		summaryPrompt := fmt.Sprintf(`用1-2句话向用户汇报你完成的工作（你是PM，直接对用户说话）：
-
-用户任务：%s
-你执行的操作和结果：
-%s
-
-直接输出汇报文本即可（不要太长，用自然语言）。`, userMsg, strings.Join(execResults, "\n"))
-
-		summaryCtx, summaryCancel := context.WithTimeout(c.ctx, c.timeout)
-		var finalSummary string
-		var summaryErr error
-		finalSummary, summaryErr = c.client.ChatStream(summaryCtx, c.prompts.Get(RolePM), nil, summaryPrompt, c.language, nil, nil)
-		summaryCancel()
-
-		if summaryErr != nil || len(strings.TrimSpace(finalSummary)) < 3 {
-			// fallback: 简洁的 exec 结果
-			finalSummary = fmt.Sprintf("✅ 完成 (%d 个操作): %s", len(actions), strings.Join(execResults, "\n"))
+		// 用LLM第一次的displayContent做自然语言汇报，后面附加执行结果
+		cleanSummary := c.extractCleanSummary(displayContent)
+		if cleanSummary != "" {
+			msg := cleanSummary
+			msg += "\n" + strings.Join(execResults, "\n")
+			c.emit("pm_to_user", "@USR "+msg)
+			c.memory.Add(RolePM, msg)
+		} else {
+			msg := strings.Join(execResults, "\n")
+			c.emit("pm_to_user", "@USR ✅ 完成\n"+msg)
+			c.memory.Add(RolePM, msg)
 		}
-		// [v0.8.1] 防止重复 @USR（LLM summary 可能已包含）
-		if strings.HasPrefix(finalSummary, "@USR") {
-			finalSummary = strings.TrimSpace(strings.TrimPrefix(finalSummary, "@USR"))
-		}
-		c.emit("pm_to_user", fmt.Sprintf("@USR %s", finalSummary))
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)
 		if cleanSummary != "" {
-			if strings.HasPrefix(cleanSummary, "@USR") {
-				cleanSummary = strings.TrimSpace(strings.TrimPrefix(cleanSummary, "@USR"))
-			}
-			c.emit("pm_to_user", fmt.Sprintf("@USR %s", cleanSummary))
-		} else {
-			c.emit("pm_to_user", "@USR ✅ 完成")
+			c.emit("pm_to_user", "@USR "+cleanSummary)
+			c.memory.Add(RolePM, cleanSummary)
 		}
 	}
-
-	c.memory.Add(RolePM, displayContent)
 	c.emitStatus("done", "none", "idle")
 	result.Success = (result.Error == nil)
 	return result
@@ -2428,6 +2428,28 @@ func truncateContent(content string, maxLen int) string {
 		return content
 	}
 	return content[:maxLen] + fmt.Sprintf("\n... [截断，共 %d 字符]", len(content))
+}
+
+// inferExecCommand 根据文件扩展名推断执行命令
+func inferExecCommand(filePath string) string {
+	ext := strings.ToLower(filepath.Ext(filepath.Base(filePath)))
+	switch ext {
+	case ".go":
+		return "go run " + filepath.Base(filePath)
+	case ".py":
+		return "python " + filepath.Base(filePath)
+	case ".js":
+		return "node " + filepath.Base(filePath)
+	case ".ts":
+		return "npx ts-node " + filepath.Base(filePath)
+	case ".rs":
+		return "cargo run"
+	case ".sh":
+		return "bash " + filepath.Base(filePath)
+	case ".bat", ".cmd":
+		return filepath.Base(filePath)
+	}
+	return ""
 }
 
 func (c *ArgusCore) extractDisplayText(response string) string {

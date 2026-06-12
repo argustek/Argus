@@ -582,7 +582,23 @@ func trimDataPrefix(line string) string {
 	return line
 }
 
-// ChatWithTools 带工具调用的聊天
+// isToolUnsupportedError 判断模型是否不支持工具调用
+func isToolUnsupportedError(errStr string) bool {
+	patterns := []string{
+		"tool choice", "tool_choice", "tool-call-parser", "enable-auto-tool-choice",
+		"Tools are not supported", "not support tools", "does not support",
+		"unit variant", "newtype variant", // Rust serde: tool_choice 枚举解析失败
+		"tools paring", "tools.0.type", "tools.0.function",
+	}
+	for _, p := range patterns {
+		if strings.Contains(errStr, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ChatWithTools 带工具调用的聊天（支持自动降级：模型不支持工具时走普通 Chat）
 func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool) (*ChatResponse, error) {
 	if err := c.checkBeforeCall(); err != nil {
 		return nil, err
@@ -594,12 +610,13 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	messages = append(messages, history...)
 	messages = append(messages, Message{Role: "user", Content: userContent})
 
+	// 尝试带工具调用
 	req := ChatRequest{
 		Model:      c.config.Model,
 		Messages:   messages,
 		Stream:     false,
 		Tools:      tools,
-		ToolChoice: "auto", // [v0.7.2] DeepSeek不支持"required"会报错，用auto+prompt引导
+		ToolChoice: "auto",
 	}
 
 	data, err := json.Marshal(req)
@@ -630,6 +647,11 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 
 	if resp.StatusCode != http.StatusOK {
 		c.recordFailure()
+		// 模型不支持工具调用时降级重试
+		if isToolUnsupportedError(string(body)) {
+			fmt.Printf("[AI-Client] ⚠️ %s 不支持工具调用，降级为普通 Chat\n", c.config.Model)
+			return c.chatNoTools(ctx, systemPrompt, history, userContent)
+		}
 		return nil, fmt.Errorf("API error: %s", string(body))
 	}
 
@@ -639,11 +661,15 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 		return nil, fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
-	// 记录发送的tools数量（用于调试ToolCalls=0问题）
 	chatResp.ToolsDefined = len(tools)
 
 	if chatResp.Error != nil {
 		c.recordFailure()
+		// 错误响应中也可能包含工具不支持信息
+		if isToolUnsupportedError(chatResp.Error.Message) {
+			fmt.Printf("[AI-Client] ⚠️ %s 不支持工具调用（错误响应），降级为普通 Chat\n", c.config.Model)
+			return c.chatNoTools(ctx, systemPrompt, history, userContent)
+		}
 		return nil, fmt.Errorf("API error: %s", chatResp.Error.Message)
 	}
 
@@ -669,6 +695,72 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 		}
 	}
 
+	return &chatResp, nil
+}
+
+// chatNoTools 无工具调用的聊天（供 ChatWithTools 降级使用）
+func (c *Client) chatNoTools(ctx context.Context, systemPrompt string, history []Message, userContent string) (*ChatResponse, error) {
+	messages := []Message{
+		{Role: "system", Content: systemPrompt},
+	}
+	messages = append(messages, history...)
+	messages = append(messages, Message{Role: "user", Content: userContent})
+
+	req := ChatRequest{
+		Model:    c.config.Model,
+		Messages: messages,
+		Stream:   false,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request failed: %v", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.config.BaseURL+"/chat/completions", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, fmt.Errorf("create request failed: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.config.APIKey)
+
+	resp, err := c.client.Do(httpReq)
+	if err != nil {
+		c.recordFailure()
+		return nil, fmt.Errorf("send request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.recordFailure()
+		return nil, fmt.Errorf("read response failed: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		c.recordFailure()
+		return nil, fmt.Errorf("API error: %s", string(body))
+	}
+
+	var chatResp ChatResponse
+	if err := json.Unmarshal(body, &chatResp); err != nil {
+		c.recordFailure()
+		return nil, fmt.Errorf("unmarshal response failed: %v", err)
+	}
+
+	chatResp.ToolsDefined = 0
+
+	if chatResp.Error != nil {
+		c.recordFailure()
+		return nil, fmt.Errorf("API error: %s", chatResp.Error.Message)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		c.recordFailure()
+		return nil, fmt.Errorf("no response from AI")
+	}
+
+	c.recordSuccess()
 	return &chatResp, nil
 }
 

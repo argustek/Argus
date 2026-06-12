@@ -699,6 +699,8 @@ func (a *App) initChatManager() {
 		if aiClient != nil {
 			a.bridge = chat.NewBridge(aiClient, a.chatManager.GetExecutor(), projectDir)
 			a.bridge.SetContext(a.ctx)
+			// [v0.8.6] 设置Bridge繁忙检测，C Monitor调用handleToPM前检查
+			a.chatManager.SetBridgeBusyChecker(a.bridge.IsProcessing)
 
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
@@ -914,6 +916,10 @@ func (a *App) emitToFrontend(eventType string, payload interface{}, sourceLoc st
 	payloadJSON, _ := json.Marshal(payload)
 	payloadStr := string(payloadJSON)
 
+	if a.chatManager == nil {
+		fmt.Printf("[emitToFrontend] ⚠️ chatManager=nil, 跳过 %s from %s\n", eventType, sourceLoc)
+		return
+	}
 	msgBus := a.chatManager.GetMessageBus()
 	if msgBus != nil {
 		checksum := fmt.Sprintf("%d:%s:%s", len(payloadStr),
