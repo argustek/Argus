@@ -459,10 +459,6 @@ onMounted(async () => {
       }
     }
 
-    // PM消息由专用pm_message通道处理，new-message不再处理PM
-    if (msg.role === 'pm') {
-      return
-    }
     if (streamingRole.value === msg.role || msg.role === 'se' || msg.role === 'ap') {
       // [G59] SE特殊处理：优先查找已有_execData的操作卡片
       if (msg.role === 'se') {
@@ -560,25 +556,23 @@ onMounted(async () => {
     }
   })
 
-  // [G57] 监听PM消息事件 - 统一为AP模式（单一通道，直接push）
+  // [G57] 监听PM消息事件（保留向后兼容，已通过MessageBus→new-message下发）
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string; _msgId?: string }) => {
-    console.log('[PROBE] 📨 pm_message received:', data.delta?.substring(0, 50), 'msgId:', data._msgId)
     if (!data.delta) return
-
-    // [G63] 自动ACK
     ackMessage(data._msgId || '')
 
-    // [G57] 简单可靠：像AP一样直接push新消息
+    // 去重：检查是否已存在相同内容的PM消息
+    const lastPm = [...messages.value].reverse().find(m => m.role === 'pm')
+    if (lastPm && (lastPm.content || '').trim() === (data.delta || '').trim()) {
+      return
+    }
     const pmMsg = {
       role: 'pm',
       content: data.delta,
       timestamp: Date.now()
     } as any
     messages.value.push(pmMsg)
-    console.log('[PROBE] ✅ PM pushed! total msgs:', messages.value.length)
-    // [G60] 记录收水
-    recordReceive('pm', data._msgId || 'pm_' + Date.now(), data.delta, 'pm_message')
   })
 
   // 监听AP消息事件（AP审批结果）
@@ -1242,8 +1236,14 @@ async function handleSendMessage(msg: string) {
 
 async function handleSelectProject(dir: string) {
   try {
-    if (dir === '') {
-      // 清除工作目录
+    if (dir === 'browse') {
+      const selected = await OpenFolderDialog()
+      if (selected) {
+        await SetWorkDir(selected)
+        workDir.value = selected
+        recentProjects.value = await GetRecentProjects()
+      }
+    } else if (dir === '') {
       workDir.value = ''
     } else {
       await SetWorkDir(dir)

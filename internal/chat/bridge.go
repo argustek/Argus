@@ -15,21 +15,21 @@ import (
 )
 
 type Bridge struct {
-	mu            sync.RWMutex
-	argus         *core.ArgusCore
-	executor      *executor.Executor
-	msgBus        *MessageBus
-	contextWindow *memory.ContextWindow // [v0.7.2] Token 监控 + 窗口管理
+	mu             sync.RWMutex
+	argus          *core.ArgusCore
+	executor       *executor.Executor
+	msgBus         *MessageBus
+	contextWindow  *memory.ContextWindow  // [v0.7.2] Token 监控 + 窗口管理
 	contextBuilder *memory.ContextBuilder // [v0.7.2] 任务上下文组装器
 	compressor     *memory.Compressor     // [v0.7.2] 对话压缩器
 
-	onMessage func(msg *Message)
-	onChunk   func(delta string)
+	onMessage            func(msg *Message)
+	onChunk              func(delta string)
 	onProjectStateChange func(state string) // [FIX-v0.8.1] 项目状态回调（running/done/error）
-	ctx       context.Context
-	cancel    func()
+	ctx                  context.Context
+	cancel               func()
 
-	isProcessing bool
+	isProcessing  bool
 	writeDebugLog func(content string)
 }
 
@@ -39,10 +39,10 @@ func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Br
 	argusCore := core.NewArgusCore(aiClient, exec, workDir)
 
 	b := &Bridge{
-		argus:     argusCore,
-		executor:  exec,
-		ctx:       ctx,
-		cancel:    cancel,
+		argus:    argusCore,
+		executor: exec,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 
 	b.argus.SetContext(ctx)
@@ -83,7 +83,9 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 			executor := "se"
 			if m, ok := data.(map[string]interface{}); ok {
 				if e, exists := m["executor"]; exists {
-					if s, ok := e.(string); ok && s != "" { executor = s }
+					if s, ok := e.(string); ok && s != "" {
+						executor = s
+					}
 				}
 			}
 			bus.Send(executor, eventName, eventName, PathSEExec, "Bridge:action:"+eventName, data)
@@ -165,8 +167,8 @@ func (b *Bridge) pushContextBuilt(taskID string, contextStr string) {
 	}
 	data := map[string]interface{}{
 		"task_id":   taskID,
-		"context":    contextStr,
-		"timestamp":  time.Now().Unix(),
+		"context":   contextStr,
+		"timestamp": time.Now().Unix(),
 	}
 	msgId := b.msgBus.Send("system", "", "context_built", PathSystem, "Bridge:pushContextBuilt", data)
 	if b.writeDebugLog != nil {
@@ -180,9 +182,9 @@ func (b *Bridge) pushCompressDone(taskID string, compressedCount int) {
 		return
 	}
 	data := map[string]interface{}{
-		"task_id":         taskID,
+		"task_id":          taskID,
 		"compressed_count": compressedCount,
-		"timestamp":       time.Now().Unix(),
+		"timestamp":        time.Now().Unix(),
 	}
 	msgId := b.msgBus.Send("system", "", "compress_done", PathSystem, "Bridge:pushCompressDone", data)
 	if b.writeDebugLog != nil {
@@ -192,52 +194,62 @@ func (b *Bridge) pushCompressDone(taskID string, compressedCount int) {
 
 func (b *Bridge) emitStatus(status string) {
 	if b.onMessage != nil {
-		msg := &Message{
+		b.onMessage(&Message{
 			From:      "system",
 			To:        "frontend",
 			Role:      "status",
 			Content:   status,
 			Timestamp: time.Now(),
-		}
-		b.onMessage(msg)
+		})
 	}
 }
 
-// [v0.7.2] emitSystemMsg 在聊天历史中插入一条系统消息（用户可见，类似 Trae IDE 的 "正在压缩对话..."）
 func (b *Bridge) emitSystemMsg(content string) {
 	if b.onMessage != nil {
-		msg := &Message{
+		b.onMessage(&Message{
 			From:      "system",
 			To:        "frontend",
 			Role:      "system",
 			Content:   content,
 			Timestamp: time.Now(),
-		}
-		b.onMessage(msg)
+		})
 	}
 }
 
 func (b *Bridge) onCoreMessage(source, content string) {
-	if b.writeDebugLog != nil && content != "" {
-		role := b.roleFromSource(source)
-		b.writeDebugLog(fmt.Sprintf("%s: %s", strings.ToUpper(role), content))
+	if content == "" {
+		return
 	}
-	if b.onMessage != nil && content != "" {
+
+	// pm_to_user 走 MessageBus（确保 conversation.log 记录一致）
+	if source == "pm_to_user" && b.msgBus != nil && b.ctx != nil {
+		displayContent := strings.ReplaceAll(content, "⚡", "")
+		b.msgBus.Send("pm", displayContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": displayContent})
+		return
+	}
+
+	if b.onMessage != nil {
 		parts := strings.Split(source, "_to_")
 		from := parts[0]
 		to := ""
 		if len(parts) > 1 {
 			to = parts[1]
 		}
-		msg := &Message{
+		b.onMessage(&Message{
 			From:      from,
 			To:        to,
 			Role:      b.roleFromSource(source),
 			Content:   content,
 			Timestamp: time.Now(),
-		}
-		b.onMessage(msg)
+		})
 	}
+}
+
+func (b *Bridge) sendToMsgBus(role, content string, path MessagePath) {
+	if b.msgBus == nil || b.ctx == nil {
+		return
+	}
+	b.msgBus.Send(role, content, role+"_to_user", path, "Bridge:"+role, map[string]interface{}{"content": content})
 }
 
 func (b *Bridge) onCoreChunk(delta string) {
@@ -332,10 +344,10 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 	// [v0.8.1] 推送项目级别到前端（short/normal/full）
 	if result.Level != "" && b.onMessage != nil {
 		b.onMessage(&Message{
-			From:    "system",
-			To:      "frontend",
-			Role:    "project_level",
-			Content: result.Level,
+			From:      "system",
+			To:        "frontend",
+			Role:      "project_level",
+			Content:   result.Level,
 			Timestamp: time.Now(),
 		})
 	}

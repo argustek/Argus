@@ -2,23 +2,24 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"argus/internal/chat"
 	"argus/internal/types"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
 	fmt.Println("[Argus] Starting...")
 
-	// 1. 加载配置
-	config, err := loadConfig(".argus/config.yaml")
+	// 1. 加载配置（统一使用 config/config.json）
+	config, err := loadConfig("config/config.json")
 	if err != nil {
 		fmt.Printf("[Argus] Failed to load config: %v\n", err)
 		os.Exit(1)
@@ -31,7 +32,6 @@ func main() {
 	cmdC.Stderr = os.Stderr
 	if err := cmdC.Start(); err != nil {
 		fmt.Printf("[Argus] Failed to start C: %v\n", err)
-		// C启动失败，继续运行，但功能受限
 	} else {
 		fmt.Println("[Argus] C started successfully")
 		defer func() {
@@ -44,7 +44,12 @@ func main() {
 	time.Sleep(2 * time.Second)
 
 	// 4. 初始化对话管理器
-	workDir := "."
+	workDir := config.WorkDir
+	if workDir == "" {
+		cwd, _ := os.Getwd()
+		workDir = cwd
+	}
+	workDir, _ = filepath.Abs(workDir)
 	chatManager, err := chat.NewManager(*config, workDir, ".")
 	if err != nil {
 		fmt.Printf("[Argus] Failed to init chat manager: %v\n", err)
@@ -68,7 +73,6 @@ func main() {
 	reader := bufio.NewReader(os.Stdin)
 	inputChan := make(chan string)
 
-	// 后台读取输入
 	go func() {
 		for {
 			fmt.Print("> ")
@@ -88,17 +92,11 @@ func main() {
 				fmt.Println("[Argus] Input closed")
 				return
 			}
-
-			// 去掉换行符
 			input = input[:len(input)-1]
-
-			// 检查退出
 			if input == "quit" || input == "exit" {
 				fmt.Println("[Argus] Goodbye!")
 				return
 			}
-
-			// 处理用户输入
 			if err := chatManager.HandleUserInput(input); err != nil {
 				fmt.Printf("[Error] %v\n", err)
 			}
@@ -112,28 +110,109 @@ func main() {
 	}
 }
 
-// loadConfig 加载配置
+type guiConfig struct {
+	APIConfigs []struct {
+		ID        string `json:"id"`
+		Provider  string `json:"provider"`
+		BaseURL   string `json:"baseUrl"`
+		APIKey    string `json:"apiKey"`
+		ModelName string `json:"modelName"`
+		IsDefault bool   `json:"isDefault"`
+	} `json:"apiConfigs"`
+	WorkDir           string `json:"workDir"`
+	PmDecisionAlert   bool   `json:"pmDecisionAlert"`
+	UseSeparateModels bool   `json:"useSeparateModels"`
+	PMConfigID        string `json:"pmConfigId"`
+	SEConfigID        string `json:"seConfigId"`
+	APConfigID        string `json:"apConfigId"`
+	APEnabled         bool   `json:"apEnabled"`
+}
+
 func loadConfig(path string) (*types.Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot read %s: %w", path, err)
 	}
 
-	var config types.Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, err
+	var gc guiConfig
+	if err := json.Unmarshal(data, &gc); err != nil {
+		return nil, fmt.Errorf("invalid JSON in %s: %w", path, err)
 	}
 
-	// 设置默认值
-	if config.CheckInterval == 0 {
-		config.CheckInterval = 30
-	}
-	if config.CommitInterval == 0 {
-		config.CommitInterval = 5
-	}
-	if config.HeartbeatTimeout == 0 {
-		config.HeartbeatTimeout = 300
+	config := &types.Config{
+		WorkDir:           gc.WorkDir,
+		CheckInterval:     30,
+		CommitInterval:    5,
+		HeartbeatTimeout:  300,
+		PmDecisionAlert:   gc.PmDecisionAlert,
+		UseSeparateModels: gc.UseSeparateModels,
 	}
 
-	return &config, nil
+	findCfg := func(id string) *struct {
+		ID        string `json:"id"`
+		Provider  string `json:"provider"`
+		BaseURL   string `json:"baseUrl"`
+		APIKey    string `json:"apiKey"`
+		ModelName string `json:"modelName"`
+		IsDefault bool   `json:"isDefault"`
+	} {
+		for i := range gc.APIConfigs {
+			if gc.APIConfigs[i].ID == id {
+				return &gc.APIConfigs[i]
+			}
+		}
+		return nil
+	}
+
+	if pm := findCfg(gc.PMConfigID); pm != nil {
+		config.APIConfig = types.APIConfig{
+			Provider: pm.Provider, BaseURL: pm.BaseURL,
+			APIKey: pm.APIKey, Model: pm.ModelName,
+		}
+	} else {
+		for i := range gc.APIConfigs {
+			if gc.APIConfigs[i].IsDefault {
+				config.APIConfig = types.APIConfig{
+					Provider: gc.APIConfigs[i].Provider,
+					BaseURL:  gc.APIConfigs[i].BaseURL,
+					APIKey:   gc.APIConfigs[i].APIKey,
+					Model:    gc.APIConfigs[i].ModelName,
+				}
+				break
+			}
+		}
+	}
+	if config.APIConfig.Provider == "" && len(gc.APIConfigs) > 0 {
+		config.APIConfig = types.APIConfig{
+			Provider: gc.APIConfigs[0].Provider,
+			BaseURL:  gc.APIConfigs[0].BaseURL,
+			APIKey:   gc.APIConfigs[0].APIKey,
+			Model:    gc.APIConfigs[0].ModelName,
+		}
+	}
+
+	if gc.UseSeparateModels {
+		if pm := findCfg(gc.PMConfigID); pm != nil {
+			config.PMConfig = types.APIConfig{
+				Provider: pm.Provider, BaseURL: pm.BaseURL,
+				APIKey: pm.APIKey, Model: pm.ModelName,
+			}
+		}
+		if se := findCfg(gc.SEConfigID); se != nil {
+			config.SEConfig = types.APIConfig{
+				Provider: se.Provider, BaseURL: se.BaseURL,
+				APIKey: se.APIKey, Model: se.ModelName,
+			}
+		}
+		if gc.APEnabled {
+			if ap := findCfg(gc.APConfigID); ap != nil {
+				config.APConfig = types.APIConfig{
+					Provider: ap.Provider, BaseURL: ap.BaseURL,
+					APIKey: ap.APIKey, Model: ap.ModelName,
+				}
+			}
+		}
+	}
+
+	return config, nil
 }

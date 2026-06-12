@@ -514,10 +514,19 @@ func writeExitLog(msg string) {
 
 // initChatManager 初始化对话管理器
 func (a *App) initChatManager() {
+	if a.chatManager != nil {
+		return
+	}
+
 	a.addLog("【ChatManager】初始化...")
 
 	// 获取项目目录（避免监控Argus自己）
 	projectDir := a.getProjectDir()
+	if projectDir == "" {
+		a.addLog("【ChatManager】❌ work_dir 未配置，跳过初始化")
+		close(a.readyChan)
+		return
+	}
 	a.addLog(fmt.Sprintf("【ChatManager】项目目录: %s", projectDir))
 
 	// 构造配置
@@ -641,12 +650,8 @@ func (a *App) initChatManager() {
 		}
 		if !a.emittedMsgIDs[msgID] {
 			a.emittedMsgIDs[msgID] = true
-			if msg.Source == "pm_to_user" || msg.Source == "pm_to_se" {
-				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SILENT #%d role=%s source=%s (PM流式已显示)", msgID, msg.Role, msg.Source))
-			} else {
-				a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("V1OnMsg:%s", msg.Source), chat.PathSEToUser)
-				a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s source=%s", msgID, msg.Role, msg.Source))
-			}
+			a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("V1OnMsg:%s", msg.Source), chat.PathSEToUser)
+			a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] EMIT #%d role=%s source=%s", msgID, msg.Role, msg.Source))
 		} else {
 			a.writeDebugLog(fmt.Sprintf("[OnMsgAdded] SKIP_DUP #%d role=%s", msgID, msg.Role))
 		}
@@ -814,6 +819,10 @@ func (a *App) initChatManagerCLI() {
 	}
 
 	projectDir := a.getProjectDir()
+	if projectDir == "" {
+		fmt.Println("❌ work_dir 未配置，请在 config/config.json 中设置 workDir 或通过 GUI 选择")
+		return
+	}
 	fmt.Printf("[CLI] 项目目录: %s\n", projectDir)
 
 	config := types.Config{
@@ -1695,14 +1704,10 @@ func (a *App) SaveDingTalkConfig(config DingTalkConfig) error {
 func (a *App) loadMessages() {
 	workDir := a.GetWorkDir()
 	if workDir == "" {
-		// 没有设置工作目录时，使用旧的全局路径（向后兼容）
-		messagesPath := filepath.Join(a.getConfigDir(), "messages.json")
-		a.loadMessagesFromPath(messagesPath)
-	} else {
-		// 使用工作目录下的消息文件
-		messagesPath := filepath.Join(workDir, ".argus", "messages.json")
-		a.loadMessagesFromPath(messagesPath)
+		return
 	}
+	messagesPath := filepath.Join(workDir, ".argus", "messages.json")
+	a.loadMessagesFromPath(messagesPath)
 }
 
 func (a *App) loadMessagesFromPath(messagesPath string) {
@@ -1720,14 +1725,11 @@ func (a *App) loadMessagesFromPath(messagesPath string) {
 
 func (a *App) saveMessages() {
 	workDir := a.GetWorkDir()
-	var messagesPath string
-
 	if workDir == "" {
-		messagesPath = filepath.Join(a.getConfigDir(), "messages.json")
-	} else {
-		messagesPath = filepath.Join(workDir, ".argus", "messages.json")
+		return
 	}
 
+	messagesPath := filepath.Join(workDir, ".argus", "messages.json")
 	data, err := json.MarshalIndent(a.messages, "", "  ")
 	if err != nil {
 		return
@@ -1874,6 +1876,16 @@ func (a *App) SetWorkDir(dir string) error {
 	if a.chatManager != nil {
 		a.chatManager.SetWorkDir(dir)
 		a.addLog(fmt.Sprintf("【SetWorkDir】更新ChatManager工作目录: %s", dir))
+	} else {
+		a.addLog(fmt.Sprintf("【SetWorkDir】首次设置工作目录: %s，初始化 ChatManager...", dir))
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("[SetWorkDir] 💥 initChatManager panic: %v\n", r)
+				}
+			}()
+			a.initChatManager()
+		}()
 	}
 
 	return a.saveConfigToFile()
@@ -3344,6 +3356,16 @@ func (a *App) SendMessage(content string) error {
 
 	fmt.Printf("[SendMessage] Step 3: chatManager: %v\n", a.chatManager != nil)
 
+	if a.chatManager == nil {
+		errMsg := "⚠️ 请先设置工作目录（点击顶部「工作目录」按钮选择项目文件夹）"
+		a.addLog(errMsg)
+		chatMsg := a.newChatMessage("error", errMsg)
+		a.messages = append(a.messages, chatMsg)
+		a.saveMessages()
+		a.emitToFrontend("new-message", chatMsg, "SendMessage:NoWorkDir", chat.PathSystem)
+		return fmt.Errorf("%s", errMsg)
+	}
+
 	// 使用新的 ChatManager 处理消息
 	if a.chatManager != nil {
 		fmt.Printf("[SendMessage] Step 4: 进入 chatManager 分支\n")
@@ -3758,21 +3780,8 @@ func (a *App) getProjectDir() string {
 		}
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		fmt.Printf("[getProjectDir] 获取 exe 路径失败: %v，使用当前目录\n", err)
-		return "."
-	}
-	exeDir := filepath.Dir(exePath)
-	projectDir := filepath.Join(exeDir, "project")
-
-	if err := os.MkdirAll(projectDir, 0755); err != nil {
-		fmt.Printf("[getProjectDir] 创建 project 目录失败: %v\n", err)
-		return "."
-	}
-
-	fmt.Printf("[getProjectDir] 使用默认 project 目录: %s\n", projectDir)
-	return projectDir
+	fmt.Printf("[getProjectDir] ⚠️ work_dir 未配置，请通过界面选择工作目录\n")
+	return ""
 }
 
 // [v0.7.1] initMCPManager 初始化 MCP Manager，启动配置中的所有 Server

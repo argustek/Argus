@@ -174,28 +174,28 @@ type StreamAuditEntry struct {
 
 // [G60] 收水审计条目（前端回传，用于对比校验）
 type ReceiveAuditEntry struct {
-	Timestamp time.Time
-	Role      string
-	MessageID string
-	Content   string
+	Timestamp  time.Time
+	Role       string
+	MessageID  string
+	Content    string
 	ContentLen int
-	Source    string // 事件来源: ai-stream-chunk/pm_message/ap_message/new-message/exec_start
+	Source     string // 事件来源: ai-stream-chunk/pm_message/ap_message/new-message/exec_start
 }
 
 // Manager 对话管理器
 type Manager struct {
-	router      *Router
-	aiClient    *ai.Client // 默认AI客户端（所有角色共用，除非有独立配置）
-	pmClient    *ai.Client // PM专用客户端（nil时用aiClient）
-	seClient    *ai.Client // SE专用客户端（nil时用aiClient）
-	apClient    *ai.Client // AP专用客户端（nil时用aiClient）
-	pmProcessor *ai.PMProcessor
-	seProcessor *ai.SEProcessor
-	apProcessor *ai.APProcessor
+	router          *Router
+	aiClient        *ai.Client // 默认AI客户端（所有角色共用，除非有独立配置）
+	pmClient        *ai.Client // PM专用客户端（nil时用aiClient）
+	seClient        *ai.Client // SE专用客户端（nil时用aiClient）
+	apClient        *ai.Client // AP专用客户端（nil时用aiClient）
+	pmProcessor     *ai.PMProcessor
+	seProcessor     *ai.SEProcessor
+	apProcessor     *ai.APProcessor
 	pmExecutor      *executor.Executor
 	seExecutor      *executor.Executor
 	fileTracker     *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
-	lspClient       *ai.LSPClient             // [P0-1] LSP 客户端（gopls daemon）
+	lspClient       *ai.LSPClient               // [P0-1] LSP 客户端（gopls daemon）
 	boardManager    *board.Manager
 	cMonitor        *monitor.CMonitor
 	memoryManager   *MemoryManager
@@ -211,10 +211,10 @@ type Manager struct {
 
 	history []Message
 
-	msgCounter int64             // 消息ID计数器（原子递增）
-	lastMsgIDs map[string]string // 每个角色的最后一条消息ID (role -> msgID)
-	streamingMsgIDs map[string]string // 流式消息ID追踪 (role -> messageId) [G49: 前后端一致性]
-	streamAuditLog []StreamAuditEntry // [G52] 送水审计日志（用于前后端一致性校验）
+	msgCounter      int64               // 消息ID计数器（原子递增）
+	lastMsgIDs      map[string]string   // 每个角色的最后一条消息ID (role -> msgID)
+	streamingMsgIDs map[string]string   // 流式消息ID追踪 (role -> messageId) [G49: 前后端一致性]
+	streamAuditLog  []StreamAuditEntry  // [G52] 送水审计日志（用于前后端一致性校验）
 	receiveAuditLog []ReceiveAuditEntry // [G60] 收水审计日志（前端回传，用于对比校验）
 
 	reviewCount   int // PM审核轮次计数（防死循环）
@@ -223,13 +223,13 @@ type Manager struct {
 
 	resetMu sync.RWMutex
 
-	processingMu    sync.Mutex         // 消息处理互斥锁（防止并发消息导致SE循环）
-	isProcessing    bool               // 是否正在处理消息
-	processingStartTime time.Time      // 处理开始时间（用于超时检测）
-	pendingQueue    []string           // 等待处理的消息队列
-	pendingMu       sync.Mutex         // 队列互斥锁
-	cancelFunc      context.CancelFunc // 取消当前AI调用的函数
-	resetGeneration int64              // 复位世代号，每次复位+1，用于拦截复位后返回的幽灵调用
+	processingMu        sync.Mutex         // 消息处理互斥锁（防止并发消息导致SE循环）
+	isProcessing        bool               // 是否正在处理消息
+	processingStartTime time.Time          // 处理开始时间（用于超时检测）
+	pendingQueue        []string           // 等待处理的消息队列
+	pendingMu           sync.Mutex         // 队列互斥锁
+	cancelFunc          context.CancelFunc // 取消当前AI调用的函数
+	resetGeneration     int64              // 复位世代号，每次复位+1，用于拦截复位后返回的幽灵调用
 
 	currentRole           string        // 当前正在处理的角色
 	currentSETask         string        // [FIX-20260529] SE当前正在执行的任务描述（互斥检查用）
@@ -251,9 +251,9 @@ type Manager struct {
 	isRecovering          bool          // 恢复模式标志（防止重复addHistory）
 
 	// PM健康状态追踪
-	pmConsecutiveFailures int           // PM连续API失败次数
-	pmLastFailureTime     time.Time     // PM最后一次失败时间
-	pmUnhealthySince      time.Time     // PM进入不健康状态的时间点
+	pmConsecutiveFailures int       // PM连续API失败次数
+	pmLastFailureTime     time.Time // PM最后一次失败时间
+	pmUnhealthySince      time.Time // PM进入不健康状态的时间点
 	workDir               string
 	configDir             string // IDE系统目录（调试日志存放位置）
 	config                types.Config
@@ -278,9 +278,9 @@ type Manager struct {
 	}
 
 	// [v0.7.2] Context Management Bridge（上下文管理桥接）
-	contextWindow   *memory.ContextWindow // Token 监控 + 窗口管理（TokenMonitor 面板数据源）
+	contextWindow  *memory.ContextWindow  // Token 监控 + 窗口管理（TokenMonitor 面板数据源）
 	contextBuilder *memory.ContextBuilder // 任务上下文组装器（注入 PM/SE system prompt）
-	compressor     *memory.Compressor    // 对话压缩器（自动裁剪旧对话）
+	compressor     *memory.Compressor     // 对话压缩器（自动裁剪旧对话）
 
 	// [v0.8.6] Bridge繁忙检测（C Monitor调用handleToPM前检查，防止中断Featherweight）
 	bridgeBusyFunc func() bool
@@ -295,15 +295,15 @@ type TodoItem struct {
 }
 
 type BackendStatus struct {
-	Stage        string `json:"stage"`
-	PMStatus     string `json:"pm_status"`
-	SEStatus     string `json:"se_status"`
-	ProjectState int    `json:"project_state"`
-	CurrentRole  string `json:"current_role"`
+	Stage         string `json:"stage"`
+	PMStatus      string `json:"pm_status"`
+	SEStatus      string `json:"se_status"`
+	ProjectState  int    `json:"project_state"`
+	CurrentRole   string `json:"current_role"`
 	CurrentSETask string `json:"current_se_task"` // [FIX-20260529] SE当前任务描述
-	LastEvent    string `json:"last_event"`
-	MessageCount int    `json:"message_count"`
-	UpdatedAt    int64  `json:"updated_at"`
+	LastEvent     string `json:"last_event"`
+	MessageCount  int    `json:"message_count"`
+	UpdatedAt     int64  `json:"updated_at"`
 }
 
 type RoleMode string
@@ -389,12 +389,12 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	apProcessor := ai.NewAPProcessor(apActual, workDir)
 
 	manager := &Manager{
-		router:      NewRouter(),
-		aiClient:    aiClient,
-		pmClient:    pmClient,
-		seClient:    seClient,
-		apClient:    apClient,
-		pmProcessor: pmProcessor,
+		router:        NewRouter(),
+		aiClient:      aiClient,
+		pmClient:      pmClient,
+		seClient:      seClient,
+		apClient:      apClient,
+		pmProcessor:   pmProcessor,
 		seProcessor:   seProcessor,
 		apProcessor:   apProcessor,
 		pmExecutor:    pmExecutor,
@@ -463,9 +463,15 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 
 	// [关键] 设置所有Client+SE的debugLog回调（首次初始化必须，否则G-DEBUG/SE-RAW日志丢失）
 	manager.aiClient.SetDebugLog(manager.seDebugLog)
-	if manager.pmClient != nil { manager.pmClient.SetDebugLog(manager.seDebugLog) }
-	if manager.seClient != nil { manager.seClient.SetDebugLog(manager.seDebugLog) }
-	if manager.apClient != nil { manager.apClient.SetDebugLog(manager.seDebugLog) }
+	if manager.pmClient != nil {
+		manager.pmClient.SetDebugLog(manager.seDebugLog)
+	}
+	if manager.seClient != nil {
+		manager.seClient.SetDebugLog(manager.seDebugLog)
+	}
+	if manager.apClient != nil {
+		manager.apClient.SetDebugLog(manager.seDebugLog)
+	}
 	manager.seProcessor.SetDebugLog(manager.seDebugLog)
 	manager.seDebugLog("[INIT] ALL debugLog OK, configDir=" + configDir)
 
@@ -523,9 +529,16 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	// 重建各角色独立客户端（如果配置了）
 	m.rebuildRoleClients()
 	// 重建后必须重新设置debugLog（新Client对象）
-	if m.pmClient != nil { m.pmClient.SetDebugLog(m.seDebugLog); m.seDebugLog(fmt.Sprintf("[UpdateAPIConfig] pmClient=%p model=%s", m.pmClient, m.config.PMConfig.Model)) }
-	if m.seClient != nil { m.seClient.SetDebugLog(m.seDebugLog) }
-	if m.apClient != nil { m.apClient.SetDebugLog(m.seDebugLog) }
+	if m.pmClient != nil {
+		m.pmClient.SetDebugLog(m.seDebugLog)
+		m.seDebugLog(fmt.Sprintf("[UpdateAPIConfig] pmClient=%p model=%s", m.pmClient, m.config.PMConfig.Model))
+	}
+	if m.seClient != nil {
+		m.seClient.SetDebugLog(m.seDebugLog)
+	}
+	if m.apClient != nil {
+		m.apClient.SetDebugLog(m.seDebugLog)
+	}
 
 	// PM
 	m.pmProcessor = ai.NewPMProcessor(m.getPMClient(), m.workDir, func(state int) {
@@ -538,7 +551,7 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 	})
 	// SE
 	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
-	m.seProcessor.SetDebugLog(m.seDebugLog) // 关键日志写入conversation.log
+	m.seProcessor.SetDebugLog(m.seDebugLog)                                // 关键日志写入conversation.log
 	m.seDebugLog("[INIT] SE debugLog connected, configDir=" + m.configDir) // 验证回调是否生效
 	// AP
 	m.apProcessor = ai.NewAPProcessor(m.getAPClient(), m.workDir)
@@ -1072,12 +1085,12 @@ func (m *Manager) GetAllTasks() []*types.GlobalTask {
 // WriteDebugLog 写调试日志到 conversation.log
 func (m *Manager) WriteDebugLog(content string) {
 	m.writeConversationLog(Message{
-		From:    "DEBUG",
-		To:      "debug",
-		Role:    "debug",
-		Content: content,
-		Raw:     content,
-		Source:  "debug",
+		From:      "DEBUG",
+		To:        "debug",
+		Role:      "debug",
+		Content:   content,
+		Raw:       content,
+		Source:    "debug",
 		Timestamp: time.Now(),
 	})
 }
@@ -1705,11 +1718,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 	}
 
 	aiGen := m.getResetGeneration()
-	
+
 	// [DEBUG] Log current PM model before calling processor
 	m.seDebugLog(fmt.Sprintf("[handleToPM] 🔧 PM model=%s baseURL=%s (pmClient=%v)",
 		m.config.PMConfig.Model, m.config.PMConfig.BaseURL, m.pmClient != nil))
-	
+
 	// [FIX-v0.8.1] 流式回调中检查复位世代，过期则不推送（防止幽灵输出）
 	pmStreamCallback := func(delta string) {
 		if m.isGhostCall(aiGen) {
@@ -1953,7 +1966,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 		m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 
-	return m.startSETask(resp.Tasks.CurrentTask)
+		return m.startSETask(resp.Tasks.CurrentTask)
 	}
 
 	// 🆕 @AP 检测：第三优先级（在 @SE 和 HasTasks 之后）
@@ -2183,95 +2196,95 @@ func (m *Manager) handleSEAskPM(seQuestion string) (err error) {
 
 	fmt.Println("[handleSEAskPM] 🔍 使用ProcessReview（带工具验证）进行PM审核")
 	resp, err := m.pmProcessor.ProcessReview(seQuestion, pmHistory, func(delta string) {
-			m.emitStreamChunk("pm", delta)
-		})
-		if err != nil {
+		m.emitStreamChunk("pm", delta)
+	})
+	if err != nil {
 		errMsg := fmt.Sprintf("❌ PM审核失败: %v", err)
 		m.PrintStreamAuditReport()
 		m.addPMToUserMsg(errMsg)
-			return fmt.Errorf("PM review failed: %w", err)
-		}
-
-		parsedResp := m.router.Parse("pm", resp.Content)
-		if parsedResp.To == "se" {
-			currentState := m.cMonitor.GetProjectState()
-			if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
-				fmt.Printf("[handleSEAskPM] 🛡️ 审核模式拦截@SE(state=%d)\n", currentState)
-				m.currentRole = ""
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				m.SetHandoverPending(HandoverPMToAP)
-				if m.apProcessor != nil {
-					return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
-				}
-				m.forceProjectApproved()
-				return nil
-			}
-
-			finalTask := parsedResp.Content
-			idx := strings.LastIndex(finalTask, "\n{")
-			if idx > 0 {
-				remainder := finalTask[idx+1:]
-				if strings.Contains(remainder, "current_task") || strings.Contains(remainder, "total_steps") {
-					finalTask = strings.TrimSpace(finalTask[:idx])
-				}
-			}
-
-			if isStatusOnlyMessage(finalTask) {
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				return nil
-			}
-
-			m.addPMToSEMsg(finalTask)
-			return m.startSETaskWithFrom(finalTask, "pm")
-		}
-
-		hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
-		if hasAP {
-			cleanPMContent := strings.Replace(resp.Content, "@AP", "", -1)
-			cleanPMContent = strings.Replace(cleanPMContent, "@ap", "", -1)
-			cleanPMContent = strings.TrimSpace(cleanPMContent)
-
-			fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
-
-			seStatus := m.cMonitor.GetSeStatus()
-			if seStatus != types.RoleStatusBusy {
-				m.currentRole = ""
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				m.SetHandoverPending(HandoverPMToAP)
-				if m.apProcessor != nil {
-					return m.handleAPReview(cleanPMContent)
-				}
-				m.forceProjectApproved()
-				return nil
-			}
-		} else {
-			hasUSR := strings.Contains(strings.ToUpper(resp.Content), "@USR")
-			if hasUSR {
-				fmt.Println("[handleSEAskPM] 🛡️ G46第三层保护：检测到@USR，强制转AP审批")
-				cleanContent := strings.TrimPrefix(strings.TrimSpace(resp.Content), "@USR")
-				cleanContent = strings.TrimPrefix(cleanContent, "@usr")
-				cleanContent = strings.TrimSpace(cleanContent)
-
-				if cleanContent == "" || len(cleanContent) < 5 {
-					cleanContent = "任务已验证，请进行最终质量审批"
-				}
-
-				fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
-
-				m.currentRole = ""
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				m.SetHandoverPending(HandoverPMToAP)
-				if m.apProcessor != nil {
-					return m.handleAPReview(cleanContent)
-				}
-				m.forceProjectApproved()
-				return nil
-			}
-
-			fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
-		}
-		return nil
+		return fmt.Errorf("PM review failed: %w", err)
 	}
+
+	parsedResp := m.router.Parse("pm", resp.Content)
+	if parsedResp.To == "se" {
+		currentState := m.cMonitor.GetProjectState()
+		if currentState == types.ProjectStateDone || currentState == types.ProjectStateError {
+			fmt.Printf("[handleSEAskPM] 🛡️ 审核模式拦截@SE(state=%d)\n", currentState)
+			m.currentRole = ""
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverPMToAP)
+			if m.apProcessor != nil {
+				return m.handleAPReview("PM在审核模式下@SE，系统转交AP审批")
+			}
+			m.forceProjectApproved()
+			return nil
+		}
+
+		finalTask := parsedResp.Content
+		idx := strings.LastIndex(finalTask, "\n{")
+		if idx > 0 {
+			remainder := finalTask[idx+1:]
+			if strings.Contains(remainder, "current_task") || strings.Contains(remainder, "total_steps") {
+				finalTask = strings.TrimSpace(finalTask[:idx])
+			}
+		}
+
+		if isStatusOnlyMessage(finalTask) {
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			return nil
+		}
+
+		m.addPMToSEMsg(finalTask)
+		return m.startSETaskWithFrom(finalTask, "pm")
+	}
+
+	hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
+	if hasAP {
+		cleanPMContent := strings.Replace(resp.Content, "@AP", "", -1)
+		cleanPMContent = strings.Replace(cleanPMContent, "@ap", "", -1)
+		cleanPMContent = strings.TrimSpace(cleanPMContent)
+
+		fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
+
+		seStatus := m.cMonitor.GetSeStatus()
+		if seStatus != types.RoleStatusBusy {
+			m.currentRole = ""
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverPMToAP)
+			if m.apProcessor != nil {
+				return m.handleAPReview(cleanPMContent)
+			}
+			m.forceProjectApproved()
+			return nil
+		}
+	} else {
+		hasUSR := strings.Contains(strings.ToUpper(resp.Content), "@USR")
+		if hasUSR {
+			fmt.Println("[handleSEAskPM] 🛡️ G46第三层保护：检测到@USR，强制转AP审批")
+			cleanContent := strings.TrimPrefix(strings.TrimSpace(resp.Content), "@USR")
+			cleanContent = strings.TrimPrefix(cleanContent, "@usr")
+			cleanContent = strings.TrimSpace(cleanContent)
+
+			if cleanContent == "" || len(cleanContent) < 5 {
+				cleanContent = "任务已验证，请进行最终质量审批"
+			}
+
+			fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
+
+			m.currentRole = ""
+			m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
+			m.SetHandoverPending(HandoverPMToAP)
+			if m.apProcessor != nil {
+				return m.handleAPReview(cleanContent)
+			}
+			m.forceProjectApproved()
+			return nil
+		}
+
+		fmt.Println("[handleSEAskPM] 🛡️ G48: PM审核已通过onChunk流式输出，跳过addPMToUserMsg避免重复")
+	}
+	return nil
+}
 
 // handleUserDirectToSE 用户直接@SE
 func (m *Manager) handleUserDirectToSE(content string) error {
@@ -2364,12 +2377,12 @@ func (m *Manager) RecordReceive(role, messageID, content, source string) {
 	fmt.Printf("[G60-RECEIVE] 🚰 收水: role=%s id=%s source=%s content=%q (len=%d)\n", role, messageID, source, preview, len(content))
 
 	m.receiveAuditLog = append(m.receiveAuditLog, ReceiveAuditEntry{
-		Timestamp:   time.Now(),
-		Role:        role,
-		MessageID:   messageID,
-		Content:     content,
-		ContentLen:  len(content),
-		Source:      source,
+		Timestamp:  time.Now(),
+		Role:       role,
+		MessageID:  messageID,
+		Content:    content,
+		ContentLen: len(content),
+		Source:     source,
 	})
 }
 
@@ -2560,7 +2573,9 @@ func (m *Manager) cleanSEJSONContent(jsonStr string) string {
 			}
 		case "run_tests":
 			actionDescs = append(actionDescs, fmt.Sprintf("运行测试: %s", func() string {
-				if p, ok := action["test_pattern"].(string); ok && p != "" { return p }
+				if p, ok := action["test_pattern"].(string); ok && p != "" {
+					return p
+				}
 				return "./..."
 			}()))
 		default:
@@ -2795,20 +2810,20 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 				}
 			}()
 			if m.seProcessor == nil {
-			errMsg := fmt.Errorf("seProcessor is nil")
-			fmt.Printf("[SE] 🔴 FATAL: %v\n", errMsg)
-			m.writeRouteLog(fmt.Sprintf("[SE-FATAL] %s", errMsg.Error()))
-			return errMsg
-		}
+				errMsg := fmt.Errorf("seProcessor is nil")
+				fmt.Printf("[SE] 🔴 FATAL: %v\n", errMsg)
+				m.writeRouteLog(fmt.Sprintf("[SE-FATAL] %s", errMsg.Error()))
+				return errMsg
+			}
 
-		// 首次启动SE任务时异步构建语义搜索索引
-		if attempt == 0 {
-			go func() {
-				if err := m.seProcessor.EnsureIndexer(); err != nil {
-					fmt.Printf("[SemSearch] 索引构建警告: %v\n", err)
-				}
-			}()
-		}
+			// 首次启动SE任务时异步构建语义搜索索引
+			if attempt == 0 {
+				go func() {
+					if err := m.seProcessor.EnsureIndexer(); err != nil {
+						fmt.Printf("[SemSearch] 索引构建警告: %v\n", err)
+					}
+				}()
+			}
 		}
 
 		// [v0.7.2] ContextWindow: 记录 SE 任务输入
@@ -2849,7 +2864,12 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			respActions = len(resp.Actions)
 		}
 		fmt.Printf("[PROBE-SE] 📡 ProcessTaskWithTools返回: err=%v actions=%d content_len=%d (时间:%s)\n",
-			err, respActions, func() int { if resp != nil { return len(resp.Content) }; return 0 }(), time.Now().Format("15:04:05.000"))
+			err, respActions, func() int {
+				if resp != nil {
+					return len(resp.Content)
+				}
+				return 0
+			}(), time.Now().Format("15:04:05.000"))
 		m.writeRouteLog(fmt.Sprintf("[SE-API-CALL] from=%s attempt=%d/%d err=%v actions=%d time=%s",
 			from, attempt, maxRetries, err, respActions, time.Now().Format("15:04:05")))
 
@@ -2873,7 +2893,12 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 	}
 
 	fmt.Printf("[PROBE-startSETask] ⏹️ ProcessTaskWithTools循环结束: err=%v actions=%d (时间:%s)\n",
-		err, func() int { if resp != nil { return len(resp.Actions) }; return -1 }(), time.Now().Format("15:04:05.000"))
+		err, func() int {
+			if resp != nil {
+				return len(resp.Actions)
+			}
+			return -1
+		}(), time.Now().Format("15:04:05.000"))
 
 	if m.isGhostCall(aiGen) {
 		fmt.Printf("[startSETask] ⚠️ 检测到复位后的幽灵SE调用，丢弃结果\n")
@@ -3154,20 +3179,20 @@ Generate corrected actions JSON (use ONLY relative filenames):
 				m.cMonitor.UpdateProjectState(types.ProjectStateDone)
 				m.syncBackendStatus("done", "SE语义完成，兜底路由到PM")
 				summary := "✅ SE报告任务完成（语义检测），请审核"
-			if from != "pm" {
-				m.addSEToUserMsg(summary)
-			}
-			// [G53] 移除过早的exec_completed！原因：后续可能还有continueSETask()导致第2批SE actions
-			// 前端收到此事件会重置所有SE消息的_streaming状态，导致后续SE chunk丢失
-			// 正确的exec_completed应在最终完成时发送（TAG-D4路径或executeSEActions末尾）
-			// runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
-			// 	"executor":  "se",
-			// 	"result":    "",
-			// 	"timestamp": time.Now().Unix(),
-			// 	"content":   resp.Content,
-			// })
-			_, err := m.ProcessMessageFrom("se", "@PM ✅ 任务完成(语义检测)\n"+resp.Content) // [TAG-D3-RETURN]
-			return err
+				if from != "pm" {
+					m.addSEToUserMsg(summary)
+				}
+				// [G53] 移除过早的exec_completed！原因：后续可能还有continueSETask()导致第2批SE actions
+				// 前端收到此事件会重置所有SE消息的_streaming状态，导致后续SE chunk丢失
+				// 正确的exec_completed应在最终完成时发送（TAG-D4路径或executeSEActions末尾）
+				// runtime.EventsEmit(m.ctx, "exec_completed", map[string]interface{}{
+				// 	"executor":  "se",
+				// 	"result":    "",
+				// 	"timestamp": time.Now().Unix(),
+				// 	"content":   resp.Content,
+				// })
+				_, err := m.ProcessMessageFrom("se", "@PM ✅ 任务完成(语义检测)\n"+resp.Content) // [TAG-D3-RETURN]
+				return err
 			}
 			fmt.Println("[System] SE未标记完成，继续执行 [TAG-S2]")
 			return m.continueSETask()
@@ -3245,8 +3270,8 @@ Generate corrected actions JSON (use ONLY relative filenames):
 			m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
 
 			m.SetHandoverPending(HandoverSEToPM)
-		m.cMonitor.UpdateProjectState(types.ProjectStateDone)
-		m.syncBackendStatus("se_content_only", "SE有内容无操作，路由到PM [TAG-D5]")
+			m.cMonitor.UpdateProjectState(types.ProjectStateDone)
+			m.syncBackendStatus("se_content_only", "SE有内容无操作，路由到PM [TAG-D5]")
 
 			seContent := strings.TrimSpace(resp.Content)
 
@@ -3331,8 +3356,18 @@ func (m *Manager) continueSETask() (err error) {
 		m.emitStreamChunk("se", delta)
 	})
 	fmt.Printf("[PROBE-continueSETask] ⏹️ ProcessTaskWithTools返回: err=%v actions=%d content_len=%d (时间:%s)\n",
-		err, func() int { if resp != nil { return len(resp.Actions) }; return 0 }(),
-		func() int { if resp != nil { return len(resp.Content) }; return 0 }(),
+		err, func() int {
+			if resp != nil {
+				return len(resp.Actions)
+			}
+			return 0
+		}(),
+		func() int {
+			if resp != nil {
+				return len(resp.Content)
+			}
+			return 0
+		}(),
 		time.Now().Format("15:04:05.000"))
 	if err != nil {
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
@@ -3426,12 +3461,12 @@ continueProcess:
 		// SE任务完成，切换到PM进行审核（走@层Router）
 		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C1: actions完成，路由到PM (时间:%s)\n",
 			time.Now().Format("15:04:05.000"))
-		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
+		m.seReportedComplete = true // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
-		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
-		m.syncBackendStatus("done", "SE任务完成(continue)，路由到PM [TAG-C1]")  // [FIX-20260528-E]
+		m.SetHandoverPending(HandoverSEToPM)                           // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone)          // [FIX-20260528-E]
+		m.syncBackendStatus("done", "SE任务完成(continue)，路由到PM [TAG-C1]") // [FIX-20260528-E]
 
 		// [G53] 在最终完成路径发送exec_completed（只发一次！）
 		if m.ctx != nil {
@@ -3449,13 +3484,13 @@ continueProcess:
 
 	// 如果完成了 - 通过@层路由发送
 	if resp.Completed != nil {
-		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
+		m.seReportedComplete = true // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
-		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
+		m.SetHandoverPending(HandoverSEToPM)                  // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone) // [FIX-20260528-E]
 		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C2: Completed分支，路由到PM (时间:%s)\n",
 			time.Now().Format("15:04:05.000"))
 
@@ -3471,22 +3506,22 @@ continueProcess:
 	if resp.Content != "" {
 		fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C3: 有内容无actions，路由到PM content_len=%d (时间:%s)\n",
 			len(resp.Content), time.Now().Format("15:04:05.000"))
-		m.seReportedComplete = true  // [FIX-20260528-E] 补充缺失的状态设置
+		m.seReportedComplete = true // [FIX-20260528-E] 补充缺失的状态设置
 		m.currentRole = ""
 		m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-		m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
-		m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
+		m.SetHandoverPending(HandoverSEToPM)                  // [FIX-20260528-E]
+		m.cMonitor.UpdateProjectState(types.ProjectStateDone) // [FIX-20260528-E]
 		_, err := m.ProcessMessageFrom("se", strings.TrimSpace(resp.Content))
 		return err
 	}
 
 	fmt.Printf("[PROBE-continueSETask] 🔀 TAG-C4: 回复空且无actions，结束 (时间:%s)\n",
 		time.Now().Format("15:04:05.000"))
-	m.seReportedComplete = true  // [FIX-20260528-E] 即使空回复也算完成
+	m.seReportedComplete = true // [FIX-20260528-E] 即使空回复也算完成
 	m.currentRole = ""
 	m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-	m.SetHandoverPending(HandoverSEToPM)  // [FIX-20260528-E]
-	m.cMonitor.UpdateProjectState(types.ProjectStateDone)  // [FIX-20260528-E]
+	m.SetHandoverPending(HandoverSEToPM)                  // [FIX-20260528-E]
+	m.cMonitor.UpdateProjectState(types.ProjectStateDone) // [FIX-20260528-E]
 	return nil
 }
 
@@ -3584,24 +3619,24 @@ func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActio
 				}
 
 			case "search_files":
-			var opts []executor.SearchOption
-			if action.IsRegex {
-				opts = append(opts, executor.WithRegex())
-			}
-			if action.CaseInsensitive {
-				opts = append(opts, executor.WithCaseInsensitive())
-			}
-			if action.FilePattern != "" {
-				opts = append(opts, executor.WithFilePattern(action.FilePattern))
-			}
-			searchResult, err := m.seExecutor.SearchFiles(action.Pattern, opts...)
-			if err != nil {
-				results[bi] = batchResult{idx: bi, err: err}
-			} else if searchResult.Error != "" {
-				results[bi] = batchResult{idx: bi, err: fmt.Errorf("%s", searchResult.Error)}
-			} else {
-				results[bi] = batchResult{idx: bi, content: formatSearchResult(searchResult)}
-			}
+				var opts []executor.SearchOption
+				if action.IsRegex {
+					opts = append(opts, executor.WithRegex())
+				}
+				if action.CaseInsensitive {
+					opts = append(opts, executor.WithCaseInsensitive())
+				}
+				if action.FilePattern != "" {
+					opts = append(opts, executor.WithFilePattern(action.FilePattern))
+				}
+				searchResult, err := m.seExecutor.SearchFiles(action.Pattern, opts...)
+				if err != nil {
+					results[bi] = batchResult{idx: bi, err: err}
+				} else if searchResult.Error != "" {
+					results[bi] = batchResult{idx: bi, err: fmt.Errorf("%s", searchResult.Error)}
+				} else {
+					results[bi] = batchResult{idx: bi, content: formatSearchResult(searchResult)}
+				}
 
 			case "search_snippet":
 				store := m.seProcessor.GetSnippetStore()
@@ -3673,7 +3708,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			f.Close()
 		}
 	}()
-	
+
 	totalActions := len(actions)
 	seTaskId := ""
 	if m.richBuilder != nil {
@@ -3846,12 +3881,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					fmt.Printf("[Action] ⚠️ 截断内容预览: %q\n", action.Content)
 					m.seProcessor.AddResult(fmt.Sprintf("⚠️ %s", errMsg))
 					m.emitWailsEvent("exec_done", map[string]interface{}{
-						"executor": "se",
-						"index":    i + 1,
-						"type":     "write_file",
-						"label":    actionLabel,
-						"status":   "truncated",
-						"error":    errMsg,
+						"executor":    "se",
+						"index":       i + 1,
+						"type":        "write_file",
+						"label":       actionLabel,
+						"status":      "truncated",
+						"error":       errMsg,
 						"content_len": len(action.Content),
 					})
 					if currentTask != nil {
@@ -4014,9 +4049,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					editResult.LinesChanged,
 					diffPreview)
 
-				fmt.Printf("[Action] ✅ EditFile: %s (%d lines changed)\n", 
+				fmt.Printf("[Action] ✅ EditFile: %s (%d lines changed)\n",
 					action.Path, editResult.LinesChanged)
-				
+
 				m.seProcessor.AddResult(resultMsg)
 
 				m.emitWailsEvent("exec_done", map[string]interface{}{
@@ -4215,11 +4250,11 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			})
 
 			m.emitWailsEvent("exec_done", map[string]interface{}{
-				"executor":  "se",
-				"index":     i + 1,
-				"type":      "git_operation",
-				"label":     actionLabel,
-				"status":    "done",
+				"executor":   "se",
+				"index":      i + 1,
+				"type":       "git_operation",
+				"label":      actionLabel,
+				"status":     "done",
 				"git_action": gitAction,
 			})
 
@@ -4301,22 +4336,32 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.seProcessor.AddResult(resultMsg)
 
 			m.emitWailsEvent("exec_output", map[string]interface{}{
-				"executor":  "se",
-				"command":   fmt.Sprintf("go test %s", action.TestPattern),
-				"output":    resultMsg,
-				"exit_code": func() int { if testReport.Success { return 0 }; return 1 }(),
-				"test_total":   testReport.Total,
-				"test_passed":  testReport.Passed,
-				"test_failed":  testReport.Failed,
+				"executor": "se",
+				"command":  fmt.Sprintf("go test %s", action.TestPattern),
+				"output":   resultMsg,
+				"exit_code": func() int {
+					if testReport.Success {
+						return 0
+					}
+					return 1
+				}(),
+				"test_total":    testReport.Total,
+				"test_passed":   testReport.Passed,
+				"test_failed":   testReport.Failed,
 				"test_coverage": testReport.Coverage,
 			})
 
 			m.emitWailsEvent("exec_done", map[string]interface{}{
-				"executor":     "se",
-				"index":        i + 1,
-				"type":         "run_tests",
-				"label":        actionLabel,
-				"status":       func() string { if testReport.Success { return "done" }; return "failed" }(),
+				"executor": "se",
+				"index":    i + 1,
+				"type":     "run_tests",
+				"label":    actionLabel,
+				"status": func() string {
+					if testReport.Success {
+						return "done"
+					}
+					return "failed"
+				}(),
 				"test_success": testReport.Success,
 			})
 
@@ -4459,7 +4504,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", output))
 			} else {
 				fmt.Printf("[P0-ErrorAnalysis] ⚠️ 成功但检测到警告: %s\n", successAnalysis.Type)
-				m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s\n⚠️ 警告: %s", 
+				m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s\n⚠️ 警告: %s",
 					output, successAnalysis.Message))
 			}
 
@@ -4477,107 +4522,113 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.richBuilder.PushShellDone("se", seTaskId, 0, "", "done")
 			}
 			m.emitWailsEvent("exec_output", map[string]interface{}{
-			"executor":  "se",
-			"command":   action.Command,
-			"output":    truncateSSEOutput(output, 500),
-			"exit_code": 0,
-		})
+				"executor":  "se",
+				"command":   action.Command,
+				"output":    truncateSSEOutput(output, 500),
+				"exit_code": 0,
+			})
 
-	case "debug_run":
-		// 调试运行：自动加调试flag，格式化panic/trace，60s超时
-		if m.configManager != nil {
-			level, desc := m.configManager.CheckCommand(action.Command)
-			if level == types.CmdBlockDeny {
-				errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
-				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+		case "debug_run":
+			// 调试运行：自动加调试flag，格式化panic/trace，60s超时
+			if m.configManager != nil {
+				level, desc := m.configManager.CheckCommand(action.Command)
+				if level == types.CmdBlockDeny {
+					errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
+					m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+					continue
+				}
+				_ = desc
+			}
+
+			// 智能增强Go命令
+			cmd := action.Command
+			if strings.HasPrefix(cmd, "go test") || strings.Contains(cmd, "go test") {
+				if !strings.Contains(cmd, "-v") {
+					cmd += " -v"
+				}
+				if !strings.Contains(cmd, "-count") {
+					cmd += " -count=1"
+				}
+			} else if strings.HasPrefix(cmd, "go run") || strings.HasPrefix(cmd, "go build") {
+				if !strings.Contains(cmd, "-race") {
+					cmd += " -race"
+				}
+			}
+			fmt.Printf("[DebugRun] 🔍 %s\n", cmd)
+
+			output, err := m.seExecutor.Exec(cmd, 60*time.Second)
+			if err != nil {
+				m.seProcessor.AddResult(fmt.Sprintf("❌ debug运行失败: %v\n输出: %s", err, output))
 				continue
 			}
-			_ = desc
-		}
 
-		// 智能增强Go命令
-		cmd := action.Command
-		if strings.HasPrefix(cmd, "go test") || strings.Contains(cmd, "go test") {
-			if !strings.Contains(cmd, "-v") {
-				cmd += " -v"
+			// 格式化panic/trace为结构化展示
+			result := fmt.Sprintf("🔍 Debug输出:\n%s", output)
+			if strings.Contains(output, "panic:") {
+				result = fmt.Sprintf("🔍 💥 PANIC检测:\n%s\n\n📋 建议: 检查panic行号，注意nil指针、索引越界、类型断言", output)
+			} else if strings.Contains(output, "FAIL") || strings.Contains(output, "FAIL") {
+				result = fmt.Sprintf("🔍 ❌ 测试失败:\n%s\n\n📋 建议: 查看失败用例输出，检查断言和预期值", output)
 			}
-			if !strings.Contains(cmd, "-count") {
-				cmd += " -count=1"
-			}
-		} else if strings.HasPrefix(cmd, "go run") || strings.HasPrefix(cmd, "go build") {
-			if !strings.Contains(cmd, "-race") {
-				cmd += " -race"
-			}
-		}
-		fmt.Printf("[DebugRun] 🔍 %s\n", cmd)
-
-		output, err := m.seExecutor.Exec(cmd, 60*time.Second)
-		if err != nil {
-			m.seProcessor.AddResult(fmt.Sprintf("❌ debug运行失败: %v\n输出: %s", err, output))
-			continue
-		}
-
-		// 格式化panic/trace为结构化展示
-		result := fmt.Sprintf("🔍 Debug输出:\n%s", output)
-		if strings.Contains(output, "panic:") {
-			result = fmt.Sprintf("🔍 💥 PANIC检测:\n%s\n\n📋 建议: 检查panic行号，注意nil指针、索引越界、类型断言", output)
-		} else if strings.Contains(output, "FAIL") || strings.Contains(output, "FAIL") {
-			result = fmt.Sprintf("🔍 ❌ 测试失败:\n%s\n\n📋 建议: 查看失败用例输出，检查断言和预期值", output)
-		}
-		m.seProcessor.AddResult(result)
-		m.emitWailsEvent("exec_done", map[string]interface{}{
-			"executor": "se", "index": i + 1, "type": "debug_run",
-			"label": actionLabel, "status": "done",
-		})
-		m.emitWailsEvent("exec_output", map[string]interface{}{
-			"executor": "se", "command": cmd,
-			"output": truncateSSEOutput(output, 500), "exit_code": 0,
-		})
-
-	case "exec_session":
-		// 持久化 shell 会话执行（保持 cd/env 状态）
-		if m.configManager != nil {
-			level, desc := m.configManager.CheckCommand(action.Command)
-			if level == types.CmdBlockDeny {
-				errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
-				m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
-				m.emitWailsEvent("exec_done", map[string]interface{}{
-					"executor": "se", "index": i + 1, "type": "exec_session",
-					"label": actionLabel, "status": "blocked", "error": errMsg,
-				})
-				if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "failed") }
-				continue
-			}
-		}
-
-		sessionOutput, sessionErr := m.seExecutor.ExecWithSession(action.Command, 60*time.Second)
-		if sessionErr != nil {
-			errMsg := fmt.Sprintf("执行失败: %v", sessionErr)
-			fmt.Printf("[Action] ❌ exec_session: %s\n", errMsg)
-			m.seProcessor.AddResult(fmt.Sprintf("❌ %s\n输出:\n%s", errMsg, sessionOutput))
+			m.seProcessor.AddResult(result)
 			m.emitWailsEvent("exec_done", map[string]interface{}{
-				"executor": "se", "index": i + 1, "type": "exec_session",
-				"label": actionLabel, "status": "error", "error": errMsg,
+				"executor": "se", "index": i + 1, "type": "debug_run",
+				"label": actionLabel, "status": "done",
 			})
 			m.emitWailsEvent("exec_output", map[string]interface{}{
-				"executor": "se", "command": action.Command,
-				"output": truncateSSEOutput(sessionOutput, 500), "exit_code": -1,
+				"executor": "se", "command": cmd,
+				"output": truncateSSEOutput(output, 500), "exit_code": 0,
 			})
-			if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "failed") }
-			continue
-		}
 
-		fmt.Printf("[Action] exec_session: %s → %s\n", action.Command, strings.TrimSpace(sessionOutput)[:min(100, len(strings.TrimSpace(sessionOutput)))])
-		m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", sessionOutput))
-		m.emitWailsEvent("exec_done", map[string]interface{}{
-			"executor": "se", "index": i + 1, "type": "exec_session",
-			"label": actionLabel, "status": "done",
-		})
-		if currentTask != nil { m.taskManager.UpdateStatus(currentTask.ID, "done") }
-		m.emitWailsEvent("exec_output", map[string]interface{}{
-			"executor": "se", "command": action.Command,
-			"output": truncateSSEOutput(sessionOutput, 500), "exit_code": 0,
-		})
+		case "exec_session":
+			// 持久化 shell 会话执行（保持 cd/env 状态）
+			if m.configManager != nil {
+				level, desc := m.configManager.CheckCommand(action.Command)
+				if level == types.CmdBlockDeny {
+					errMsg := fmt.Sprintf("命令被安全策略拒绝: %s (%s)", action.Command, desc)
+					m.seProcessor.AddResult(fmt.Sprintf("❌ %s", errMsg))
+					m.emitWailsEvent("exec_done", map[string]interface{}{
+						"executor": "se", "index": i + 1, "type": "exec_session",
+						"label": actionLabel, "status": "blocked", "error": errMsg,
+					})
+					if currentTask != nil {
+						m.taskManager.UpdateStatus(currentTask.ID, "failed")
+					}
+					continue
+				}
+			}
+
+			sessionOutput, sessionErr := m.seExecutor.ExecWithSession(action.Command, 60*time.Second)
+			if sessionErr != nil {
+				errMsg := fmt.Sprintf("执行失败: %v", sessionErr)
+				fmt.Printf("[Action] ❌ exec_session: %s\n", errMsg)
+				m.seProcessor.AddResult(fmt.Sprintf("❌ %s\n输出:\n%s", errMsg, sessionOutput))
+				m.emitWailsEvent("exec_done", map[string]interface{}{
+					"executor": "se", "index": i + 1, "type": "exec_session",
+					"label": actionLabel, "status": "error", "error": errMsg,
+				})
+				m.emitWailsEvent("exec_output", map[string]interface{}{
+					"executor": "se", "command": action.Command,
+					"output": truncateSSEOutput(sessionOutput, 500), "exit_code": -1,
+				})
+				if currentTask != nil {
+					m.taskManager.UpdateStatus(currentTask.ID, "failed")
+				}
+				continue
+			}
+
+			fmt.Printf("[Action] exec_session: %s → %s\n", action.Command, strings.TrimSpace(sessionOutput)[:min(100, len(strings.TrimSpace(sessionOutput)))])
+			m.seProcessor.AddResult(fmt.Sprintf("执行结果:\n%s", sessionOutput))
+			m.emitWailsEvent("exec_done", map[string]interface{}{
+				"executor": "se", "index": i + 1, "type": "exec_session",
+				"label": actionLabel, "status": "done",
+			})
+			if currentTask != nil {
+				m.taskManager.UpdateStatus(currentTask.ID, "done")
+			}
+			m.emitWailsEvent("exec_output", map[string]interface{}{
+				"executor": "se", "command": action.Command,
+				"output": truncateSSEOutput(sessionOutput, 500), "exit_code": 0,
+			})
 
 		case "check_env":
 			fmt.Printf("[Action] Check env: %s\n", action.Tool)
@@ -4663,7 +4714,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 		case "analyze_code":
 			analyzer := ai.NewCodeAnalyzer(m.workDir)
 			opts := ai.AnalyzeOptions{
-				Path:     action.Path,
+				Path:      action.Path,
 				MaxIssues: 50,
 			}
 			// 解析 Extra 中的过滤参数
@@ -4771,7 +4822,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 					"executor": "se", "index": i + 1, "type": "auto_debug",
 					"label": fmt.Sprintf("auto_debug('%s')", target), "status": "done",
 					"success": result != nil && result.Success,
-					"iterations": func() int { if result != nil { return result.Iterations }; return 0 }(),
+					"iterations": func() int {
+						if result != nil {
+							return result.Iterations
+						}
+						return 0
+					}(),
 				})
 			}
 
@@ -4856,7 +4912,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				"index":    i + 1,
 				"type":     "undo_file",
 				"label":    "撤销 " + action.Path,
-				"status":   func() string { if ok { return "done" }; return "error" }(),
+				"status": func() string {
+					if ok {
+						return "done"
+					}
+					return "error"
+				}(),
 			})
 
 		case "list_changes":
@@ -4903,7 +4964,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "go_to_definition",
 				"label": "定义: " + filepath.Base(action.Path),
-				"status": func() string { if err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		case "find_references":
@@ -4921,7 +4987,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "find_references",
 				"label": "引用: " + filepath.Base(action.Path),
-				"status": func() string { if err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		case "hover_info":
@@ -4940,7 +5011,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "hover_info",
 				"label": "Hover: " + filepath.Base(action.Path),
-				"status": func() string { if err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		case "diagnostics":
@@ -4958,7 +5034,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "diagnostics",
 				"label": "诊断: " + filepath.Base(action.Path),
-				"status": func() string { if err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		case "rename_symbol":
@@ -4985,7 +5066,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "rename_symbol",
 				"label": "重命名: " + newName,
-				"status": func() string { if err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		case "analyze_image":
@@ -4997,8 +5083,8 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.seProcessor.AddResult("⚠️ 当前模型不支持 vision 能力，无法分析图片。\n建议切换到 GPT-4o / Claude-3 / Gemini 等支持视觉的模型。")
 				m.emitWailsEvent("exec_done", map[string]interface{}{
 					"executor": "se", "index": i + 1, "type": "analyze_image",
-					"label": "图片分析 (不支持)",
-					"status":  "error",
+					"label":  "图片分析 (不支持)",
+					"status": "error",
 				})
 				continue
 			}
@@ -5008,9 +5094,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				m.seProcessor.AddResult(fmt.Sprintf("❌ 图片分析失败: %v\n", err))
 				m.emitWailsEvent("exec_done", map[string]interface{}{
 					"executor": "se", "index": i + 1, "type": "analyze_image",
-					"label": "图片分析",
-					"status":  "error",
-					"error":   err.Error(),
+					"label":  "图片分析",
+					"status": "error",
+					"error":  err.Error(),
 				})
 				continue
 			}
@@ -5027,7 +5113,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			m.emitWailsEvent("exec_done", map[string]interface{}{
 				"executor": "se", "index": i + 1, "type": "analyze_image",
 				"label": "图片分析: " + filepath.Base(imagePath),
-				"status": func() string { if visionResp.Error != "" || err != nil { return "error" }; return "done" }(),
+				"status": func() string {
+					if visionResp.Error != "" || err != nil {
+						return "error"
+					}
+					return "done"
+				}(),
 			})
 
 		default:
@@ -5047,9 +5138,9 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 						m.seProcessor.AddResult(mcpResultMsg)
 						m.emitWailsEvent("exec_done", map[string]interface{}{
 							"executor": "se", "index": i + 1, "type": "mcp_call",
-							"label": fmt.Sprintf("MCP: %s.%s", serverName, toolName),
+							"label":  fmt.Sprintf("MCP: %s.%s", serverName, toolName),
 							"status": "error",
-							"error":   mcpErr.Error(),
+							"error":  mcpErr.Error(),
 						})
 					} else {
 						var textParts []string
@@ -5074,7 +5165,12 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 						m.emitWailsEvent("exec_done", map[string]interface{}{
 							"executor": "se", "index": i + 1, "type": "mcp_call",
 							"label": fmt.Sprintf("MCP: %s.%s", serverName, toolName),
-							"status": func() string { if mcpResult.IsError { return "error" }; return "done" }(),
+							"status": func() string {
+								if mcpResult.IsError {
+									return "error"
+								}
+								return "done"
+							}(),
 						})
 					}
 					break // 跳出 switch，继续下一个 action
@@ -5082,7 +5178,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 			return fmt.Errorf("unknown action type: %s", action.Type)
 		}
-		
+
 		func() {
 			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_actions_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if f != nil {
@@ -5390,6 +5486,7 @@ func (m *Manager) addPMToUserMsg(content string) {
 		return
 	}
 
+	content = strings.ReplaceAll(content, "⚡", "")
 	content = m.ensurePMToUSR(content)
 
 	content = m.aggregateAIMessage(content, "pm")
@@ -5554,7 +5651,9 @@ func (m *Manager) ensureSEToUSR(content string) string {
 
 // addSEToUserMsg 发送SE状态通知→USR
 // 路由策略: SE的任务内容走 se_to_pm → PM审核后转发USR；
-//           但SE的错误/状态/进度通知需要立即触达用户，不经过PM中转。
+//
+//	但SE的错误/状态/进度通知需要立即触达用户，不经过PM中转。
+//
 // 这类消息包括: 执行失败、语义完成报告、需要帮助、达到重试上限等。
 // Source统一为 "se_notify" 以区别于任务内容消息。
 func (m *Manager) addSEToUserMsg(content string) {
@@ -5685,7 +5784,9 @@ func (m *Manager) repairGoContent(content string) string {
 	// 模式4: importfmt" / import"fmt" → import "fmt"
 	fixed = strings.ReplaceAll(fixed, "importfmt\"", "import \"fmt\"")
 	fixed = strings.ReplaceAll(fixed, "import\"fmt\"", "import \"fmt\"")
-	if strings.Contains(fixed, "import\"") || strings.Contains(fixed, "importfmt") { changed = true }
+	if strings.Contains(fixed, "import\"") || strings.Contains(fixed, "importfmt") {
+		changed = true
+	}
 
 	// 模式5: func main { （缺括号）→ func main()
 	re5 := regexp.MustCompile(`func\s+main\s*\{`)
@@ -5711,22 +5812,22 @@ func (m *Manager) repairGoContent(content string) string {
 func (m *Manager) normalizeActionTypes(actions []ai.SEAction) []ai.SEAction {
 	// 常见错误映射：LLM实际返回 → 正确的tool name
 	typeMap := map[string]string{
-		"write":        "write_file",
-		"w":            "write_file",
-		"create":       "write_file",
-		"create_file":  "write_file",
-		"edit":         "edit_file",
-		"modify":       "edit_file",
-		"read":         "read_file",
-		"run":          "exec",
-		"execute":      "exec",
-		"command":      "exec",
-		"shell":        "exec",
-		"search":       "search_files",
-		"find":         "search_files",
-		"grep":         "search_files",
-		"git":          "git_operation",
-		"":             "", // 空字符串特殊处理
+		"write":       "write_file",
+		"w":           "write_file",
+		"create":      "write_file",
+		"create_file": "write_file",
+		"edit":        "edit_file",
+		"modify":      "edit_file",
+		"read":        "read_file",
+		"run":         "exec",
+		"execute":     "exec",
+		"command":     "exec",
+		"shell":       "exec",
+		"search":      "search_files",
+		"find":        "search_files",
+		"grep":        "search_files",
+		"git":         "git_operation",
+		"":            "", // 空字符串特殊处理
 	}
 
 	changed := false
@@ -5991,6 +6092,15 @@ func (m *Manager) RecoverTask(memory *types.TaskMemory) error {
 	// 通知前端恢复完成
 	if m.onTaskRecovered != nil {
 		m.onTaskRecovered(memory)
+	}
+
+	// 清除记忆中的未完成任务标记（确保 hasUnfinished=false）
+	if m.memoryManager != nil {
+		if err := m.memoryManager.ClearState(); err != nil {
+			fmt.Printf("[Manager] ⚠️ 清除任务记忆失败: %v\n", err)
+		} else {
+			fmt.Println("[Manager] ✅ 任务记忆已清除（hasUnfinished=false）")
+		}
 	}
 
 	fmt.Printf("[Manager] 任务恢复完成，恢复了 %d 条消息\n", len(memory.RecentMessages))
@@ -7272,7 +7382,7 @@ func (m *Manager) GetChatManagerStatus() map[string]interface{} {
 		"currentRole":        m.currentRole,
 		"workDir":            m.workDir,
 		"hasMemoryManager":   m.memoryManager != nil,
-		"seReportedComplete": m.seReportedComplete,  // [FIX-20260528-D] 暴露SE完成状态
+		"seReportedComplete": m.seReportedComplete, // [FIX-20260528-D] 暴露SE完成状态
 	}
 }
 

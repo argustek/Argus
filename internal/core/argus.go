@@ -1913,8 +1913,11 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 	}
 
 	// Step 2: 执行 actions（executor="pm"）
+	prevSilent := c.silent
+	c.silent = true
 	t2 := time.Now()
 	execResults, execErr := c.executeActions(actions, "pm")
+	c.silent = prevSilent
 	os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\n", time.Since(t2))), 0644)
 	result.Outputs = execResults
 	result.Actions = actions
@@ -1938,9 +1941,12 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 		if hasWriteFile && !hasExec && lastPath != "" {
 			cmd := inferExecCommand(lastPath)
 			if cmd != "" {
+				prevSilent2 := c.silent
+				c.silent = true
 				ta := time.Now()
 				autoAction := ai.SEAction{Type: "exec", Command: cmd}
 				autoResult, _ := c.executeActions([]ai.SEAction{autoAction}, "pm")
+				c.silent = prevSilent2
 				os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\nfirst: %v\nauto-exec: %v\n", time.Since(t2), time.Since(t2), time.Since(ta))), 0644)
 				execResults = append(execResults, autoResult...)
 				actions = append(actions, autoAction)
@@ -2026,7 +2032,10 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			actions = append(actions, a)
 		}
 		if len(actions) > 0 {
+			prevSilent3 := c.silent
+			c.silent = true
 			execResults, execErr = c.executeActions(actions, "pm")
+			c.silent = prevSilent3
 			result.Outputs = execResults
 			result.Actions = actions
 		}
