@@ -1,10 +1,10 @@
 <template>
-  <div
-    :class="['floating-window', 'terminal-window', { 'docked-mode': docked }]"
+  <div 
+    class="floating-window terminal-window" 
     v-show="!minimized"
-    :style="docked ? {} : { left: windowPos.x + 'px', top: windowPos.y + 'px', width: windowSize.w + 'px', height: windowSize.h + 'px' }"
+    :style="{ left: windowPos.x + 'px', top: windowPos.y + 'px', width: windowSize.w + 'px', height: windowSize.h + 'px' }"
   >
-    <div class="top-bar" v-if="!docked" @mousedown="startDrag">
+    <div class="top-bar" @mousedown="startDrag">
       <div class="tabs-row">
         <div 
           v-for="tab in tabs" 
@@ -86,10 +86,7 @@ import { EventsOn, EventsOff } from '../../wailsjs/runtime'
 import { useDraggable } from '../composables/useDraggable'
 
 const { t, locale } = useI18n()
-const props = withDefaults(defineProps<{
-  logs?: string[]
-  docked?: boolean
-}>(), { docked: false })
+const props = defineProps<{ logs?: string[] }>()
 const emit = defineEmits(['close', 'minimize'])
 
 let tabCounter = 0
@@ -528,16 +525,6 @@ onUnmounted(() => {
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   z-index: 100;
-}
-
-.docked-mode {
-  position: static !important;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
-  z-index: auto;
-  width: 100% !important;
-  height: 100% !important;
 }
 
 .top-bar {

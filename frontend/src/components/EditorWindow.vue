@@ -1,9 +1,9 @@
 <template>
-  <div
-    :class="['floating-window', 'editor-window', { 'docked-mode': docked }]"
-    :style="docked ? {} : { left: windowPos.x + 'px', top: windowPos.y + 'px', width: windowWidth + 'px', height: windowHeight + 'px' }"
+  <div 
+    class="floating-window editor-window"
+    :style="{ left: windowPos.x + 'px', top: windowPos.y + 'px', width: windowWidth + 'px', height: windowHeight + 'px' }"
   >
-    <div class="window-header" v-if="!docked" @mousedown="startDrag">
+    <div class="window-header" @mousedown="startDrag">
       <div class="header-left">
         <span class="window-title">📝 {{ currentFileName }}</span>
         <span v-if="modified" class="modified-indicator">●</span>
@@ -52,14 +52,13 @@ import { useDraggable } from '../composables/useDraggable'
 
 const { t } = useI18n()
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   file?: any
-  docked?: boolean
-}>(), { docked: false })
+}>()
 
 const emit = defineEmits(['close', 'file-saved', 'file-opened'])
 
-const { windowPos, startDrag } = useDraggable(660, 50)
+const { windowPos, startDrag } = useDraggable(320, 60)
 
 const editorContainer = ref<HTMLElement>()
 const loading = ref(false)
@@ -68,8 +67,8 @@ const fileContent = ref('')
 const modified = ref(false)
 let editorInstance: monaco.editor.IStandaloneCodeEditor | null = null
 
-const windowWidth = ref(780)
-const windowHeight = ref(600)
+const windowWidth = ref(700)
+const windowHeight = ref(500)
 
 const cursorPosition = ref({ lineNumber: 1, column: 1 })
 
@@ -143,9 +142,9 @@ function initMonacoEditor() {
   }
 
   try {
-  const model = monaco.editor.createModel(fileContent.value || '', languageMode.value)
   editorInstance = monaco.editor.create(editorContainer.value, {
-    model,
+    value: fileContent.value || '',
+    language: languageMode.value,
     theme: 'vs-dark',
     automaticLayout: true,
     fontSize: 14,
@@ -177,6 +176,11 @@ function initMonacoEditor() {
 }
 
   if (editorInstance) {
+    const model = editorInstance.getModel()
+    if (model) {
+      monaco.editor.setModelLanguage(model, languageMode.value)
+    }
+
   editorInstance.onDidChangeCursorPosition((e) => {
     cursorPosition.value = e.position
   })
@@ -202,12 +206,13 @@ async function loadFile(filePath: string) {
     await nextTick()
 
     if (editorInstance) {
+      editorInstance.setValue(fileContent.value)
+      editorInstance.layout()
+      // [FIX] 切换文件时必须更新语言模式，否则语法高亮停留在首次创建时的语言
       const model = editorInstance.getModel()
       if (model) {
         monaco.editor.setModelLanguage(model, languageMode.value)
       }
-      editorInstance.setValue(fileContent.value)
-      editorInstance.layout()
     } else {
       await new Promise(resolve => setTimeout(resolve, 50))
       initMonacoEditor()
@@ -318,11 +323,10 @@ defineExpose({
   saveFile: handleSave,
   openFile: handleOpenFile,
   newFile: handleNewFile,
-  getContent: () => editorInstance ? editorInstance.getValue() : '',
+  getContent: () => editorInstance?.getValue() || '',
   setContent: (content: string) => {
     if (editorInstance) {
-      const model = editorInstance.getModel()
-      if (model) model.setValue(content)
+      editorInstance.getModel()?.setValue(content)
     }
   }
 })
@@ -338,17 +342,6 @@ defineExpose({
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
   z-index: 100;
-  overflow: hidden;
-}
-
-.docked-mode {
-  position: static !important;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
-  z-index: auto;
-  width: 100% !important;
-  height: 100% !important;
 }
 
 .window-header {
@@ -417,7 +410,6 @@ defineExpose({
 
 .window-content {
   flex: 1;
-  min-height: 0;
   overflow: hidden;
   position: relative;
 }

@@ -80,68 +80,29 @@
         <div class="resize-line"></div>
       </div>
 
-      <!-- 右侧：Dock 面板区域 -->
-      <div v-if="dockItems.length > 0" class="dock-area">
-        <template v-for="(item, i) in dockItems" :key="item.id">
-          <div class="dock-panel">
-            <div class="dock-header" @mousedown="startDragFloat($event, item.id)">
-              <span>{{ item.title }}</span>
-              <button class="dock-float-btn" @click.stop="undockPanel(item.id)">⊞</button>
-            </div>
-            <div class="dock-body">
-              <EditorWindow
-                v-if="item.type === 'editor'"
-                :file="currentFile"
-                :docked="true"
-                @close="activeWindows.editor = false"
-                @open-file-in-editor="openFileInEditor"
-              />
-              <TerminalWindow
-                v-else-if="item.type === 'terminal'"
-                :logs="terminalLogs"
-                :docked="true"
-                @close="activeWindows.terminal = false"
-                @minimize="activeWindows.terminal = false"
-              />
-            </div>
-          </div>
-          <!-- Resize handle -->
-          <div
-            v-if="i < dockItems.length - 1"
-            class="dock-splitter"
-            @mousedown="startResizeDock($event, i)"
-          ></div>
-        </template>
+      <!-- 右侧面板：上编辑器 + 下终端 -->
+      <div class="right-panel" v-if="activeWindows.editor || activeWindows.terminal">
+        <div class="right-panel-top" v-if="activeWindows.editor" :style="{ flex: activeWindows.terminal ? rightSplitRatio : '1' }">
+          <EditorWindow
+            :file="currentFile"
+            @close="activeWindows.editor = false"
+            @open-file-in-editor="openFileInEditor"
+          />
+        </div>
+        <div 
+          v-if="activeWindows.editor && activeWindows.terminal" 
+          class="right-panel-divider"
+          @mousedown="startRightResize"
+        ></div>
+        <div class="right-panel-bottom" v-if="activeWindows.terminal" :style="{ flex: activeWindows.editor ? (1 - rightSplitRatio) : '1' }">
+          <TerminalWindow
+            :logs="terminalLogs"
+            @close="activeWindows.terminal = false"
+            @minimize="activeWindows.terminal = false"
+          />
+        </div>
       </div>
-
-      <!-- 浮动窗口：直接渲染组件（它们自带 position:fixed + 拖拽 + header） -->
-      <template v-for="fp in floatingItems" :key="'float-' + fp.id">
-        <!-- Redock 小按钮：悬浮在组件右上角 -->
-        <button
-          class="redock-badge"
-          :style="{ top: fp.y + 'px', left: (fp.x + 380) + 'px' }"
-          @click.stop="redockPanel(fp.id)"
-          title="Dock"
-        >⊟</button>
-
-        <TerminalWindow
-          v-if="fp.type === 'terminal'"
-          :logs="terminalLogs"
-          :docked="false"
-          @close="closeFloating(fp.id)"
-          @minimize="closeFloating(fp.id)"
-        />
-        <EditorWindow
-          v-else-if="fp.type === 'editor'"
-          :file="currentFile"
-          :docked="false"
-          @close="closeFloating(fp.id)"
-          @open-file-in-editor="openFileInEditor"
-        />
-      </template>
     </div>
-
-    <!-- 原有浮动窗口：改动摘要 / Git / Debug / MCP / Token（暂保留，后续迁移到 Dock） -->
     
     <!-- 底部：审核栏 -->
     <ReviewBar 
@@ -202,28 +163,16 @@
       @reject="onDiffReject"
     />
 
-    <!-- 错误提示弹窗 (替代 alert, 避免 Wails 原生弹窗崩溃) -->
-    <div v-if="errorMessage" class="dialog-overlay" @click.self="errorMessage = ''">
-      <div class="dialog error-dialog">
-        <div class="dialog-header">
-          <h3>⚠️ {{ t('common.error') || '错误' }}</h3>
-          <button class="close-btn" @click="errorMessage = ''">×</button>
-        </div>
-        <div class="dialog-body">
-          <p>{{ errorMessage }}</p>
-        </div>
-        <div class="dialog-footer">
-          <button class="btn btn-primary" @click="errorMessage = ''">{{ t('common.confirm') || '确定' }}</button>
-        </div>
-      </div>
-    </div>
-
   </div>
+
+  <!-- Monaco 预初始化：隐藏容器，提前加载 Web Worker -->
+  <div ref="monacoPreInitRef" style="position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;pointer-events:none"></div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch, nextTick, provide } from 'vue'
+import { ref, reactive, onMounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
+import * as monaco from 'monaco-editor'
 import { GetConfig, SaveConfig, SendMessage, StopCurrentTask, GetMessages, IsAIThinking, IsPMThinking, IsCRunning, IsSERunning, IsAPThinking, GetLogs, GetChangeHistory, GetWorkDir, GetRecentProjects, SetWorkDir, OpenFolderDialog, StartCMonitor, StopCMonitor, FixPosition, OpenFileDialog, ReadFile } from '../wailsjs/go/main/App'
 import { EventsOn, EventsOff, EventsEmit, LogPrint } from '../wailsjs/runtime/runtime'
 
@@ -295,144 +244,35 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
     document.addEventListener('mouseup', cleanup)
   }
 
+  // 右侧面板上下分隔
+  const rightSplitRatio = ref(Number(localStorage.getItem('rightSplitRatio')) || 0.5)
+  const isRightResizing = ref(false)
+
+  function startRightResize(e: MouseEvent) {
+    isRightResizing.value = true
+    const startY = e.clientY
+    const startRatio = rightSplitRatio.value
+    const rightPanel = (e.target as HTMLElement).closest('.right-panel') as HTMLElement
+    if (!rightPanel) return
+    const panelHeight = rightPanel.offsetHeight
+    const handler = (ev: MouseEvent) => {
+      if (!isRightResizing.value) return
+      const delta = ev.clientY - startY
+      rightSplitRatio.value = Math.max(0.2, Math.min(0.8, startRatio + delta / panelHeight))
+    }
+    const cleanup = () => {
+      isRightResizing.value = false
+      localStorage.setItem('rightSplitRatio', String(rightSplitRatio.value))
+      document.removeEventListener('mousemove', handler)
+      document.removeEventListener('mouseup', cleanup)
+    }
+    document.addEventListener('mousemove', handler)
+    document.addEventListener('mouseup', cleanup)
+  }
+
   watch(activeWindows, (newVal) => {
   localStorage.setItem(WINDOW_STATES_KEY, JSON.stringify(newVal))
 }, { deep: true })
-
-// --- Dock Panel System (simple) ---
-// Right-side panel stack: new panels insert at top, equal height split
-interface DockItem {
-  id: string
-  title: string
-  type: 'editor' | 'terminal' | 'git' | 'changes'
-}
-
-interface FloatItem extends DockItem {
-  x: number
-  y: number
-}
-
-const dockItems = reactive<DockItem[]>([])
-const floatingItems = reactive<FloatItem[]>([])
-
-function dockAdd(item: DockItem) {
-  const idx = dockItems.findIndex(d => d.id === item.id)
-  if (idx >= 0) dockItems.splice(idx, 1)
-  // Also remove from floating if there
-  const fidx = floatingItems.findIndex(f => f.id === item.id)
-  if (fidx >= 0) floatingItems.splice(fidx, 1)
-  dockItems.unshift(item)
-}
-
-function dockRemove(id: string) {
-  const idx = dockItems.findIndex(d => d.id === id)
-  if (idx >= 0) dockItems.splice(idx, 1)
-}
-
-// Undock → floating window
-function undockPanel(id: string) {
-  const idx = dockItems.findIndex(d => d.id === id)
-  if (idx < 0) return
-  const item = dockItems[idx]
-  dockItems.splice(idx, 1)
-  floatingItems.push({ ...item, x: window.innerWidth - 450, y: 60 + floatingItems.length * 30 })
-}
-
-// Redock → back to dock (top)
-function redockPanel(id: string) {
-  const idx = floatingItems.findIndex(f => f.id === id)
-  if (idx < 0) return
-  const item = floatingItems[idx]
-  floatingItems.splice(idx, 1)
-  dockAdd(item)
-}
-
-function closeFloating(id: string) {
-  const idx = floatingItems.findIndex(f => f.id === id)
-  if (idx >= 0) floatingItems.splice(idx, 1)
-  if (id in activeWindows) { (activeWindows as any)[id] = false }
-}
-
-// --- Drag floating windows ---
-let draggingId: string | null = null
-let dragOffX = 0
-let dragOffY = 0
-
-function startDragFloat(e: MouseEvent, id: string) {
-  const all = [...dockItems, ...floatingItems]
-  const target = all.find(x => x.id === id && 'x' in x) as FloatItem | undefined
-  if (!target) return
-  draggingId = id
-  dragOffX = e.clientX - target.x
-  dragOffY = e.clientY - target.y
-  document.addEventListener('mousemove', onDragMove)
-  document.addEventListener('mouseup', onDragEnd)
-}
-
-function onDragMove(e: MouseEvent) {
-  if (!draggingId) return
-  const fp = floatingItems.find(f => f.id === draggingId)
-  if (fp) {
-    fp.x = e.clientX - dragOffX
-    fp.y = e.clientY - dragOffY
-  }
-}
-
-function onDragEnd() {
-  draggingId = null
-  document.removeEventListener('mousemove', onDragMove)
-  document.removeEventListener('mouseup', onDragEnd)
-}
-
-// --- Resize between dock panels ---
-let resizingIdx = -1
-let resizeStartY = 0
-let resizeHeights: number[] = []
-
-function startResizeDock(e: MouseEvent, idx: number) {
-  e.preventDefault()
-  resizingIdx = idx
-  resizeStartY = e.clientY
-  const area = document.querySelector('.dock-area')
-  if (!area) return
-  const panels = area.querySelectorAll('.dock-panel')
-  resizeHeights = Array.from(panels).map(el => (el as HTMLElement).offsetHeight)
-  document.addEventListener('mousemove', onResizeMove)
-  document.addEventListener('mouseup', onResizeEnd)
-}
-
-function onResizeMove(e: MouseEvent) {
-  if (resizingIdx < 0) return
-  const area = document.querySelector('.dock-area')
-  if (!area) return
-  const panels = area.querySelectorAll('.dock-panel')
-  const i = resizingIdx
-  const delta = e.clientY - resizeStartY
-  const a = panels[i] as HTMLElement
-  const b = panels[i + 1] as HTMLElement
-  if (!a || !b) return
-  a.style.flex = 'none'
-  a.style.height = Math.max(80, resizeHeights[i] + delta) + 'px'
-  b.style.flex = 'none'
-  b.style.height = Math.max(80, resizeHeights[i + 1] - delta) + 'px'
-}
-
-function onResizeEnd() {
-  resizingIdx = -1
-  document.removeEventListener('mousemove', onResizeMove)
-  document.removeEventListener('mouseup', onResizeEnd)
-}
-
-// Sync activeWindows -> dockItems
-watch(() => activeWindows.editor, (v) => {
-  if (v) dockAdd({ id: 'editor', title: 'Editor', type: 'editor' })
-  else { dockRemove('editor'); closeFloating('editor') }
-}, { immediate: true })
-
-watch(() => activeWindows.terminal, (v) => {
-  if (v) dockAdd({ id: 'terminal', title: 'Terminal', type: 'terminal' })
-  else { dockRemove('terminal'); closeFloating('terminal') }
-}, { immediate: true })
 
 // AI 状态
 const aiStatus = reactive({
@@ -512,9 +352,6 @@ const unfinishedTask = ref<{
   taskDescription: ''
 })
 const showRecoveryDialog = ref(false)
-const errorMessage = ref('')
-function showError(msg: string) { errorMessage.value = msg }
-provide('showError', showError)
 
 // Diff 预览
 const showDiffDialog = ref(false)
@@ -525,6 +362,7 @@ const workDir = ref('')
 const recentProjects = ref<string[]>([])
 
 const currentFile = ref(null)
+const monacoPreInitRef = ref<HTMLElement>()
 const terminalLogs = ref(['Argus 已启动'])
 const changeHistory = ref([])
 const config = ref({
@@ -540,6 +378,28 @@ watch(messages, (newVal, oldVal) => {
 
 // 加载配置和消息
 onMounted(async () => {
+  // [FIX] Monaco 预初始化：提前加载 Web Worker，解决首次打开文件无语法高亮
+  nextTick(() => {
+    if (monacoPreInitRef.value) {
+      try {
+        const preEditor = monaco.editor.create(monacoPreInitRef.value, {
+          value: '',
+          language: 'plaintext',
+          theme: 'vs-dark',
+          automaticLayout: false,
+          minimap: { enabled: false },
+          lineNumbers: 'off',
+          scrollBeyondLastLine: false,
+        })
+        // 创建后立即销毁，Worker 已缓存到内存
+        preEditor.dispose()
+        console.log('[App] ✅ Monaco 预初始化完成，Web Worker 已加载')
+      } catch (e) {
+        console.warn('[App] ⚠️ Monaco 预初始化失败:', e)
+      }
+    }
+  })
+
   // [DEBUG-20260529] 测试消息：验证前端渲染是否工作
   messages.value.push({
     id: Date.now(),
@@ -1355,13 +1215,13 @@ async function toggleCMonitor() {
       cMonitorEnabled.value = true
       // 如果状态是error，弹窗提示
       if (projectState.value === 'error') {
-        errorMessage.value = t('app.monitorStartedError')
+        alert(t('app.monitorStartedError'))
       }
     }
   } catch (e: any) {
     console.error(t('app.switchMonitorFailed'), e)
     const errorMsg = e?.message || e?.toString() || '未知错误'
-    errorMessage.value = t('app.switchMonitorFailed') + errorMsg
+    alert(t('app.switchMonitorFailed') + errorMsg)
   }
 }
 
@@ -1375,7 +1235,7 @@ async function handleUploadFile() {
     await SendMessage(msg)
   } catch (e: any) {
     console.error(t('app.uploadFileFailed'), e)
-    errorMessage.value = t('app.uploadFileFailed') + e.message
+    alert(t('app.uploadFileFailed') + e.message)
   }
 }
 
@@ -1400,7 +1260,7 @@ async function handleSendMessage(msg: string) {
     }
   } catch (e: any) {
     console.error(t('app.sendFailed'), e)
-    errorMessage.value = t('app.sendFailed')
+    alert(t('app.sendFailed'))
   }
 }
 
@@ -1422,7 +1282,7 @@ async function handleSelectProject(dir: string) {
     }
   } catch (e) {
     console.error(t('app.switchProjectFailed'), e)
-    errorMessage.value = t('app.switchProjectFailed') + e
+    alert(t('app.switchProjectFailed') + e)
   }
 }
 
@@ -1662,11 +1522,11 @@ async function saveConfig(newConfig: any) {
       seConfigId: newConfig.seConfigId ?? currentConfig.seConfigId,
       apConfigId: newConfig.apConfigId ?? currentConfig.apConfigId,
     })
-    errorMessage.value = '配置保存成功！'
+    alert('配置保存成功！')
     updateMultimodalStatus(newConfig)
   } catch (e) {
     console.error(t('app.saveConfigFailed'), e)
-    errorMessage.value = t('app.saveConfigFailed') + e
+    alert(t('app.saveConfigFailed') + e)
   }
 }
 </script>
@@ -1887,6 +1747,59 @@ body {
   box-shadow: 0 0 6px rgba(99, 102, 241, 0.3);
 }
 
+/* 右侧面板 */
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 300px;
+}
+
+.right-panel-top {
+  overflow: hidden;
+  min-height: 80px;
+}
+
+.right-panel-bottom {
+  overflow: hidden;
+  min-height: 80px;
+}
+
+.right-panel-divider {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  z-index: 10;
+}
+
+.right-panel-divider:hover,
+.right-panel-divider:active {
+  background: rgba(99, 102, 241, 0.15);
+}
+
+.right-panel .editor-window,
+.right-panel .terminal-window {
+  position: relative !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border: none !important;
+  border-radius: 0 !important;
+}
+
+.right-panel .editor-window .window-header,
+.right-panel .terminal-window .top-bar {
+  cursor: default !important;
+}
+
+.right-panel .editor-window .win-btn,
+.right-panel .terminal-window .win-btn {
+  display: none !important;
+}
 
 /* [v0.7.2] 浮动面板 (Debug/MCP/Token) */
 .floating-panel {
@@ -1921,140 +1834,4 @@ body {
   line-height: 1; padding: 2px 6px; border-radius: 4px;
 }
 .panel-close:hover { color: var(--error-color); background: var(--bg-tertiary); }
-
-/* 错误弹窗 (替代 alert, 避免 Wails 崩溃) */
-.dialog-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0,0,0,0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 2000;
-}
-.dialog {
-  min-width: 360px;
-  max-width: 500px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-}
-.dialog-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-color);
-}
-.dialog-header h3 {
-  font-size: 15px;
-  font-weight: 600;
-}
-.close-btn {
-  width: 28px; height: 28px;
-  border: none; background: transparent;
-  color: var(--text-secondary); font-size: 20px;
-  cursor: pointer; border-radius: 4px;
-  display: flex; align-items: center; justify-content: center;
-}
-.close-btn:hover { background: var(--bg-tertiary); color: var(--text-primary); }
-.dialog-body { padding: 20px; }
-.dialog-body p { font-size: 14px; line-height: 1.6; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
-.dialog-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  padding: 14px 20px;
-  border-top: 1px solid var(--border-color);
-}
-
-/* Dock area */
-.dock-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 280px;
-  overflow: hidden;
-  border-left: 1px solid var(--border-color);
-}
-
-.dock-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 80px;
-}
-
-.dock-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
-  font-size: 11px;
-  color: var(--text-secondary);
-  cursor: grab;
-  user-select: none;
-  flex-shrink: 0;
-}
-.dock-header span { opacity: 0.7; }
-
-.dock-float-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 1px 4px;
-  border-radius: 3px;
-}
-.dock-float-btn:hover { background: rgba(99,102,241,.15); color: #6366f1; }
-
-.dock-body { flex: 1; overflow: hidden; }
-
-/* Splitter */
-.dock-splitter {
-  height: 4px;
-  cursor: row-resize;
-  flex-shrink: 0;
-  margin: -2px 0;
-  z-index: 2;
-  position: relative;
-}
-.dock-splitter:hover { background: rgba(99,102,241,.25); }
-
-/* Legacy floating panel (for Debug/MCP/Token windows) */
-.floating-panel {
-  position: fixed;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  box-shadow: 0 6px 24px rgba(0,0,0,.35);
-  z-index: 200;
-}
-.floating-panel.floating-wide { width: 600px; height: 400px; }
-.floating-panel.floating-narrow { width: 320px; height: 280px; }
-
-/* Redock badge: small button near floating dock component */
-.redock-badge {
-  position: fixed;
-  z-index: 201;
-  width: 20px;
-  height: 20px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-}
-.redock-badge:hover { background: rgba(99,102,241,.15); color: #6366f1; }
 </style>
