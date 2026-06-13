@@ -114,33 +114,31 @@
         </template>
       </div>
 
-      <!-- 浮动窗口 -->
-      <div
-        v-for="fp in floatingItems"
-        :key="'float-' + fp.id"
-        class="floating-panel"
-        :style="{ top: fp.y + 'px', left: fp.x + 'px' }"
-      >
-        <div class="float-header" @mousedown="startDragFloat($event, fp.id)">
-          <span>{{ fp.title }}</span>
-          <button class="float-dock-btn" @click.stop="redockPanel(fp.id)">⊟</button>
-          <button class="float-close-btn" @click.stop="closeFloating(fp.id)">x</button>
-        </div>
-        <div class="float-body">
-          <EditorWindow
-            v-if="fp.type === 'editor'"
-            :file="currentFile"
-            @close="activeWindows.editor = false"
-            @open-file-in-editor="openFileInEditor"
-          />
-          <TerminalWindow
-            v-else-if="fp.type === 'terminal'"
-            :logs="terminalLogs"
-            @close="activeWindows.terminal = false"
-            @minimize="activeWindows.terminal = false"
-          />
-        </div>
-      </div>
+      <!-- 浮动窗口：直接渲染组件（它们自带 position:fixed + 拖拽 + header） -->
+      <template v-for="fp in floatingItems" :key="'float-' + fp.id">
+        <!-- Redock 小按钮：悬浮在组件右上角 -->
+        <button
+          class="redock-badge"
+          :style="{ top: fp.y + 'px', left: (fp.x + 380) + 'px' }"
+          @click.stop="redockPanel(fp.id)"
+          title="Dock"
+        >⊟</button>
+
+        <TerminalWindow
+          v-if="fp.type === 'terminal'"
+          :logs="terminalLogs"
+          :docked="false"
+          @close="closeFloating(fp.id)"
+          @minimize="closeFloating(fp.id)"
+        />
+        <EditorWindow
+          v-else-if="fp.type === 'editor'"
+          :file="currentFile"
+          :docked="false"
+          @close="closeFloating(fp.id)"
+          @open-file-in-editor="openFileInEditor"
+        />
+      </template>
     </div>
 
     <!-- 原有浮动窗口：改动摘要 / Git / Debug / MCP / Token（暂保留，后续迁移到 Dock） -->
@@ -2029,48 +2027,34 @@ body {
 }
 .dock-splitter:hover { background: rgba(99,102,241,.25); }
 
-/* Floating panel */
+/* Legacy floating panel (for Debug/MCP/Token windows) */
 .floating-panel {
   position: fixed;
-  width: 420px;
-  height: 320px;
-  min-height: 120px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   border-radius: 6px;
   box-shadow: 0 6px 24px rgba(0,0,0,.35);
   z-index: 200;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
+.floating-panel.floating-wide { width: 600px; height: 400px; }
+.floating-panel.floating-narrow { width: 320px; height: 280px; }
 
-.float-header {
+/* Redock badge: small button near floating dock component */
+.redock-badge {
+  position: fixed;
+  z-index: 201;
+  width: 20px;
+  height: 20px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 5px 8px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
-  cursor: grab;
-  user-select: none;
-  font-size: 11px;
-  color: var(--text-secondary);
-  flex-shrink: 0;
+  justify-content: center;
+  line-height: 1;
 }
-
-.float-dock-btn,
-.float-close-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 1px 5px;
-  border-radius: 3px;
-}
-.float-dock-btn:hover,
-.float-close-btn:hover { background: rgba(99,102,241,.15); color: #6366f1; }
-
-.float-body { flex: 1; overflow: auto; }
+.redock-badge:hover { background: rgba(99,102,241,.15); color: #6366f1; }
 </style>
