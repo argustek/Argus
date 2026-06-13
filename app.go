@@ -2263,11 +2263,17 @@ func (a *App) OpenFileLocation(filePath string) error {
 	case "linux":
 		cmd = exec.Command("xdg-open", dir)
 	default:
-		return fmt.Errorf("不支持的操作系统: %s", goruntime.GOOS)
+		// 不支持的系统，静默忽略
+		return nil
 	}
 
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Run()
+	if err := cmd.Start(); err != nil {
+		a.addLog(fmt.Sprintf("【OpenFileLocation】启动失败: %v", err))
+		return nil
+	}
+
+	go cmd.Wait()
+	return nil
 }
 
 // RunFile 在新 PowerShell 窗口中运行可执行文件
@@ -2324,13 +2330,17 @@ func (a *App) OpenWorkDir() error {
 		return fmt.Errorf("不支持的操作系统: %s", goruntime.GOOS)
 	}
 
-	err := cmd.Run()
+	err := cmd.Start()
 	if err != nil {
-		a.addLog(fmt.Sprintf("【资源管理器】打开失败: %v", err))
-		return fmt.Errorf("打开资源管理器失败: %v", err)
+		a.addLog(fmt.Sprintf("【资源管理器】启动失败: %v", err))
+		return nil
 	}
 
-	a.addLog(fmt.Sprintf("【资源管理器】已成功打开: %s", workDir))
+	go func() {
+		cmd.Wait()
+		a.addLog(fmt.Sprintf("【资源管理器】已打开: %s", workDir))
+	}()
+
 	return nil
 }
 

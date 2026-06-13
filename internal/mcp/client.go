@@ -8,16 +8,17 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 // Client MCP JSON-RPC 2.0 客户端（stdio 传输）
 type Client struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.Reader
-	reader    *bufio.Reader // 用 Reader 而非 Scanner，支持 ReadBytes('\n')
-	mu        sync.Mutex
-	requestID atomic.Int64
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	stdout      io.Reader
+	reader      *bufio.Reader // 用 Reader 而非 Scanner，支持 ReadBytes('\n')
+	mu          sync.Mutex
+	requestID   atomic.Int64
 	initialized bool
 
 	// 响应通道：requestID → response channel
@@ -33,12 +34,13 @@ type Client struct {
 func NewClient(config MCPServerConfig) (*Client, error) {
 	c := &Client{
 		pending: make(map[uint64]chan *JSONRPCResponse),
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
 
 	// 构建命令
 	c.cmd = exec.Command(config.Command, config.Args...)
+	c.cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if len(config.Env) > 0 {
 		env := append([]string{}, c.cmd.Env...) // 复制当前环境
 		for k, v := range config.Env {
@@ -80,7 +82,7 @@ func NewClient(config MCPServerConfig) (*Client, error) {
 func (c *Client) Initialize(serverName string) (*InitializeResult, error) {
 	params := InitializeParams{
 		ProtocolVersion: "2024-11-05",
-		Capabilities: ClientCapabilities{},
+		Capabilities:    ClientCapabilities{},
 		ClientInfo: ImplementationInfo{
 			Name:    "argus-desktop",
 			Version: "0.7.1",

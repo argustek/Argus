@@ -28,6 +28,7 @@
           <div class="ctx-item" @click="ctxAction('add-to-chat')">💬 添加到对话</div>
           <div v-if="isExecutable(ctxMenu.item.path)" class="ctx-item" @click="ctxAction('run')">▶️ 运行</div>
           <div class="ctx-item" @click="ctxAction('copy-path')">📋 复制路径</div>
+          <div class="ctx-item" @click="ctxAction('open-explorer')">📂 在资源管理器中打开</div>
           <div class="ctx-sep"></div>
           <div class="ctx-item danger" @click="ctxAction('delete')">🗑️ 删除</div>
         </template>

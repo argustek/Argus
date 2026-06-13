@@ -11,23 +11,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // LSPClient LSP 客户端，管理 LSP daemon 通信
 // 支持 Go/TypeScript/Python/Rust/C/C++ 多种语言
 type LSPClient struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    *bufio.Reader
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.RWMutex
-	rootURI   string
-	initDone  bool
-	reqID     int64
-	pending   map[int64]chan *LSPResponse
-	workDir   string
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   *bufio.Reader
+	ctx      context.Context
+	cancel   context.CancelFunc
+	mu       sync.RWMutex
+	rootURI  string
+	initDone bool
+	reqID    int64
+	pending  map[int64]chan *LSPResponse
+	workDir  string
 }
 
 // LSPPosition 文件中的位置（0-based）
@@ -38,8 +39,8 @@ type LSPPosition struct {
 
 // LSPLocation LSP 返回的位置信息
 type LSPLocation struct {
-	URI   string      `json:"uri"`
-	Range LSPLRange   `json:"range"`
+	URI   string    `json:"uri"`
+	Range LSPLRange `json:"range"`
 }
 
 // LSPLRange 范围
@@ -69,8 +70,8 @@ type LocationList []LSPLocation
 
 // DiagnosticInfo 诊断信息
 type DiagnosticInfo struct {
-	URI         string        `json:"uri"`
-	Diagnostics []Diagnostic  `json:"diagnostics"`
+	URI         string       `json:"uri"`
+	Diagnostics []Diagnostic `json:"diagnostics"`
 }
 
 // Diagnostic 单个诊断项
@@ -176,16 +177,17 @@ func NewLSPClientForLang(workDir, lang string) (*LSPClient, error) {
 	}
 
 	client := &LSPClient{
-		ctx:      ctx,
-		cancel:   cancel,
-		rootURI:  fileToURI(absDir),
-		workDir:  absDir,
-		pending:  make(map[int64]chan *LSPResponse),
+		ctx:     ctx,
+		cancel:  cancel,
+		rootURI: fileToURI(absDir),
+		workDir: absDir,
+		pending: make(map[int64]chan *LSPResponse),
 	}
 
 	// 启动 LSP 服务器
 	client.cmd = exec.CommandContext(ctx, config.Command, config.Args...)
 	client.cmd.Dir = absDir
+	client.cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	stdin, err := client.cmd.StdinPipe()
 	if err != nil {
@@ -251,11 +253,11 @@ func (c *LSPClient) initialize() error {
 		"rootUri":   c.rootURI,
 		"capabilities": map[string]interface{}{
 			"textDocument": map[string]interface{}{
-				"hover":              map[string]interface{}{"contentFormat": []string{"plaintext", "markdown"}},
-				"definition":         map[string]interface{}{},
-				"references":         map[string]interface{}{},
-				"rename":             map[string]interface{}{"prepareSupport": true},
-				"documentSymbol":     map[string]interface{}{},
+				"hover":          map[string]interface{}{"contentFormat": []string{"plaintext", "markdown"}},
+				"definition":     map[string]interface{}{},
+				"references":     map[string]interface{}{},
+				"rename":         map[string]interface{}{"prepareSupport": true},
+				"documentSymbol": map[string]interface{}{},
 			},
 			"workspace": map[string]interface{}{
 				"workspaceFolders": []map[string]string{

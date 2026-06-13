@@ -45,6 +45,7 @@ export default {
     clearWorkDir: 'Clear Working Directory',
     recent: 'Recent',
     settings: 'Settings',
+    switchLanguage: 'Switch Language',
     minimize: 'Minimize',
     maximize: 'Maximize',
     projectRunning: 'Project Running',

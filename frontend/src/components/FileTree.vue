@@ -82,8 +82,12 @@ async function onContextAction(data: { action: string; item: any }) {
       break
     }
     case 'open-explorer': {
-      // @ts-ignore Wails binding
-      window.go.main.App.OpenFileLocation(item.path)
+      try {
+        // @ts-ignore Wails binding
+        await window.go.main.App.OpenFileLocation(item.path)
+      } catch (e) {
+        console.error('打开文件位置失败:', e)
+      }
       break
     }
     case 'delete': {

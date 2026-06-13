@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"argus/internal/types"
@@ -348,6 +349,7 @@ func runQuickCommand(cmd string) (string, error) {
 	}
 	c := exec.Command(parts[0], parts[1:]...)
 	c.Env = os.Environ()
+	c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := c.CombinedOutput()
 	return string(out), err
 }

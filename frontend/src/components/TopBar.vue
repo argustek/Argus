@@ -87,6 +87,18 @@
         <span class="status-item ap" :class="{ busy: aiStatus.apStatus === 'busy' }" title="AP 审批者">AP</span>
       </div>
       <button class="icon-btn" @click.stop="$emit('open-settings')" :title="t('topBar.settings')">⚙️</button>
+      <div class="lang-selector" @mousedown.stop>
+        <button class="icon-btn lang-btn" @click.prevent="toggleLangMenu" :title="t('topBar.switchLanguage')">
+          {{ currentLocaleLabel }}
+        </button>
+        <div v-if="showLangMenu" class="lang-dropdown">
+          <div v-for="loc in availableLocales" :key="loc.code"
+            :class="['lang-item', { active: loc.code === locale }]"
+            @click="changeLang(loc.code)">
+            {{ loc.label }}
+          </div>
+        </div>
+      </div>
       <div class="divider"></div>
       <button class="window-btn" @click.stop="minimizeWindow" :title="t('topBar.minimize')">─</button>
       <button class="window-btn" @click.stop="maximizeWindow" :title="t('topBar.maximize')">□</button>
@@ -127,10 +139,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { availableLocales } from '../i18n'
 import { WindowMinimise, WindowToggleMaximise, Quit, WindowGetPosition, WindowSetPosition } from '../../wailsjs/runtime'
-import { OpenFolderDialog, ClearWorkDir, ForceQuit, ShowWindow, OpenWorkDir, OpenFileDialog } from '../../wailsjs/go/main/App'
-
-const { t } = useI18n()
+import { OpenFolderDialog, ClearWorkDir, ForceQuit, ShowWindow, OpenWorkDir, OpenFileDialog, SetLang } from '../../wailsjs/go/main/App'
 
 const props = defineProps<{
   activeWindows: { fileTree: boolean; editor: boolean; terminal: boolean; changes: boolean; debug?: boolean; mcp?: boolean; token?: boolean }
@@ -147,6 +158,25 @@ const props = defineProps<{
 const emit = defineEmits(['toggle-window', 'reset', 'open-settings', 'select-project', 'toggle-c-monitor', 'toggle-git', 'toggle-search', 'open-file-in-editor'])
 
 const showMenu = ref(false)
+const showLangMenu = ref(false)
+
+const { t, locale } = useI18n()
+
+const currentLocaleLabel = computed(() => {
+  const found = availableLocales.find(l => l.code === locale.value)
+  return found ? found.label : 'EN'
+})
+
+function toggleLangMenu() { showLangMenu.value = !showLangMenu.value }
+function closeLangMenu() { showLangMenu.value = false }
+
+function changeLang(code: string) {
+  locale.value = code
+  localStorage.setItem('argus-locale', code)
+  SetLang(code).catch((e: Error) => console.error('Backend language set failed:', e))
+  showLangMenu.value = false
+}
+
 const showRemoteDialog = ref(false)
 const remoteName = ref('origin')
 const remoteUrl = ref('')
@@ -173,10 +203,14 @@ function connectRemote() {
   showRemoteDialog.value = true
 }
 
-function openWorkDirInExplorer() {
+async function openWorkDirInExplorer() {
   closeMenu()
-  // @ts-ignore
-  window.go.main.App.OpenFileLocation(props.workDir)
+  try {
+    // @ts-ignore
+    await window.go.main.App.OpenWorkDir()
+  } catch (e) {
+    console.error('打开工作目录失败:', e)
+  }
 }
 
 function clearWorkDir() {
@@ -343,6 +377,9 @@ function handleClickOutside(e: MouseEvent) {
   const target = e.target as HTMLElement
   if (!target.closest('.workdir-selector')) {
     closeMenu()
+  }
+  if (!target.closest('.lang-selector')) {
+    closeLangMenu()
   }
 }
 
@@ -551,6 +588,52 @@ const projectStatusText = computed(() => {
   height: 20px;
   background: var(--border-color);
   margin: 0 8px;
+}
+
+/* 语言选择器 */
+.lang-selector {
+  position: relative;
+  display: flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+.lang-btn {
+  font-size: 11px !important;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  min-width: 32px;
+}
+
+.lang-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 100px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  padding: 4px 0;
+}
+
+.lang-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 16px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.lang-item:hover { background: var(--bg-tertiary); }
+.lang-item.active {
+  background: rgba(47, 129, 247, 0.15);
+  color: var(--accent-color);
+  font-weight: 600;
 }
 
 /* 工作目录选择器 */

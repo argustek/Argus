@@ -176,6 +176,11 @@ function initMonacoEditor() {
 }
 
   if (editorInstance) {
+    const model = editorInstance.getModel()
+    if (model) {
+      monaco.editor.setModelLanguage(model, languageMode.value)
+    }
+
   editorInstance.onDidChangeCursorPosition((e) => {
     cursorPosition.value = e.position
   })

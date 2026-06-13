@@ -44,6 +44,7 @@ export default {
     clearWorkDir: '清除工作目录',
     recent: '最近',
     settings: '设置',
+    switchLanguage: '切换语言',
     minimize: '最小化',
     maximize: '最大化',
     projectRunning: '项目运行中',

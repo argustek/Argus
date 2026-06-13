@@ -91,7 +91,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:  "Argus",
+		Title:  "Argus · 驭码",
 		Width:  1280,
 		Height: 720,
 		AssetServer: &assetserver.Options{
@@ -100,8 +100,8 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 24, G: 24, B: 24, A: 255},
 		Windows: &windows.Options{
 			WebviewIsTransparent: false,
-			WindowIsTranslucent:   false,
-			WebviewUserDataPath:   "",
+			WindowIsTranslucent:  false,
+			WebviewUserDataPath:  "",
 		},
 		OnStartup: func(ctx context.Context) {
 			fmt.Println("🚀 [0] OnStartup CALLBACK")
