@@ -2270,6 +2270,34 @@ func (a *App) OpenFileLocation(filePath string) error {
 	return cmd.Run()
 }
 
+// RunFile 在新 PowerShell 窗口中运行可执行文件
+func (a *App) RunFile(filePath string) error {
+	fullPath := filepath.Join(a.getProjectDir(), filePath)
+
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return fmt.Errorf("文件不存在: %s", fullPath)
+	}
+
+	var cmd *exec.Cmd
+
+	switch goruntime.GOOS {
+	case "windows":
+		if strings.EqualFold(filepath.Ext(fullPath), ".ps1") {
+			cmd = exec.Command("powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", fullPath)
+		} else {
+			cmd = exec.Command("powershell", "-NoExit", "-Command", "&", fullPath)
+		}
+	case "darwin":
+		cmd = exec.Command("open", "-a", "Terminal", fullPath)
+	case "linux":
+		cmd = exec.Command("x-terminal-emulator", "-e", fullPath)
+	default:
+		return fmt.Errorf("不支持的操作系统: %s", goruntime.GOOS)
+	}
+
+	return cmd.Start()
+}
+
 func (a *App) OpenWorkDir() error {
 	workDir := a.getProjectDir()
 

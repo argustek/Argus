@@ -30,7 +30,7 @@ const props = defineProps<{
   workDir: string
 }>()
 
-const emit = defineEmits(['select-file', 'open-in-editor'])
+const emit = defineEmits(['select-file', 'select-binary-file', 'open-in-editor', 'run-in-terminal', 'add-to-chat'])
 
 const treeItems = ref<any[]>([])
 const loading = ref(false)
@@ -53,15 +53,34 @@ async function refresh() {
   }
 }
 
+const EXECUTABLE_EXTS = ['.exe', '.bat', '.cmd', '.ps1', '.com', '.msi']
+
+function isExecutable(path: string) {
+  const ext = path?.toLowerCase().split('.').pop()
+  return ext ? EXECUTABLE_EXTS.includes('.' + ext) : false
+}
+
 function onSelectFile(item: any) {
   selectedPath.value = item.path
-  emit('select-file', item)
+  if (isExecutable(item.path)) {
+    emit('select-binary-file', item)
+  } else {
+    emit('select-file', item)
+  }
 }
 
 async function onContextAction(data: { action: string; item: any }) {
   const { action, item } = data
 
   switch (action) {
+    case 'run': {
+      emit('run-in-terminal', { command: item.path })
+      break
+    }
+    case 'add-to-chat': {
+      emit('add-to-chat', item.path)
+      break
+    }
     case 'open-explorer': {
       // @ts-ignore Wails binding
       window.go.main.App.OpenFileLocation(item.path)

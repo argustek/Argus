@@ -1317,7 +1317,17 @@ watch(() => props.thoughtEvents?.length, () => {
   })
 })
 
-defineExpose({ toggleSearch })
+defineExpose({ toggleSearch, appendToInput })
+
+function appendToInput(text: string) {
+  if (!text) return
+  if (inputMessage.value) {
+    inputMessage.value += '\n' + text
+  } else {
+    inputMessage.value = text
+  }
+  nextTick(() => textareaRef.value?.focus())
+}
 </script>
 
 <style scoped>

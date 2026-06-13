@@ -470,6 +470,10 @@ export function RunCommandWithOutput(arg1, arg2, arg3) {
   return window['go']['main']['App']['RunCommandWithOutput'](arg1, arg2, arg3);
 }
 
+export function RunFile(arg1) {
+  return window['go']['main']['App']['RunFile'](arg1);
+}
+
 export function SaveConfig(arg1) {
   return window['go']['main']['App']['SaveConfig'](arg1);
 }

@@ -25,6 +25,8 @@
       <div v-if="ctxMenu.visible" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
         <template v-if="ctxMenu.item?.type === 'file'">
           <div class="ctx-item" @click="ctxAction('open')">📝 打开</div>
+          <div class="ctx-item" @click="ctxAction('add-to-chat')">💬 添加到对话</div>
+          <div v-if="isExecutable(ctxMenu.item.path)" class="ctx-item" @click="ctxAction('run')">▶️ 运行</div>
           <div class="ctx-item" @click="ctxAction('copy-path')">📋 复制路径</div>
           <div class="ctx-sep"></div>
           <div class="ctx-item danger" @click="ctxAction('delete')">🗑️ 删除</div>
@@ -73,6 +75,13 @@ function showContextMenu(e: MouseEvent) {
   ctxMenu.item = props.item
 }
 
+const EXECUTABLE_EXTS = ['.exe', '.bat', '.cmd', '.ps1', '.com', '.msi']
+
+function isExecutable(path: string) {
+  const ext = path?.toLowerCase().split('.').pop()
+  return ext ? EXECUTABLE_EXTS.includes('.' + ext) : false
+}
+
 async function ctxAction(action: string) {
   const item = ctxMenu.item
   closeCtx()
@@ -81,6 +90,12 @@ async function ctxAction(action: string) {
   switch (action) {
     case 'open':
       emit('select', item)
+      break
+    case 'run':
+      emit('context', { action: 'run', item })
+      break
+    case 'add-to-chat':
+      emit('context', { action: 'add-to-chat', item })
       break
     case 'copy-path': {
       const sep = '\\'

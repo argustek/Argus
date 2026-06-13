@@ -81,7 +81,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { StartTerminal, WriteToTerminal, StopTerminal, SetTerminalEncoding } from '../../wailsjs/go/main/App'
+import { StartTerminal, WriteToTerminal, StopTerminal, SetTerminalEncoding, NewTerminalSession } from '../../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime'
 import { useDraggable } from '../composables/useDraggable'
 
@@ -464,6 +464,22 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(async () => {
   minimized.value = false
   EventsOn('terminal:output', handleOutput)
+  EventsOn('terminal:execute', (data: { command: string }) => {
+    const relPath = data?.command || ''
+    if (!relPath) return
+    const name = relPath.split(/[\\/]/).pop() || relPath
+    const psSafePath = '.\\' + relPath.replace(/\//g, '\\')
+    const tabId = `tab-${++tabCounter}`
+    tabs.push({ id: tabId, name })
+    sessionData[tabId] = createSessionData(tabId)
+    activeTabId.value = tabId
+    currentInput.value = ''
+    nextTick(() => {
+      addLine(`<span style="color:#0dbc79;font-weight:bold">▶ 运行: ${escapeHtml(name)}</span>`)
+      WriteToTerminal(`${psSafePath}\r\n`).catch(() => {})
+      inputRef.value?.focus()
+    })
+  })
   await initFirstTab()
   nextTick(() => inputRef.value?.focus())
   document.addEventListener('mousedown', closeContextMenu)
@@ -515,7 +531,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   padding: 6px 10px;
-  background: #007acc;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
   border-radius: 8px 8px 0 0;
   cursor: move;
   user-select: none;

@@ -16,14 +16,10 @@
     </div>
     
     <div class="window-content">
-      <div v-if="loading && !editorInstance" class="empty-state">
-        <div class="empty-text">{{ t('editor.loading') }}</div>
-      </div>
-      <div v-else-if="error" class="empty-state error">
+      <div v-show="error && !loading" class="empty-state error">
         <div class="empty-text">{{ error }}</div>
-        <button class="retry-btn" @click="retryLoad">重试</button>
       </div>
-      <div v-else-if="!currentFilePath && !fileContent" class="empty-state welcome">
+      <div v-show="!currentFilePath && !fileContent && !error" class="empty-state welcome">
         <div class="welcome-icon">👁️</div>
         <div class="welcome-title">Argus IDE</div>
         <div class="welcome-desc">打开文件开始编辑</div>
@@ -32,7 +28,7 @@
           <button class="btn" @click="handleNewFile">📄 新建文件</button>
         </div>
       </div>
-      <div v-else ref="editorContainer" class="monaco-container">
+      <div ref="editorContainer" class="monaco-container" :style="{ display: (error && !loading) || (!currentFilePath && !fileContent && !error) ? 'none' : 'flex' }">
         <div v-if="loading" class="loading-overlay">{{ t('editor.loading') }}...</div>
       </div>
     </div>
@@ -206,6 +202,7 @@ async function loadFile(filePath: string) {
 
     if (editorInstance) {
       editorInstance.setValue(fileContent.value)
+      editorInstance.layout()
     } else {
       await new Promise(resolve => setTimeout(resolve, 50))
       initMonacoEditor()
@@ -231,13 +228,24 @@ watch(() => props.file, async (newFile) => {
     modified.value = false
     return
   }
+  if ((newFile as any)._binary) {
+    error.value = (newFile as any)._binaryError || `无法显示 "${newFile.name || newFile.path}"，因为它是二进制文件`
+    fileContent.value = ''
+    return
+  }
+  error.value = ''
   await loadFile(newFile.path)
 })
 
 onMounted(async () => {
   await nextTick()
   if (props.file?.path) {
-    await loadFile(props.file.path)
+    if ((props.file as any)._binary) {
+      error.value = (props.file as any)._binaryError || `无法显示 "${props.file.name || props.file.path}"，因为它是二进制文件`
+      fileContent.value = ''
+    } else {
+      await loadFile(props.file.path)
+    }
   } else {
     initMonacoEditor()
   }

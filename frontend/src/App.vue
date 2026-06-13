@@ -50,6 +50,9 @@
         v-if="activeWindows.fileTree"
         :work-dir="workDir"
         @select-file="openFile"
+        @select-binary-file="handleSelectBinaryFile"
+        @run-in-terminal="handleRunInTerminal"
+        @add-to-chat="handleAddToChat"
         class="file-tree-panel"
       />
 
@@ -1350,6 +1353,25 @@ function handleRunInTerminal(data: { command: string }) {
     command: data.command,
     timestamp: Math.floor(Date.now() / 1000)
   })
+}
+
+// 将文件路径添加到对话输入框
+function handleAddToChat(path: string) {
+  const sep = '\\'
+  const dir = (workDir.value || '').replace(/\/+$/, '').replace(/\\+$/, '')
+  const absPath = dir ? dir + sep + path.replace(/\//g, sep) : path
+  chatPanelRef.value?.appendToInput(absPath)
+}
+
+// 处理二进制文件单击：在编辑器中显示提示
+function handleSelectBinaryFile(item: any) {
+  activeWindows.editor = true
+  currentFile.value = {
+    name: item.name || item.path?.split(/[\\/]/).pop(),
+    path: item.path,
+    _binary: true,
+    _binaryError: `无法显示 "${item.name || item.path}"，因为它是二进制文件`
+  }
 }
 
 // 恢复未完成任务

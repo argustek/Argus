@@ -240,6 +240,8 @@ export function RunCommandAsync(arg1:string,arg2:Array<string>,arg3:string):Prom
 
 export function RunCommandWithOutput(arg1:string,arg2:Array<string>,arg3:string):Promise<string>;
 
+export function RunFile(arg1:string):Promise<void>;
+
 export function SaveConfig(arg1:main.Config):Promise<void>;
 
 export function SaveDingTalkConfig(arg1:main.DingTalkConfig):Promise<void>;
