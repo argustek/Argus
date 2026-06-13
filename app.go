@@ -3438,51 +3438,58 @@ func (a *App) SendMessage(content string) error {
 		a.emitToFrontend("new-message", userMsg, "SendMessage:UserInput", chat.PathUserInput)
 
 		if a.bridge != nil {
-			fmt.Printf("[SendMessage] 🚀 V2 Bridge.Process: %s\n", content)
-			result, err := a.bridge.Process(content)
-			fmt.Printf("[SendMessage] V2 返回: success=%v err=%v phases=%d\n",
-				result.Success, err, len(result.Phases))
+			fmt.Printf("[SendMessage] 🚀 V2 Bridge.Process (async): %s\n", content)
+			go func() {
+				result, err := a.bridge.Process(content)
+				fmt.Printf("[SendMessage] V2 返回: success=%v err=%v phases=%d\n",
+					result.Success, err, len(result.Phases))
 
-			if err != nil {
-				a.addLog(fmt.Sprintf("【V2-Error】%v", err))
-				detail := ""
-				if len(result.Outputs) > 0 {
-					detail = strings.Join(result.Outputs, "\n")
-				}
-				if len(result.Phases) > 0 {
-					for _, p := range result.Phases {
-						if p.Output != "" {
-							detail += "\n---\n" + p.Output
+				if err != nil {
+					a.addLog(fmt.Sprintf("【V2-Error】%v", err))
+					detail := ""
+					if len(result.Outputs) > 0 {
+						detail = strings.Join(result.Outputs, "\n")
+					}
+					if len(result.Phases) > 0 {
+						for _, p := range result.Phases {
+							if p.Output != "" {
+								detail += "\n---\n" + p.Output
+							}
 						}
 					}
+					errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v\n\n%s", err, detail))
+					errorMsg.Summary = "System"
+					a.messages = append(a.messages, errorMsg)
+					a.saveMessages()
+					a.emitToFrontend("new-message", errorMsg, "SendMessage:V2Error", chat.PathSystem)
+				} else {
+					a.addLog(fmt.Sprintf("【V2-Done】success=%v actions=%d duration=%v",
+						result.Success, len(result.Actions), result.Duration))
 				}
-				errorMsg := a.newChatMessage("error", fmt.Sprintf("V2 Error: %v\n\n%s", err, detail))
-				errorMsg.Summary = "System"
-				a.messages = append(a.messages, errorMsg)
-				a.saveMessages()
-				a.emitToFrontend("new-message", errorMsg, "SendMessage:V2Error", chat.PathSystem)
-			} else {
-				a.addLog(fmt.Sprintf("【V2-Done】success=%v actions=%d duration=%v",
-					result.Success, len(result.Actions), result.Duration))
-			}
+
+				a.aiThinking = false
+				a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
+			}()
 		} else {
-			fmt.Printf("[SendMessage] ⚠️ Bridge未初始化，fallback到V1\n")
-			response, err := a.chatManager.ProcessMessage(content)
-			fmt.Printf("[SendMessage] V1 ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
+			fmt.Printf("[SendMessage] ⚠️ Bridge未初始化，异步处理\n")
+			go func() {
+				response, err := a.chatManager.ProcessMessage(content)
+				fmt.Printf("[SendMessage] V1 ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
 
-			if err != nil {
-				a.addLog(fmt.Sprintf("【V1-Error】处理失败: %v", err))
-				errorMsg := a.newChatMessage("error", fmt.Sprintf("错误: %v", err))
-				errorMsg.Summary = "System"
-				a.messages = append(a.messages, errorMsg)
-				a.saveMessages()
-				a.emitToFrontend("new-message", errorMsg, "SendMessage:V1Error", chat.PathSystem)
-				a.sendToDingTalk(fmt.Sprintf("[ERR] %v", err))
-			}
+				if err != nil {
+					a.addLog(fmt.Sprintf("【V1-Error】处理失败: %v", err))
+					errorMsg := a.newChatMessage("error", fmt.Sprintf("错误: %v", err))
+					errorMsg.Summary = "System"
+					a.messages = append(a.messages, errorMsg)
+					a.saveMessages()
+					a.emitToFrontend("new-message", errorMsg, "SendMessage:V1Error", chat.PathSystem)
+					a.sendToDingTalk(fmt.Sprintf("[ERR] %v", err))
+				}
+
+				a.aiThinking = false
+				a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
+			}()
 		}
-
-		a.aiThinking = false
-		a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
 
 		return nil
 	}

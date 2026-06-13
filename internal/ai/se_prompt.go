@@ -892,7 +892,7 @@ func (s *SEProcessor) executeSETool(name, argsJSON string) string {
 		if absPath == absWork || !strings.HasPrefix(absPath, absWork+string(filepath.Separator)) {
 			return fmt.Sprintf("安全拒绝: 不允许删除路径 %s（超出工作目录范围）", args.Path)
 		}
-		if err := os.Remove(fullPath); err != nil {
+		if err := os.RemoveAll(fullPath); err != nil {
 			return fmt.Sprintf("删除文件失败: %v", err)
 		}
 		return fmt.Sprintf("已删除: %s", args.Path)

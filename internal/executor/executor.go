@@ -299,29 +299,29 @@ func (e *Executor) ReadFile(path string) (string, error) {
 type EditResult struct {
 	Success      bool   `json:"success"`
 	Error        string `json:"error,omitempty"`
-	Diff         string `json:"diff"`                   // Unified diff 格式
-	LinesChanged int    `json:"lines_changed"`          // 修改的行数
-	FilePath     string `json:"file_path,omitempty"`    // 文件路径
+	Diff         string `json:"diff"`                // Unified diff 格式
+	LinesChanged int    `json:"lines_changed"`       // 修改的行数
+	FilePath     string `json:"file_path,omitempty"` // 文件路径
 }
 
 // [P0] SearchFilesMatch 单个文件匹配结果
 type SearchFilesMatch struct {
-	File      string   `json:"file"`                // 文件路径（相对）
-	Line      int      `json:"line"`                // 匹配行号
-	Column    int      `json:"column"`              // 匹配列号
-	Content   string   `json:"content"`             // 匹配行的内容
+	File          string   `json:"file"`                     // 文件路径（相对）
+	Line          int      `json:"line"`                     // 匹配行号
+	Column        int      `json:"column"`                   // 匹配列号
+	Content       string   `json:"content"`                  // 匹配行的内容
 	ContextBefore []string `json:"context_before,omitempty"` // 前2行上下文
 	ContextAfter  []string `json:"context_after,omitempty"`  // 后2行上下文
 }
 
 // [P0] SearchFilesResult 搜索结果
 type SearchFilesResult struct {
-	Pattern     string             `json:"pattern"`       // 搜索模式
-	IsRegex     bool               `json:"is_regex"`      // 是否正则
-	TotalMatches int               `json:"total_matches"` // 总匹配数
-	FilesSearched int              `json:"files_searched"` // 搜索的文件数
-	Matches     []SearchFilesMatch `json:"matches"`       // 匹配列表
-	Error       string             `json:"error,omitempty"`
+	Pattern       string             `json:"pattern"`        // 搜索模式
+	IsRegex       bool               `json:"is_regex"`       // 是否正则
+	TotalMatches  int                `json:"total_matches"`  // 总匹配数
+	FilesSearched int                `json:"files_searched"` // 搜索的文件数
+	Matches       []SearchFilesMatch `json:"matches"`        // 匹配列表
+	Error         string             `json:"error,omitempty"`
 }
 
 // [P0] SearchFiles 全局搜索文件内容（支持正则和字符串匹配）
@@ -404,20 +404,20 @@ type SearchOption func(*SearchOptions)
 
 // [P0] SearchOptions 搜索配置
 type SearchOptions struct {
-	Path        string   // 搜索子目录（相对路径）
-	FilePattern string   // glob 文件过滤（如 "*.go"）
-	IsRegex     bool     // 是否使用正则表达式
-	CaseInsensitive bool // 是否忽略大小写
-	MaxResults  int      // 最大返回数量（0=不限）
-	ContextLines int     // 上下文行数（默认2）
+	Path            string // 搜索子目录（相对路径）
+	FilePattern     string // glob 文件过滤（如 "*.go"）
+	IsRegex         bool   // 是否使用正则表达式
+	CaseInsensitive bool   // 是否忽略大小写
+	MaxResults      int    // 最大返回数量（0=不限）
+	ContextLines    int    // 上下文行数（默认2）
 }
 
 func defaultSearchOptions() SearchOptions {
 	return SearchOptions{
-		IsRegex:          false,
-		CaseInsensitive:  false,
-		MaxResults:       100,
-		ContextLines:     2,
+		IsRegex:         false,
+		CaseInsensitive: false,
+		MaxResults:      100,
+		ContextLines:    2,
 	}
 }
 
@@ -674,10 +674,10 @@ func (e *Executor) Exec(command string, timeout time.Duration) (string, error) {
 
 // Pre-compiled regexes for sanitizeCommandPath (avoid recompiling on every call)
 var (
-	reCDPath      = regexp.MustCompile(`(?i)^cd\s+["']?([^"'\s]+)["']?`)
-	reGoTestFile  = regexp.MustCompile(`(?i)go\s+test\s+(?:-v\s+)?(?:-run\s+\S+\s+)?(\S+\.go)`)
-	reGoRun       = regexp.MustCompile(`(?i)(go run|python|node)\s+(.+)$`)
-	reBadPath     = regexp.MustCompile(`(?i)["']?(F:\\\\GithubArgus|F:/GithubArgus|C:\\\\GithubArgus|C:/GithubArgus)`)
+	reCDPath     = regexp.MustCompile(`(?i)^cd\s+["']?([^"'\s]+)["']?`)
+	reGoTestFile = regexp.MustCompile(`(?i)go\s+test\s+(?:-v\s+)?(?:-run\s+\S+\s+)?(\S+\.go)`)
+	reGoRun      = regexp.MustCompile(`(?i)(go run|python|node)\s+(.+)$`)
+	reBadPath    = regexp.MustCompile(`(?i)["']?(F:\\\\GithubArgus|F:/GithubArgus|C:\\\\GithubArgus|C:/GithubArgus)`)
 
 	// Known file extensions for run commands
 	runExts = map[string]bool{".go": true, ".py": true, ".js": true, ".ts": true}
@@ -799,7 +799,7 @@ func (e *Executor) DeleteFile(path string) error {
 		return fmt.Errorf("path outside work directory: %s", path)
 	}
 
-	return os.Remove(fullPath)
+	return os.RemoveAll(fullPath)
 }
 
 func (e *Executor) ListFiles() ([]FileInfo, error) {
@@ -890,26 +890,26 @@ func (e *Executor) AssignTask(taskID, title, description string, dependencies []
 
 // [P1] GitResult Git 操作结果
 type GitResult struct {
-	Success   bool   `json:"success"`
-	Action    string `json:"action"`              // status/diff/commit/push/log/branch
-	Output    string `json:"output"`              // 命令输出
-	Error     string `json:"error,omitempty"`     // 错误信息
-	ExitCode  int    `json:"exit_code"`           // 退出码
+	Success  bool   `json:"success"`
+	Action   string `json:"action"`          // status/diff/commit/push/log/branch
+	Output   string `json:"output"`          // 命令输出
+	Error    string `json:"error,omitempty"` // 错误信息
+	ExitCode int    `json:"exit_code"`       // 退出码
 
-	Diff      string `json:"diff,omitempty"`      // diff 内容（仅 diff 操作）
-	Status    *GitStatus `json:"status,omitempty"` // 结构化状态（仅 status 操作）
-	Log       []GitLogEntry `json:"log,omitempty"` // 日志条目（仅 log 操作）
+	Diff   string        `json:"diff,omitempty"`   // diff 内容（仅 diff 操作）
+	Status *GitStatus    `json:"status,omitempty"` // 结构化状态（仅 status 操作）
+	Log    []GitLogEntry `json:"log,omitempty"`    // 日志条目（仅 log 操作）
 }
 
 // [P1] GitStatus 结构化 Git 状态
 type GitStatus struct {
-	Branch     string            `json:"branch"`               // 当前分支
-	Ahead      int               `json:"ahead"`                // 领先远程提交数
-	Behind     int               `json:"behind"`               // 落后远程提交数
-	Staged     []string          `json:"staged"`               // 已暂存文件
-	Modified   []string          `json:"modified"`             // 已修改未暂存
-	Untracked  []string          `json:"untracked"`            // 未跟踪文件
-	IsClean    bool              `json:"is_clean"`             // 工作区是否干净
+	Branch    string   `json:"branch"`    // 当前分支
+	Ahead     int      `json:"ahead"`     // 领先远程提交数
+	Behind    int      `json:"behind"`    // 落后远程提交数
+	Staged    []string `json:"staged"`    // 已暂存文件
+	Modified  []string `json:"modified"`  // 已修改未暂存
+	Untracked []string `json:"untracked"` // 未跟踪文件
+	IsClean   bool     `json:"is_clean"`  // 工作区是否干净
 }
 
 // [P1] GitLogEntry Git 日志条目
@@ -1086,35 +1086,35 @@ func isPathInDir(path, dir string) bool {
 // [P1] 测试运行器
 
 type TestConfig struct {
-	Pattern  string `json:"pattern"`   // 测试匹配模式 ("./...", "TestLogin")
-	Coverage bool   `json:"coverage"`  // 是否生成覆盖率报告
-	Verbose  bool   `json:"verbose"`   // 详细输出
-	Timeout  int    `json:"timeout"`   // 超时秒数（默认60）
+	Pattern  string `json:"pattern"`  // 测试匹配模式 ("./...", "TestLogin")
+	Coverage bool   `json:"coverage"` // 是否生成覆盖率报告
+	Verbose  bool   `json:"verbose"`  // 详细输出
+	Timeout  int    `json:"timeout"`  // 超时秒数（默认60）
 }
 
 type TestCase struct {
-	Name          string `json:"name"`            // 测试名（如 TestEditFile_BasicReplace）
-	Status        string `json:"status"`          // pass / fail / skip / panic
-	Duration      string `json:"duration"`        // 耗时（如 "0.05s"）
-	Error         string `json:"error,omitempty"` // 失败时的完整错误信息
+	Name     string `json:"name"`            // 测试名（如 TestEditFile_BasicReplace）
+	Status   string `json:"status"`          // pass / fail / skip / panic
+	Duration string `json:"duration"`        // 耗时（如 "0.05s"）
+	Error    string `json:"error,omitempty"` // 失败时的完整错误信息
 	// [v0.7.1] JSON 解析增强字段
-	File          string `json:"file,omitempty"`          // 失败所在文件（从 output 行提取）
-	Line          int    `json:"line,omitempty"`          // 失败所在行号
-	Expected      string `json:"expected,omitempty"`      // 期望值（从断言提取）
-	Actual        string `json:"actual,omitempty"`        // 实际值（从断言提取）
+	File          string `json:"file,omitempty"`           // 失败所在文件（从 output 行提取）
+	Line          int    `json:"line,omitempty"`           // 失败所在行号
+	Expected      string `json:"expected,omitempty"`       // 期望值（从断言提取）
+	Actual        string `json:"actual,omitempty"`         // 实际值（从断言提取）
 	AssertionType string `json:"assertion_type,omitempty"` // 断言类型（Equal/NotEqual/True/False/Nil/NotNil 等）
 }
 
 type TestReport struct {
-	Success  bool        `json:"success"`       // 全部通过?
-	Total    int         `json:"total"`         // 总测试数
-	Passed   int         `json:"passed"`        // 通过数
-	Failed   int         `json:"failed"`        // 失败数
-	Skipped  int         `json:"skipped"`       // 跳过数
-	Coverage string      `json:"coverage,omitempty"` // 覆盖率百分比
-	Duration string      `json:"duration"`      // 总耗时
-	Cases    []TestCase  `json:"cases"`         // 各用例详情
-	Output   string      `json:"output"`        // 原始输出
+	Success  bool       `json:"success"`            // 全部通过?
+	Total    int        `json:"total"`              // 总测试数
+	Passed   int        `json:"passed"`             // 通过数
+	Failed   int        `json:"failed"`             // 失败数
+	Skipped  int        `json:"skipped"`            // 跳过数
+	Coverage string     `json:"coverage,omitempty"` // 覆盖率百分比
+	Duration string     `json:"duration"`           // 总耗时
+	Cases    []TestCase `json:"cases"`              // 各用例详情
+	Output   string     `json:"output"`             // 原始输出
 }
 
 func (e *Executor) RunTests(config TestConfig) (*TestReport, error) {
@@ -1251,12 +1251,12 @@ func parseGoTestOutput(output string) []TestCase {
 
 // [v0.7.1] goTestJSONEvent go test -json 输出的单条事件
 type goTestJSONEvent struct {
-	Time    string `json:"Time"`              // ISO 时间戳
-	Action  string `json:"Action"`            // run/pass/fail/skip/panic/output/cont
-	Package string `json:"Package"`           // 包路径
-	Test    string `json:"Test"`             // 测试名（空=包级别事件）
+	Time    string  `json:"Time"`              // ISO 时间戳
+	Action  string  `json:"Action"`            // run/pass/fail/skip/panic/output/cont
+	Package string  `json:"Package"`           // 包路径
+	Test    string  `json:"Test"`              // 测试名（空=包级别事件）
 	Elapsed float64 `json:"Elapsed,omitempty"` // 耗时（秒）
-	Output  string `json:"Output,omitempty"`  // 输出文本
+	Output  string  `json:"Output,omitempty"`  // 输出文本
 }
 
 // parseGoTestAssertion 从测试失败输出中提取断言信息
@@ -1391,35 +1391,35 @@ type ErrorCategory string
 
 const (
 	CategoryTransient ErrorCategory = "transient" // 网络超时/限流/临时故障 → 可重试
-	CategoryFixable   ErrorCategory = "fixable"    // 语法/编译/导入错误 → SE可修复
-	CategoryPermanent ErrorCategory = "permanent"  // 权限/致命错误 → 不可重试
+	CategoryFixable   ErrorCategory = "fixable"   // 语法/编译/导入错误 → SE可修复
+	CategoryPermanent ErrorCategory = "permanent" // 权限/致命错误 → 不可重试
 )
 
 type RetryConfig struct {
-	MaxRetries    int           `json:"max_retries"`     // 最大重试次数（默认3）
-	InitialDelay  time.Duration `json:"initial_delay"`   // 初始延迟（默认1s）
-	MaxDelay      time.Duration `json:"max_delay"`       // 最大延迟（默认30s）
-	Multiplier    float64       `json:"multiplier"`      // 延迟倍数（默认2.0）
-	Jitter        bool          `json:"jitter"`          // 是否添加随机抖动
-	RetryOnFixable bool         `json:"retry_on_fixable"` // 是否对 fixable 错误重试（默认false）
+	MaxRetries     int           `json:"max_retries"`      // 最大重试次数（默认3）
+	InitialDelay   time.Duration `json:"initial_delay"`    // 初始延迟（默认1s）
+	MaxDelay       time.Duration `json:"max_delay"`        // 最大延迟（默认30s）
+	Multiplier     float64       `json:"multiplier"`       // 延迟倍数（默认2.0）
+	Jitter         bool          `json:"jitter"`           // 是否添加随机抖动
+	RetryOnFixable bool          `json:"retry_on_fixable"` // 是否对 fixable 错误重试（默认false）
 }
 
 type RetryAttempt struct {
-	Attempt int           `json:"attempt"`            // 第几次尝试（从1开始）
-	Error   string        `json:"error,omitempty"`    // 错误信息
+	Attempt  int           `json:"attempt"`            // 第几次尝试（从1开始）
+	Error    string        `json:"error,omitempty"`    // 错误信息
 	Category ErrorCategory `json:"category,omitempty"` // 错误分类
-	Delay   time.Duration `json:"delay,omitempty"`     // 本次延迟
-	Output  string        `json:"output,omitempty"`    // 输出内容
+	Delay    time.Duration `json:"delay,omitempty"`    // 本次延迟
+	Output   string        `json:"output,omitempty"`   // 输出内容
 }
 
 type RetryResult struct {
-	Success     bool            `json:"success"`       // 最终是否成功
-	TotalAttempts int           `json:"total_attempts"` // 总尝试次数
-	FinalOutput  string         `json:"final_output"`  // 最终输出
-	FinalError   string         `json:"final_error"`   // 最终错误
-	Category     ErrorCategory  `json:"category"`      // 最终错误分类
-	Attempts     []RetryAttempt `json:"attempts"`      // 所有尝试记录
-	TotalDelay   time.Duration  `json:"total_delay"`   // 总耗时
+	Success       bool           `json:"success"`        // 最终是否成功
+	TotalAttempts int            `json:"total_attempts"` // 总尝试次数
+	FinalOutput   string         `json:"final_output"`   // 最终输出
+	FinalError    string         `json:"final_error"`    // 最终错误
+	Category      ErrorCategory  `json:"category"`       // 最终错误分类
+	Attempts      []RetryAttempt `json:"attempts"`       // 所有尝试记录
+	TotalDelay    time.Duration  `json:"total_delay"`    // 总耗时
 }
 
 func (e *Executor) ClassifyError(stderr string) ErrorCategory {
@@ -1543,19 +1543,19 @@ func (e *Executor) ExecuteWithRetry(name string, args []string, config *RetryCon
 // [P1] AST 级别代码修改
 
 type ASTEditTarget struct {
-	Type     string `json:"type"`               // "function" | "struct" | "var" | "const" | "import" | "method"
-	Name     string `json:"name,omitempty"`      // 目标名称（如函数名、结构体名）
-	File     string `json:"file,omitempty"`      // 文件路径（相对于工作目录）
-	Package  string `json:"package,omitempty"`   // 包名（可选，用于跨文件定位）
-	LineNum  int    `json:"line_num,omitempty"`  // 行号（备选定位方式）
+	Type    string `json:"type"`               // "function" | "struct" | "var" | "const" | "import" | "method"
+	Name    string `json:"name,omitempty"`     // 目标名称（如函数名、结构体名）
+	File    string `json:"file,omitempty"`     // 文件路径（相对于工作目录）
+	Package string `json:"package,omitempty"`  // 包名（可选，用于跨文件定位）
+	LineNum int    `json:"line_num,omitempty"` // 行号（备选定位方式）
 }
 
 type ASTEditOperation struct {
-	Action    string          `json:"action"`             // "replace" | "insert_before" | "insert_after" | "delete"
-	Target    *ASTEditTarget  `json:"target"`             // 编辑目标
-	NewCode   string          `json:"new_code,omitempty"` // 新代码（replace/insert 时需要）
-	OldName   string          `json:"old_name,omitempty"` // 旧名称（rename 时需要）
-	NewName   string          `json:"new_name,omitempty"` // 新名称（rename 时需要）
+	Action  string         `json:"action"`             // "replace" | "insert_before" | "insert_after" | "delete"
+	Target  *ASTEditTarget `json:"target"`             // 编辑目标
+	NewCode string         `json:"new_code,omitempty"` // 新代码（replace/insert 时需要）
+	OldName string         `json:"old_name,omitempty"` // 旧名称（rename 时需要）
+	NewName string         `json:"new_name,omitempty"` // 新名称（rename 时需要）
 }
 
 type ASTEditResult struct {
@@ -1676,9 +1676,9 @@ func (e *Executor) ParseGoFile(filePath string) (*GoFileInfo, error) {
 			info.Imports = append(info.Imports, importPath)
 		case *ast.FuncDecl:
 			fi := FunctionInfo{
-				Name:      x.Name.Name,
-				StartLine: fset.Position(x.Pos()).Line,
-				EndLine:   fset.Position(x.End()).Line,
+				Name:       x.Name.Name,
+				StartLine:  fset.Position(x.Pos()).Line,
+				EndLine:    fset.Position(x.End()).Line,
 				IsExported: ast.IsExported(x.Name.Name),
 			}
 			if x.Doc != nil {
@@ -1927,7 +1927,10 @@ func findASTNode(fset *token.FileSet, node ast.Node, target *ASTEditTarget) (tok
 				for _, spec := range gs.Specs {
 					if vs, ok := spec.(*ast.ValueSpec); ok {
 						for _, name := range vs.Names {
-							if name.Name == target.Name { match = true; break }
+							if name.Name == target.Name {
+								match = true
+								break
+							}
 						}
 					}
 				}
@@ -1937,7 +1940,10 @@ func findASTNode(fset *token.FileSet, node ast.Node, target *ASTEditTarget) (tok
 				for _, spec := range gs.Specs {
 					if cs, ok := spec.(*ast.ValueSpec); ok {
 						for _, name := range cs.Names {
-							if name.Name == target.Name { match = true; break }
+							if name.Name == target.Name {
+								match = true
+								break
+							}
 						}
 					}
 				}
@@ -1945,7 +1951,9 @@ func findASTNode(fset *token.FileSet, node ast.Node, target *ASTEditTarget) (tok
 		case "import":
 			if is, ok := n.(*ast.ImportSpec); ok {
 				path := ""
-				if is.Path != nil { path = strings.Trim(is.Path.Value, `"`) }
+				if is.Path != nil {
+					path = strings.Trim(is.Path.Value, `"`)
+				}
 				if path == target.Name || strings.HasSuffix(path, target.Name) {
 					match = true
 				}
@@ -1972,7 +1980,9 @@ func findBlockEnd(s string) int {
 	stringChar := rune(0)
 	for i, ch := range s {
 		if inString {
-			if ch == stringChar { inString = false }
+			if ch == stringChar {
+				inString = false
+			}
 			continue
 		}
 		if ch == '"' || ch == '`' || ch == '\'' {
@@ -1980,9 +1990,13 @@ func findBlockEnd(s string) int {
 			stringChar = ch
 			continue
 		}
-		if ch == '{' { braceCount++ } else if ch == '}' {
+		if ch == '{' {
+			braceCount++
+		} else if ch == '}' {
 			braceCount--
-			if braceCount == 0 { return i + 1 }
+			if braceCount == 0 {
+				return i + 1
+			}
 		}
 	}
 	return len(s)
@@ -1995,17 +2009,27 @@ func generateDiff(old, new, filename string) string {
 	buf.WriteString(fmt.Sprintf("--- a/%s\n", filename))
 	buf.WriteString(fmt.Sprintf("+++ b/%s\n", filename))
 	maxLen := len(oldLines)
-	if len(newLines) > maxLen { maxLen = len(newLines) }
+	if len(newLines) > maxLen {
+		maxLen = len(newLines)
+	}
 	for i := 0; i < maxLen; i++ {
 		oldLine := ""
 		newLine := ""
-		if i < len(oldLines) { oldLine = oldLines[i] }
-		if i < len(newLines) { newLine = newLines[i] }
+		if i < len(oldLines) {
+			oldLine = oldLines[i]
+		}
+		if i < len(newLines) {
+			newLine = newLines[i]
+		}
 		if oldLine == newLine {
 			buf.WriteString(fmt.Sprintf(" %s\n", oldLine))
 		} else {
-			if oldLine != "" && i < len(oldLines) { buf.WriteString(fmt.Sprintf("-%s\n", oldLine)) }
-			if newLine != "" && i < len(newLines) { buf.WriteString(fmt.Sprintf("+%s\n", newLine)) }
+			if oldLine != "" && i < len(oldLines) {
+				buf.WriteString(fmt.Sprintf("-%s\n", oldLine))
+			}
+			if newLine != "" && i < len(newLines) {
+				buf.WriteString(fmt.Sprintf("+%s\n", newLine))
+			}
 		}
 	}
 	return buf.String()
@@ -2017,7 +2041,9 @@ func countASTLinesChanged(old, new string) int {
 	changes := abs(len(newLines) - len(oldLines))
 	minLen := min(len(oldLines), len(newLines))
 	for i := 0; i < minLen; i++ {
-		if oldLines[i] != newLines[i] { changes++ }
+		if oldLines[i] != newLines[i] {
+			changes++
+		}
 	}
 	return changes
 }
@@ -2027,8 +2053,13 @@ func extractFuncSignature(fd *ast.FuncDecl) string {
 	if fd.Recv != nil {
 		buf.WriteByte('(')
 		for i, field := range fd.Recv.List {
-			if i > 0 { buf.WriteString(", ") }
-			if len(field.Names) > 0 { buf.WriteString(field.Names[0].Name); buf.WriteByte(' ') }
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			if len(field.Names) > 0 {
+				buf.WriteString(field.Names[0].Name)
+				buf.WriteByte(' ')
+			}
 			buf.WriteString(exprToString(field.Type))
 		}
 		buf.WriteString(") ")
@@ -2037,10 +2068,14 @@ func extractFuncSignature(fd *ast.FuncDecl) string {
 	buf.WriteByte('(')
 	if fd.Type.Params != nil {
 		for i, field := range fd.Type.Params.List {
-			if i > 0 { buf.WriteString(", ") }
+			if i > 0 {
+				buf.WriteString(", ")
+			}
 			if len(field.Names) > 0 {
 				for j, name := range field.Names {
-					if j > 0 { buf.WriteString(", ") }
+					if j > 0 {
+						buf.WriteString(", ")
+					}
 					buf.WriteString(name.Name)
 				}
 				buf.WriteByte(' ')
@@ -2051,25 +2086,35 @@ func extractFuncSignature(fd *ast.FuncDecl) string {
 	buf.WriteByte(')')
 	if fd.Type.Results != nil && len(fd.Type.Results.List) > 0 {
 		buf.WriteByte(' ')
-		if len(fd.Type.Results.List) > 1 { buf.WriteByte('(') }
+		if len(fd.Type.Results.List) > 1 {
+			buf.WriteByte('(')
+		}
 		for i, field := range fd.Type.Results.List {
-			if i > 0 { buf.WriteString(", ") }
+			if i > 0 {
+				buf.WriteString(", ")
+			}
 			if len(field.Names) > 0 {
 				for j, name := range field.Names {
-					if j > 0 { buf.WriteString(", ") }
+					if j > 0 {
+						buf.WriteString(", ")
+					}
 					buf.WriteString(name.Name)
 					buf.WriteByte(' ')
 				}
 			}
 			buf.WriteString(exprToString(field.Type))
 		}
-		if len(fd.Type.Results.List) > 1 { buf.WriteByte(')') }
+		if len(fd.Type.Results.List) > 1 {
+			buf.WriteByte(')')
+		}
 	}
 	return buf.String()
 }
 
 func exprToString(expr ast.Expr) string {
-	if expr == nil { return "" }
+	if expr == nil {
+		return ""
+	}
 	switch e := expr.(type) {
 	case *ast.Ident:
 		return e.Name
@@ -2083,7 +2128,11 @@ func exprToString(expr ast.Expr) string {
 		return fmt.Sprintf("map[%s]%s", exprToString(e.Key), exprToString(e.Value))
 	case *ast.ChanType:
 		dir := "chan "
-		if e.Dir == ast.SEND { dir = "chan<- " } else if e.Dir == ast.RECV { dir = "<-chan " }
+		if e.Dir == ast.SEND {
+			dir = "chan<- "
+		} else if e.Dir == ast.RECV {
+			dir = "<-chan "
+		}
 		return dir + exprToString(e.Value)
 	case *ast.FuncType:
 		return extractFuncType(e)
@@ -2103,7 +2152,9 @@ func extractFuncType(ft *ast.FuncType) string {
 	buf.WriteString("func(")
 	if ft.Params != nil {
 		for i, field := range ft.Params.List {
-			if i > 0 { buf.WriteString(", ") }
+			if i > 0 {
+				buf.WriteString(", ")
+			}
 			buf.WriteString(exprToString(field.Type))
 		}
 	}
@@ -2115,7 +2166,9 @@ func extractFuncType(ft *ast.FuncType) string {
 		} else {
 			buf.WriteString(" (")
 			for i, field := range ft.Results.List {
-				if i > 0 { buf.WriteString(", ") }
+				if i > 0 {
+					buf.WriteString(", ")
+				}
 				buf.WriteString(exprToString(field.Type))
 			}
 			buf.WriteByte(')')
@@ -2125,41 +2178,43 @@ func extractFuncType(ft *ast.FuncType) string {
 }
 
 func abs(x int) int {
-	if x < 0 { return -x }
+	if x < 0 {
+		return -x
+	}
 	return x
 }
 
 // [P1] 多文件上下文理解 - 依赖分析与影响范围
 
 type DependencyInfo struct {
-	File        string   `json:"file"`                  // 文件路径（相对于工作目录）
-	Package     string   `json:"package"`               // 包名
-	Imports     []string `json:"imports"`               // 直接导入的包
-	DependedBy  []string `json:"depended_by,omitempty"` // 被哪些文件导入
-	Functions   []string `json:"functions,omitempty"`   // 导出的函数
-	Types       []string `json:"types,omitempty"`       // 导出的类型
-	IsTestFile  bool     `json:"is_test_file"`
-	Complexity  int      `json:"complexity"`             // 复杂度估算（行数/100）
+	File       string   `json:"file"`                  // 文件路径（相对于工作目录）
+	Package    string   `json:"package"`               // 包名
+	Imports    []string `json:"imports"`               // 直接导入的包
+	DependedBy []string `json:"depended_by,omitempty"` // 被哪些文件导入
+	Functions  []string `json:"functions,omitempty"`   // 导出的函数
+	Types      []string `json:"types,omitempty"`       // 导出的类型
+	IsTestFile bool     `json:"is_test_file"`
+	Complexity int      `json:"complexity"` // 复杂度估算（行数/100）
 }
 
 type ImpactScope struct {
-	TargetFile    string          `json:"target_file"`              // 目标文件
-	TargetType    string          `json:"target_type"`              // 目标类型 (function/struct/var)
-	TargetName    string          `json:"target_name"`              // 目标名称
-	DirectImpact  []string        `json:"direct_impact"`            // 直接影响的文件
-	IndirectImpact []string       `json:"indirect_impact"`          // 间接影响的文件
-	TestFiles     []string        `json:"test_files"`              // 相关测试文件
-	RiskLevel     string          `json:"risk_level"`              // low/medium/high/critical
-	Reason        string          `json:"reason"`                  // 风险原因
-	Suggestions   []string        `json:"suggestions,omitempty"`   // 建议
+	TargetFile     string   `json:"target_file"`           // 目标文件
+	TargetType     string   `json:"target_type"`           // 目标类型 (function/struct/var)
+	TargetName     string   `json:"target_name"`           // 目标名称
+	DirectImpact   []string `json:"direct_impact"`         // 直接影响的文件
+	IndirectImpact []string `json:"indirect_impact"`       // 间接影响的文件
+	TestFiles      []string `json:"test_files"`            // 相关测试文件
+	RiskLevel      string   `json:"risk_level"`            // low/medium/high/critical
+	Reason         string   `json:"reason"`                // 风险原因
+	Suggestions    []string `json:"suggestions,omitempty"` // 建议
 }
 
 type CodeContext struct {
-	Files         []*GoFileInfo    `json:"files"`           // 解析的所有文件
-	Dependencies  []*DependencyInfo `json:"dependencies"`    // 依赖关系图
-	TotalFiles    int               `json:"total_files"`     // 总文件数
-	TotalFuncs    int               `json:"total_funcs"`     // 总函数数
-	Packages      map[string]int    `json:"packages"`        // 包分布
+	Files        []*GoFileInfo     `json:"files"`        // 解析的所有文件
+	Dependencies []*DependencyInfo `json:"dependencies"` // 依赖关系图
+	TotalFiles   int               `json:"total_files"`  // 总文件数
+	TotalFuncs   int               `json:"total_funcs"`  // 总函数数
+	Packages     map[string]int    `json:"packages"`     // 包分布
 }
 
 func (e *Executor) AnalyzeDependencies(pattern string) ([]*DependencyInfo, error) {
@@ -2182,11 +2237,15 @@ func (e *Executor) AnalyzeDependencies(pattern string) ([]*DependencyInfo, error
 		}
 		exportedFuncs := make([]string, 0)
 		for _, fn := range info.Functions {
-			if fn.IsExported { exportedFuncs = append(exportedFuncs, fn.Name) }
+			if fn.IsExported {
+				exportedFuncs = append(exportedFuncs, fn.Name)
+			}
 		}
 		exportedTypes := make([]string, 0)
 		for _, ti := range info.Types {
-			if ast.IsExported(ti.Name) { exportedTypes = append(exportedTypes, ti.Name) }
+			if ast.IsExported(ti.Name) {
+				exportedTypes = append(exportedTypes, ti.Name)
+			}
 		}
 		dep := &DependencyInfo{
 			File:       relPath,
@@ -2195,7 +2254,7 @@ func (e *Executor) AnalyzeDependencies(pattern string) ([]*DependencyInfo, error
 			Functions:  exportedFuncs,
 			Types:      exportedTypes,
 			IsTestFile: strings.HasSuffix(relPath, "_test.go"),
-			Complexity:  info.TotalLines / 100,
+			Complexity: info.TotalLines / 100,
 		}
 		deps = append(deps, dep)
 	}
@@ -2203,7 +2262,9 @@ func (e *Executor) AnalyzeDependencies(pattern string) ([]*DependencyInfo, error
 		importers := make([]string, 0)
 		pkgPath := filepath.Dir(dep.File)
 		for _, other := range deps {
-			if other.File == dep.File { continue }
+			if other.File == dep.File {
+				continue
+			}
 			for _, imp := range other.Imports {
 				if strings.HasSuffix(imp, pkgPath) || strings.HasSuffix(imp, dep.Package) {
 					importers = append(importers, other.File)
@@ -2222,20 +2283,21 @@ func (e *Executor) AnalyzeImpact(targetFile, targetType, targetName string) (*Im
 	if filepath.IsAbs(targetFile) {
 		relPath, _ = filepath.Rel(e.workDir, targetFile)
 	} else {
-		relPath = targetFile	}
+		relPath = targetFile
+	}
 	dir := filepath.Dir(relPath)
 	deps, err := e.AnalyzeDependencies(dir)
 	if err != nil {
 		return nil, fmt.Errorf("analyze dependencies failed: %v", err)
 	}
 	scope := &ImpactScope{
-		TargetFile: relPath,
-		TargetType: targetType,
-		TargetName: targetName,
-		DirectImpact:  make([]string, 0),
+		TargetFile:     relPath,
+		TargetType:     targetType,
+		TargetName:     targetName,
+		DirectImpact:   make([]string, 0),
 		IndirectImpact: make([]string, 0),
 		TestFiles:      make([]string, 0),
-		RiskLevel:     "low",
+		RiskLevel:      "low",
 	}
 	targetDep := findDependency(deps, relPath)
 	if targetDep != nil {
@@ -2293,8 +2355,8 @@ func (e *Executor) BuildCodeContext(pattern string) (*CodeContext, error) {
 		return nil, fmt.Errorf("glob failed: %v", err)
 	}
 	ctx := &CodeContext{
-		Files:      make([]*GoFileInfo, 0),
-		Packages:   make(map[string]int),
+		Files:    make([]*GoFileInfo, 0),
+		Packages: make(map[string]int),
 	}
 	for _, file := range files {
 		relPath, _ := filepath.Rel(e.workDir, file)
@@ -2315,14 +2377,18 @@ func (e *Executor) BuildCodeContext(pattern string) (*CodeContext, error) {
 
 func findDependency(deps []*DependencyInfo, file string) *DependencyInfo {
 	for _, d := range deps {
-		if d.File == file { return d }
+		if d.File == file {
+			return d
+		}
 	}
 	return nil
 }
 
 func containsStr(slice []string, s string) bool {
 	for _, item := range slice {
-		if item == s { return true }
+		if item == s {
+			return true
+		}
 	}
 	return false
 }

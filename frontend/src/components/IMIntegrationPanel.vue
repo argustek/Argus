@@ -154,8 +154,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, inject } from 'vue'
 import { GetDingTalkConfig, SaveDingTalkConfig } from '../../wailsjs/go/main/App'
+const showError = inject('showError') as ((msg: string) => void) || alert
 
 const selectedPlatform = ref('dingtalk')
 const showSecret = ref(false)
@@ -229,15 +230,15 @@ const saveConfig = async () => {
       dingtalk.enabled = dingtalkConfig.enabled
     }
     
-    alert('配置已保存')
+    showError('配置已保存')
   } catch (error) {
     console.error('保存配置失败:', error)
-    alert('保存失败: ' + error)
+    showError('保存失败: ' + error)
   }
 }
 
 const testConnection = async () => {
-  alert('测试连接功能开发中...')
+  showError('测试连接功能开发中...')
 }
 
 onMounted(() => {

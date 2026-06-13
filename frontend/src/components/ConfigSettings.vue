@@ -263,7 +263,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { 
   GetDecisionConfig, 
@@ -274,6 +274,7 @@ import {
   RemovePermissionRule,
   ResetPermissionToDefault as ResetPermDefault
 } from '../../wailsjs/go/main/App'
+const showError = inject('showError') as ((msg: string) => void) || alert
 
 interface DecisionRule {
   type: string
@@ -421,7 +422,7 @@ async function updatePermissionRule(index: number, newPermission: string) {
 // 添加新权限规则
 async function addNewRule() {
   if (!newRule.value.pattern || !newRule.value.permission) {
-    alert(t('settings.fillCompleteInfo'))
+    showError(t('settings.fillCompleteInfo'))
     return
   }
   

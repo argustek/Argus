@@ -23,7 +23,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, inject } from 'vue'
 import FileTreeItem from './FileTreeItem.vue'
 
 const props = defineProps<{
@@ -31,6 +31,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits(['select-file', 'select-binary-file', 'open-in-editor', 'run-in-terminal', 'add-to-chat'])
+const showError = inject('showError') as ((msg: string) => void) || alert
 
 const treeItems = ref<any[]>([])
 const loading = ref(false)
@@ -99,10 +100,10 @@ async function onContextAction(data: { action: string; item: any }) {
           await window.go.main.App.DeleteFile(item.path)
           refresh()
         } else {
-          alert('删除功能暂未实现')
+          showError('删除功能暂未实现')
         }
       } catch (e: any) {
-        alert('删除失败: ' + e.message)
+        showError('删除失败: ' + e.message)
       }
       break
     }

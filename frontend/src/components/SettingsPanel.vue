@@ -375,13 +375,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, nextTick } from 'vue'
+import { ref, watch, onMounted, nextTick, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { availableLocales } from '../i18n'
 import { GetCurrentAPIConfigID, SwitchAPIConfig, TestAPIConfig, SetLang } from '../../wailsjs/go/main/App'
 import ConfigSettings from './ConfigSettings.vue'
 
 const { t, locale } = useI18n()
+const showError = inject('showError') as ((msg: string) => void) || alert
 
 const currentLocale = ref(locale.value)
 
@@ -796,7 +797,7 @@ function addImConfig() {
 
 function deleteImConfig(index: number) {
   if (imConfigs.value.length <= 1) {
-    alert(t('settings.atLeastOneConfig'))
+    showError(t('settings.atLeastOneConfig'))
     return
   }
   imConfigs.value.splice(index, 1)
