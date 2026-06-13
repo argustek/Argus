@@ -208,7 +208,6 @@ async function loadFile(filePath: string) {
     if (editorInstance) {
       editorInstance.setValue(fileContent.value)
       editorInstance.layout()
-      // [FIX] 切换文件时必须更新语言模式，否则语法高亮停留在首次创建时的语言
       const model = editorInstance.getModel()
       if (model) {
         monaco.editor.setModelLanguage(model, languageMode.value)

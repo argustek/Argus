@@ -164,15 +164,11 @@
     />
 
   </div>
-
-  <!-- Monaco 预初始化：隐藏容器，提前加载 Web Worker -->
-  <div ref="monacoPreInitRef" style="position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;pointer-events:none"></div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
-import * as monaco from 'monaco-editor'
 import { GetConfig, SaveConfig, SendMessage, StopCurrentTask, GetMessages, IsAIThinking, IsPMThinking, IsCRunning, IsSERunning, IsAPThinking, GetLogs, GetChangeHistory, GetWorkDir, GetRecentProjects, SetWorkDir, OpenFolderDialog, StartCMonitor, StopCMonitor, FixPosition, OpenFileDialog, ReadFile } from '../wailsjs/go/main/App'
 import { EventsOn, EventsOff, EventsEmit, LogPrint } from '../wailsjs/runtime/runtime'
 
@@ -362,7 +358,6 @@ const workDir = ref('')
 const recentProjects = ref<string[]>([])
 
 const currentFile = ref(null)
-const monacoPreInitRef = ref<HTMLElement>()
 const terminalLogs = ref(['Argus 已启动'])
 const changeHistory = ref([])
 const config = ref({
@@ -378,28 +373,6 @@ watch(messages, (newVal, oldVal) => {
 
 // 加载配置和消息
 onMounted(async () => {
-  // [FIX] Monaco 预初始化：提前加载 Web Worker，解决首次打开文件无语法高亮
-  nextTick(() => {
-    if (monacoPreInitRef.value) {
-      try {
-        const preEditor = monaco.editor.create(monacoPreInitRef.value, {
-          value: '',
-          language: 'plaintext',
-          theme: 'vs-dark',
-          automaticLayout: false,
-          minimap: { enabled: false },
-          lineNumbers: 'off',
-          scrollBeyondLastLine: false,
-        })
-        // 创建后立即销毁，Worker 已缓存到内存
-        preEditor.dispose()
-        console.log('[App] ✅ Monaco 预初始化完成，Web Worker 已加载')
-      } catch (e) {
-        console.warn('[App] ⚠️ Monaco 预初始化失败:', e)
-      }
-    }
-  })
-
   // [DEBUG-20260529] 测试消息：验证前端渲染是否工作
   messages.value.push({
     id: Date.now(),
