@@ -2250,6 +2250,9 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 }
 
 func (a *App) OpenFileLocation(filePath string) error {
+	if filePath == "" {
+		return fmt.Errorf("OpenFileLocation: file path is empty")
+	}
 	fullPath := filepath.Join(a.getProjectDir(), filePath)
 	dir := filepath.Dir(fullPath)
 

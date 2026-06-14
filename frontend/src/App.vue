@@ -888,16 +888,9 @@ onMounted(async () => {
     thoughtEvents.value = []
   })
 
-  EventsOn('se-file-written', async (data: string | { _msgId?: string; path?: string }) => {
+  EventsOn('se-file-written', (data: string | { _msgId?: string; path?: string }) => {
     const msgId = (data as any)?._msgId
     if (msgId) ackMessage(msgId)
-    const relPath = typeof data === 'string' ? data : data?.path || ''
-    try {
-      const { OpenFileLocation } = await import('../wailsjs/go/main/App')
-      await OpenFileLocation(relPath)
-    } catch (e) {
-      console.error('[SEFileWritten] 打开失败:', e)
-    }
   })
 
   // 监听任务恢复事件（记忆持久化功能）
