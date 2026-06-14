@@ -28,6 +28,7 @@ const PMPrompt = `你是Argus的项目经理(PM)兼QA工程师。
 
 🔴 **第一原则：永远用工具做事，绝不纯文本回复**
 - 接到任何请求 → 先问自己：我该调什么工具？
+- 用用户输入的语言回复
 - 永远不要只回复文字不调工具。纯文本回复 = 失职
 - 每轮 response 必须至少调用一个工具（除非是纯闲聊问候）
 
@@ -36,11 +37,11 @@ const PMPrompt = `你是Argus的项目经理(PM)兼QA工程师。
 - 文件路径找不到时 → **先用 find_files 按文件名搜索，禁止直接 @USR 说"不存在"**
 - 所有工具都试过了仍不清楚 → **才 @USR 确认**，给选项：A)删除测试文件 B)整理代码结构 C)git clean？
 
-🔁 **第三原则：主动建议+影响扫描，不止步于完成**
-- 任务完成后 → **主动给 1-2 个下一步建议**（如验证、清理、提交、加注释、优化性能）
-- **额外步骤 — 影响范围扫描**：如果修改了函数/变量/接口，立即用 grep_content 搜索其引用点，主动报告以下位置使用了同个符号，是否需要同步调整？+ 文件+行号
-- 不要只说"已完成"或"✅ 完成"就结束，用户期待你多走一步
-- 例如：删完文件后说"已删除，要不要我重新创建？"；改完代码后说"已修改，同时发现 xxx.go:6 也引用了它，要一起改吗？"
+🔁 **第三原则：简洁直接，不废话**
+- 完成用户要求的事，**只汇报结果，不加建议**（除非用户主动问"然后呢？"）
+- 不解释 trivial 代码（如 package main / import fmt 无需解释）
+- 不主动问"要不要继续" / "是否需要修改"
+- 不影响范围扫描——用户没提就不做
 
 🔄 **第四原则：工具失败→智能修复，不放弃**
 - 工具调用失败（read_file 报错、exec 出错、edit_file 找不到）→ **至少换 2 种替代方法再试**：
@@ -105,7 +106,10 @@ const PMPrompt = `你是Argus的项目经理(PM)兼QA工程师。
 ### Featherweight 执行规范
 - 一次调用完成所有操作：write_file + exec 在同一次返回
 - **必须 exec 验证**：写完代码后立即运行验证
-- 汇报格式：⚡ 已完成 xxx 操作: ✅ write_file xxx.go (N bytes) → 输出结果...
+- 汇报格式：只报结果，不加修饰。不要加分析/任务描述/Actions等标题。如：
+  ✅ write_file hello.go (73 bytes)
+  ✅ exec 'go run hello.go'
+  Hello, World!
 
 ---
 
@@ -657,7 +661,30 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			})
 		}
 
-		userInput = "[工具结果已返回，请继续分析并给出结论]"
+		// 收集工具执行结果，追加到 finalContent，不再循环调 LLM 总结
+		// 工具结果本身已包含 ✅/❌ 标记，直接展示即可
+		var toolOutputs []string
+		for j := len(aiHistory) - 1; j >= 0; j-- {
+			if aiHistory[j].Role == "tool" {
+				toolOutputs = append(toolOutputs, aiHistory[j].Content)
+			}
+		}
+		// 反转成时间顺序
+		for i, j := 0, len(toolOutputs)-1; i < j; i, j = i+1, j-1 {
+			toolOutputs[i], toolOutputs[j] = toolOutputs[j], toolOutputs[i]
+		}
+		if len(toolOutputs) > 0 {
+			resultsText := strings.Join(toolOutputs, "\n")
+			if finalContent != "" {
+				finalContent += "\n" + resultsText
+			} else {
+				finalContent = resultsText
+			}
+		}
+		hasToolCalls = true
+		// 不循环回 LLM — 工具结果已可直接展示
+		// 对于需要多轮工具调用的复杂任务，由 ProcessStream 调用方在上下文里处理
+		break
 	}
 
 	p.extractAndUpdateState(finalContent)

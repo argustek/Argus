@@ -226,8 +226,6 @@ type Manager struct {
 	processingMu        sync.Mutex         // 消息处理互斥锁（防止并发消息导致SE循环）
 	isProcessing        bool               // 是否正在处理消息
 	processingStartTime time.Time          // 处理开始时间（用于超时检测）
-	pendingQueue        []string           // 等待处理的消息队列
-	pendingMu           sync.Mutex         // 队列互斥锁
 	cancelFunc          context.CancelFunc // 取消当前AI调用的函数
 	resetGeneration     int64              // 复位世代号，每次复位+1，用于拦截复位后返回的幽灵调用
 
@@ -1005,13 +1003,6 @@ func (m *Manager) initCMonitor() {
 		}
 		m.processingMu.Unlock()
 
-		m.pendingMu.Lock()
-		if len(m.pendingQueue) > 0 {
-			fmt.Printf("[C] 🧹 清空待处理消息队列 (%d条)\n", len(m.pendingQueue))
-			m.pendingQueue = nil
-		}
-		m.pendingMu.Unlock()
-
 		m.resetMu.Lock()
 		m.resetGeneration++
 		m.resetMu.Unlock()
@@ -1247,56 +1238,10 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 
 	m.processingMu.Lock()
 	if m.isProcessing {
-		if time.Since(m.processingStartTime) > 60*time.Second {
-			m.mu.Lock()
-			wasInSE := m.currentRole == "se"
-			fmt.Printf("[ProcessMessage] ⚠️ isProcessing 超时(%.0f秒)，强制清理旧任务! currentRole=%s wasInSE=%v\n", time.Since(m.processingStartTime).Seconds(), m.currentRole, wasInSE)
-			if m.cancelFunc != nil {
-				m.cancelFunc()
-				m.cancelFunc = nil
-			}
-			if !wasInSE {
-				m.currentRole = ""
-			}
-			m.isRecovering = false
-			m.mu.Unlock()
-			if m.cMonitor != nil {
-				m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-				if !wasInSE {
-					m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-				}
-			}
-			if wasInSE {
-				m.isProcessing = false
-				m.processingMu.Unlock()
-				m.pendingMu.Lock()
-				m.pendingQueue = append(m.pendingQueue, input)
-				queueLen := len(m.pendingQueue)
-				m.pendingMu.Unlock()
-				fmt.Printf("[ProcessMessage] 📥 SE正在执行中，新消息排队 (队列长度=%d)\n", queueLen)
-				return "", nil
-			}
-			m.isProcessing = false
-		} else {
-			m.processingMu.Unlock()
-			m.pendingMu.Lock()
-			m.pendingQueue = append(m.pendingQueue, input)
-			queueLen := len(m.pendingQueue)
-			m.pendingMu.Unlock()
-			fmt.Printf("[ProcessMessage] 📥 消息暂存到队列 (队列长度=%d): %s\n", queueLen, input)
-			// 添加排队提示到聊天（让用户看到消息已暂存）
-			queueNote := Message{
-				From:      "system",
-				To:        "user",
-				Role:      "system",
-				Content:   fmt.Sprintf("📥 消息已暂存 (队列中第%d条)，当前消息处理完成后自动发送", queueLen),
-				Raw:       fmt.Sprintf("📥 消息已暂存 (队列中第%d条)，当前消息处理完成后自动发送", queueLen),
-				Source:    "system",
-				Timestamp: time.Now(),
-			}
-			m.addHistory(queueNote)
-			return "", nil
-		}
+		fmt.Printf("[ProcessMessage] ⚡ AI繁忙，中断当前任务并立即处理新消息: %s\n", input)
+		m.processingMu.Unlock()
+		m.StopCurrentTask()
+		m.processingMu.Lock()
 	}
 	m.isProcessing = true
 	m.processingStartTime = time.Now()
@@ -1315,38 +1260,9 @@ func (m *Manager) ProcessMessage(input string) (string, error) {
 		m.isProcessing = false
 		m.processingMu.Unlock()
 		m.mu.Lock()
-		// ⚠️ 不在这里 cancel()，让 context 保持活跃直到 StopCurrentTask 被调用
-		// 这样 PM/SE/AP 的多轮 AI 调用不会被中断
 		m.cancelFunc = nil
 		m.isRecovering = false
 		m.mu.Unlock()
-
-		// 📤 处理完成后，检查队列中是否有待处理消息
-		m.pendingMu.Lock()
-		if len(m.pendingQueue) > 0 {
-			nextInput := m.pendingQueue[0]
-			m.pendingQueue = m.pendingQueue[1:]
-			queueLen := len(m.pendingQueue)
-			m.pendingMu.Unlock()
-			fmt.Printf("[ProcessMessage] 📤 从队列取出下一条消息 (剩余%d条): %s\n", queueLen, nextInput)
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("[ProcessMessage-Queue] 💥 panic recovered: %v\n", r)
-						m.processingMu.Lock()
-						m.isProcessing = false
-						m.processingMu.Unlock()
-						if m.cMonitor != nil {
-							m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
-							m.cMonitor.UpdateSeStatus(types.RoleStatusIdle)
-						}
-					}
-				}()
-				m.ProcessMessage(nextInput)
-			}()
-		} else {
-			m.pendingMu.Unlock()
-		}
 	}()
 
 	if m.pmProcessor != nil {
@@ -7519,14 +7435,6 @@ func (m *Manager) StopCurrentTask() {
 	}
 	m.processingMu.Unlock()
 
-	// 🧹 清空待处理消息队列
-	m.pendingMu.Lock()
-	if len(m.pendingQueue) > 0 {
-		fmt.Printf("[Manager] 🧹 清空待处理消息队列 (%d条)\n", len(m.pendingQueue))
-		m.pendingQueue = nil
-	}
-	m.pendingMu.Unlock()
-
 	m.currentRole = ""
 	m.seContinueCount = 0
 	m.seAskPMCount = 0
@@ -7781,47 +7689,18 @@ func (m *Manager) SetOnProjectStateChanged(callback func(string)) {
 	}
 }
 
-// GetPendingQueue 获取待发送消息队列
+// GetPendingQueue 获取待发送消息队列（已弃用，队列机制已移除）
 func (m *Manager) GetPendingQueue() []string {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	queue := make([]string, len(m.pendingQueue))
-	copy(queue, m.pendingQueue)
-	return queue
+	return []string{}
 }
 
-// ClearPendingQueue 清空待发送消息队列
+// ClearPendingQueue 清空待发送消息队列（已弃用）
 func (m *Manager) ClearPendingQueue() {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	if len(m.pendingQueue) > 0 {
-		fmt.Printf("[Manager] 🧹 清空待发送消息队列 (%d条)\n", len(m.pendingQueue))
-		m.pendingQueue = nil
-	}
 }
 
-// PopAndSendPending 弹出并发送第一条待发送消息
+// PopAndSendPending 弹出并发送第一条待发送消息（已弃用）
 func (m *Manager) PopAndSendPending() string {
-	m.pendingMu.Lock()
-	defer m.pendingMu.Unlock()
-	if len(m.pendingQueue) == 0 {
-		return ""
-	}
-	msg := m.pendingQueue[0]
-	m.pendingQueue = m.pendingQueue[1:]
-	fmt.Printf("[Manager] 📤 立即发送待处理消息: %s (剩余%d条)\n", msg, len(m.pendingQueue))
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Printf("[PopAndSendPending] 💥 panic recovered: %v\n", r)
-				m.processingMu.Lock()
-				m.isProcessing = false
-				m.processingMu.Unlock()
-			}
-		}()
-		m.ProcessMessage(msg)
-	}()
-	return msg
+	return ""
 }
 
 // getResetGeneration 获取当前复位世代号

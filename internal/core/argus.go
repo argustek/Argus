@@ -115,7 +115,8 @@ type ArgusCore struct {
 	maxRetries int
 	timeout    time.Duration
 
-	state RoleState
+	state         RoleState
+	prevTaskLevel string // 上一个完成任务的级别，用于追问继承同一重量
 }
 
 func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *ArgusCore {
@@ -472,6 +473,12 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	preFeatherweight := userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡"
 
+	// 条件A：追问继承 — 上一个任务如果是 short/featherweight，追问默认继承同一重量
+	if !preFeatherweight && c.prevTaskLevel == "short-process" {
+		preFeatherweight = true
+		fmt.Printf("[Core:Level] ⚡ 追问继承→Featherweight (prevLevel=%s)\n", c.prevTaskLevel)
+	}
+
 	// 条件C：启发式检测
 	if !preFeatherweight {
 		lowerUserMsg := strings.ToLower(userMsg)
@@ -486,7 +493,15 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 				strings.Contains(lowerUserMsg, "写个") ||
 				strings.Contains(lowerUserMsg, "写一个"))
 
-		isCodingTask := isTinyTask ||
+		isRunTask := strings.Contains(lowerUserMsg, "再运行") ||
+			strings.Contains(lowerUserMsg, "再跑") ||
+			strings.Contains(lowerUserMsg, "run again") ||
+			strings.Contains(lowerUserMsg, "再执行") ||
+			strings.Contains(lowerUserMsg, "再来一次") ||
+			(strings.Contains(lowerUserMsg, "再") && strings.Contains(lowerUserMsg, "一次")) ||
+			(strings.Contains(lowerUserMsg, "run") && !strings.Contains(lowerUserMsg, "create") && !strings.Contains(lowerUserMsg, "write"))
+
+		isCodingTask := isTinyTask || isRunTask ||
 			(strings.Contains(lowerUserMsg, " and ") &&
 				(strings.Contains(lowerUserMsg, "go program") ||
 					strings.Contains(lowerUserMsg, ".go"))) ||
@@ -501,6 +516,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	// 前置Featherweight → 直接 pmDirectExecute，跳过 PM ProcessReview
 	if preFeatherweight {
 		result.Level = "short-process"
+		c.prevTaskLevel = "short-process"
 		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执（跳过PM分析）\n")
 		return c.pmDirectExecute(userMsg, "", result)
 	}
@@ -508,9 +524,13 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	// ===== 非Featherweight：走完整 PM 分析 =====
 	var pmResponse string
 	var pmErr error
-
 	if c.pmProcessor != nil {
-		history := []ai.ChatMessage{}
+		entries := c.memory.GetAll()
+		history := make([]ai.ChatMessage, 0, len(entries))
+		for _, e := range entries {
+			role := mapRoleToStandard(e.Role)
+			history = append(history, ai.ChatMessage{Role: role, Content: e.Content})
+		}
 		var resp *ai.PMResponse
 		resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
 			trimmed := strings.TrimSpace(delta)
@@ -542,24 +562,34 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	if pmErr != nil {
 		result.Error = fmt.Errorf("PM analysis failed: %w", pmErr)
-		c.emit("pm_to_user", fmt.Sprintf("@USR PM分析失败: %v", pmErr))
+		c.emit("pm_to_user", fmt.Sprintf("@USR PM analysis failed: %v", pmErr))
 		return result
 	}
 
 	c.memory.Add(RolePM, pmResponse)
 
 	// 条件B：PM 标记了 short（需 PM 返回后才能判断）
-	if strings.Contains(pmResponse, `"level":"short"`) ||
-		strings.Contains(pmResponse, `"level":"featherweight"`) ||
-		strings.Contains(pmResponse, "⚡") ||
-		strings.Contains(pmResponse, "[HAS_TOOL_CALLS]") {
+	if strings.Contains(pmResponse, "[HAS_TOOL_CALLS]") {
+		// PM 已在 ProcessStream 中执行了工具调用（write_file/exec 等）
+		// 任务已完成，直接汇报结果，不再调用 pmDirectExecute 重复执行
 		result.Level = "short-process"
-		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执（PM标记）\n")
+		c.prevTaskLevel = "short-process"
+		result.Success = true
 		pmText := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
 		pmText = strings.TrimSpace(pmText)
 		if pmText != "" {
-			c.emit("pm_to_user", pmText)
+			c.emit("pm_to_user", "@USR "+pmText)
 		}
+		c.emitStatus("done", "none", "idle")
+		return result
+	}
+
+	if strings.Contains(pmResponse, `"level":"short"`) ||
+		strings.Contains(pmResponse, `"level":"featherweight"`) ||
+		strings.Contains(pmResponse, "⚡") {
+		result.Level = "short-process"
+		c.prevTaskLevel = "short-process"
+		fmt.Printf("[Core:分流] ⚡ Featherweight → PM直执（PM标记）\n")
 		return c.pmDirectExecute(userMsg, pmResponse, result)
 	}
 
@@ -1781,24 +1811,29 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	// Step 1: 调用 LLM（PM自己工位 + SE工具，不换工位）
 	systemPrompt := c.prompts.Get(RolePM)
-	execPrompt := fmt.Sprintf(`【PM直执模式】你是PM，现在亲自执行这个Featherweight任务。
+	execPrompt := fmt.Sprintf(`Execute the task directly. No analysis.
 
-用户请求：%s
-你的分析：%s
+User request: %s
 
-要求：
-1. 一次返回完整 actions（write_file 写代码 + exec 执行验证）
-2. 在 Content 中包含结果汇报文本（⚡ 格式）
-3. exec 必须验证代码能运行`, userMsg, pmResponse)
+Requirements:
+1. Return complete actions in one response (write_file + exec)
+2. exec must verify the code runs`, userMsg)
 
 	var actions []ai.SEAction
 	var displayContent string
 	var callErr error
 
+	// 构建记忆历史
+	memEntries := c.memory.GetAll()
+	memHistory := make([]ai.Message, 0, len(memEntries))
+	for _, e := range memEntries {
+		memHistory = append(memHistory, ai.Message{Role: mapRoleToStandard(e.Role), Content: e.Content})
+	}
+
 	// 第一次 LLM 调用
 	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
 	var resp *ai.ChatResponse
-	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, []ai.Message{}, execPrompt, ai.SETools)
+	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, memHistory, execPrompt, ai.SETools)
 	callCancel()
 
 	if callErr != nil {
@@ -1866,7 +1901,7 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 		forceCtx, forceCancel := context.WithTimeout(c.ctx, c.timeout)
 		var resp2 *ai.ChatResponse
-		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, []ai.Message{}, forcePrompt, ai.SETools)
+		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, memHistory, forcePrompt, ai.SETools)
 		forceCancel()
 
 		if callErr != nil || len(resp2.Choices) == 0 {
@@ -1913,11 +1948,8 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 	}
 
 	// Step 2: 执行 actions（executor="pm"）
-	prevSilent := c.silent
-	c.silent = true
 	t2 := time.Now()
 	execResults, execErr := c.executeActions(actions, "pm")
-	c.silent = prevSilent
 	os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\n", time.Since(t2))), 0644)
 	result.Outputs = execResults
 	result.Actions = actions
@@ -1941,12 +1973,9 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 		if hasWriteFile && !hasExec && lastPath != "" {
 			cmd := inferExecCommand(lastPath)
 			if cmd != "" {
-				prevSilent2 := c.silent
-				c.silent = true
 				ta := time.Now()
 				autoAction := ai.SEAction{Type: "exec", Command: cmd}
 				autoResult, _ := c.executeActions([]ai.SEAction{autoAction}, "pm")
-				c.silent = prevSilent2
 				os.WriteFile("timing_log.txt", []byte(fmt.Sprintf("executeActions: %v\nfirst: %v\nauto-exec: %v\n", time.Since(t2), time.Since(t2), time.Since(ta))), 0644)
 				execResults = append(execResults, autoResult...)
 				actions = append(actions, autoAction)
@@ -2000,7 +2029,7 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			feedbackErr, actions, execResults, userMsg)
 
 		callCtx2, cancel2 := context.WithTimeout(c.ctx, c.timeout)
-		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, []ai.Message{}, fixPrompt, ai.SETools)
+		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, ai.SETools)
 		cancel2()
 		if err2 != nil {
 			fmt.Printf("[Core:Feather] ⚠️ 重试LLM调用失败: %v\n", err2)
@@ -2032,10 +2061,7 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 			actions = append(actions, a)
 		}
 		if len(actions) > 0 {
-			prevSilent3 := c.silent
-			c.silent = true
 			execResults, execErr = c.executeActions(actions, "pm")
-			c.silent = prevSilent3
 			result.Outputs = execResults
 			result.Actions = actions
 		}
@@ -2046,17 +2072,13 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
 		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", result.Error))
 	} else if len(execResults) > 0 {
-		// 用LLM第一次的displayContent做自然语言汇报，后面附加执行结果
+		// 有 actions → exec 卡片已通过 emitAction 显示在前端
+		// 不重复 emit 文本，只存 memory 供后续上下文
 		cleanSummary := c.extractCleanSummary(displayContent)
 		if cleanSummary != "" {
-			msg := cleanSummary
-			msg += "\n" + strings.Join(execResults, "\n")
-			c.emit("pm_to_user", "@USR "+msg)
-			c.memory.Add(RolePM, msg)
+			c.memory.Add(RolePM, cleanSummary+"\n"+strings.Join(execResults, "\n"))
 		} else {
-			msg := strings.Join(execResults, "\n")
-			c.emit("pm_to_user", "@USR ✅ 完成\n"+msg)
-			c.memory.Add(RolePM, msg)
+			c.memory.Add(RolePM, strings.Join(execResults, "\n"))
 		}
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)
@@ -2157,6 +2179,21 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction, executor string) ([]st
 				output = fmt.Sprintf("✅ delete_file %s", action.Path)
 			} else {
 				output = fmt.Sprintf("❌ delete_file %s error: %v", action.Path, err)
+			}
+		case "glob":
+			globPattern := filepath.Join(c.workDir, action.Pattern)
+			matches, globErr := filepath.Glob(globPattern)
+			if globErr != nil {
+				output = fmt.Sprintf("❌ glob '%s' error: %v", action.Pattern, globErr)
+			} else if len(matches) == 0 {
+				output = fmt.Sprintf("📁 glob '%s' 无匹配", action.Pattern)
+			} else {
+				var rels []string
+				for _, m := range matches {
+					rel, _ := filepath.Rel(c.workDir, m)
+					rels = append(rels, rel)
+				}
+				output = fmt.Sprintf("📁 glob '%s' → %d 个文件:\n%s", action.Pattern, len(matches), strings.Join(rels, "\n"))
 			}
 		case "list_files":
 			files, listErr := c.executor.ListFiles()

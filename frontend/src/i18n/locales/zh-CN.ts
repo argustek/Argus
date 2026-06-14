@@ -71,6 +71,7 @@ export default {
     uploadFileFailed: '上传文件失败: ',
     screenshot: '截图',
     sendMessage: '发送消息',
+    interruptAndSend: '中断当前任务并发送',
     stopAI: '停止AI',
     clearConfirm: '确定要清空所有聊天记录吗？此操作不可撤销！',
     analyzing: '分析需求...',

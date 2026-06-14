@@ -72,6 +72,7 @@ export default {
     uploadFileFailed: 'File upload failed: ',
     screenshot: 'Screenshot',
     sendMessage: 'Send Message',
+    interruptAndSend: 'Interrupt current task and send',
     stopAI: 'Stop AI',
     clearConfirm: 'Are you sure you want to clear all chat history? This cannot be undone!',
     analyzing: 'Analyzing requirements...',

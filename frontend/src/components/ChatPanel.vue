@@ -84,10 +84,32 @@
           <div class="message-header">
             <span class="role-badge pm">PM</span>
             <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
+            <span v-if="(msg as any)._execData" class="action-count">{{ (msg as any)._execData?.actions?.length || 0 }}/{{ (msg as any)._execData?.totalActions || 0 }} 操作</span>
+            <span v-if="(msg as any)._streaming" class="status-tag running">🔄 执行中...</span>
+            <span v-else-if="(msg as any)._execData" class="status-tag success">✅ 完成</span>
           </div>
           <div class="message-content pm-content structured-msg">
             <!-- 三层模型 RichMessage -->
             <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
+            <!-- exec 执行卡片 -->
+            <div v-else-if="(msg as any)._execData" class="se-exec-panel">
+              <div class="se-steps">
+                <div v-for="step in (msg as any)._execData?.actions" :key="step.index" class="se-step" :class="step.status">
+                  <span class="step-icon">{{ step.status === 'done' ? '✅' : step.status === 'running' ? '🔄' : step.status === 'error' ? '❌' : '🚫' }}</span>
+                  <span class="step-label">{{ step.label }}</span>
+                  <span v-if="step.error" class="step-error">{{ step.error }}</span>
+                </div>
+              </div>
+              <div v-if="(msg as any)._execData?.outputs?.length" class="se-terminal" :class="{ expanded: expandedMessages.has(index) }">
+                <div class="terminal-header" @click="toggleExpand(index)">
+                  <span>🖥️ 终端输出 ({{ (msg as any)._execData.outputs.length }})</span>
+                  <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
+                </div>
+                <div v-show="expandedMessages.has(index)" class="terminal-body">
+                  <pre v-for="(out, oi) in (msg as any)._execData.outputs" :key="oi" class="terminal-output"><code><span v-if="out.command" class="cmd-prompt">$ {{ out.command }}</span>{{ out.output }}</code></pre>
+                </div>
+              </div>
+            </div>
             <div v-else>
               <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
                 <span class="summary-text">{{ getSummary(msg) }}</span>
@@ -245,23 +267,6 @@
       </div>
     </div>
 
-    <!-- 待发送消息队列 -->
-    <div v-if="pendingQueue.length > 0" class="pending-queue">
-      <div class="pending-header">
-        <span>📨 {{ t('chatPanel.pendingMessages') }} ({{ pendingQueue.length }})</span>
-        <button class="pending-clear-btn" @click="clearPendingQueue" :title="t('chatPanel.clearAll')">✕</button>
-      </div>
-      <div class="pending-list">
-        <div v-for="(msg, idx) in pendingQueue" :key="idx" class="pending-item">
-          <span class="pending-text">{{ msg }}</span>
-          <div class="pending-actions">
-            <button class="pending-send-btn" @click="sendPendingMessage(idx)" :title="t('chatPanel.sendNow')">➤</button>
-            <button class="pending-delete-btn" @click="deletePendingMessage(idx)" :title="t('chatPanel.delete')">✕</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
     <!-- 全局任务栏 (opencode 模式) -->
     <GlobalTaskBar
       :tasks="globalTasks"
@@ -320,8 +325,9 @@
           </div>
           <div class="input-right-actions">
             <span class="shortcut-hint" v-show="!inputMessage.trim()">{{ t('chatPanel.inputHint') }}</span>
-            <button type="button" class="send-btn" @click="handleSend" :title="inputMessage.trim() ? t('chatPanel.sendMessage') : (aiThinking ? t('chatPanel.stopAI') : '')">
-              {{ inputMessage.trim() ? '➤' : (aiThinking ? '⏹️' : '⏹️') }}
+            <button type="button" class="send-btn" @click="handleSend" :title="inputMessage.trim() ? t('chatPanel.sendMessage') : t('chatPanel.stopAI')">
+              <template v-if="inputMessage.trim()">➤</template>
+              <template v-else>⏹</template>
             </button>
           </div>
         </div>
@@ -481,48 +487,7 @@ const inputFocused = ref(false)
 const textareaHeight = ref(44)
 const replyLanguage = ref('auto')
 
-// 待发送消息队列
-const pendingQueue = ref<string[]>([])
 
-async function loadPendingQueue() {
-  try {
-    const res = await fetch(`${API_BASE}/api/v1/chat/pending`, {
-      headers: { 'Authorization': 'Bearer local' }
-    })
-    const data = await res.json()
-    pendingQueue.value = data.messages || []
-  } catch (e) {
-    console.error('Failed to load pending queue:', e)
-  }
-}
-
-async function clearPendingQueue() {
-  try {
-    await fetch(`${API_BASE}/api/v1/chat/pending`, {
-      method: 'DELETE',
-      headers: { 'Authorization': 'Bearer local' }
-    })
-    pendingQueue.value = []
-  } catch (e) {
-    console.error('Failed to clear pending queue:', e)
-  }
-}
-
-async function sendPendingMessage(_idx: number) {
-  try {
-    await fetch(`${API_BASE}/api/v1/chat/pending/send`, {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer local' }
-    })
-    setTimeout(loadPendingQueue, 500)
-  } catch (e) {
-    console.error('Failed to send pending message:', e)
-  }
-}
-
-async function deletePendingMessage(idx: number) {
-  pendingQueue.value.splice(idx, 1)
-}
 
 // #1 搜索相关
 const showSearch = ref(false)
@@ -743,9 +708,7 @@ onMounted(() => {
   // 初始化时从后端拉取已有任务
   loadGlobalTasks()
 
-  loadPendingQueue()
-
-  document.addEventListener('keydown', handleGlobalKeydown)
+	document.addEventListener('keydown', handleGlobalKeydown)
   document.addEventListener('click', closeContextMenu)
 })
 
@@ -1913,72 +1876,6 @@ function appendToInput(text: string) {
 .context-item.danger { color: #ef4444; }
 .context-item.danger:hover { background: rgba(239,68,68,0.1); }
 .context-divider { height: 1px; background: var(--border-color); margin: 4px 8px; }
-
-/* 待发送消息队列 */
-.pending-queue {
-  margin: 8px 16px;
-  background: rgba(255,193,7,0.05);
-  border: 1px solid rgba(255,193,7,0.2);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.pending-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  background: rgba(255,193,7,0.1);
-  font-size: 12px;
-  font-weight: 600;
-  color: #ffc107;
-}
-.pending-clear-btn {
-  background: none;
-  border: none;
-  color: #ffc107;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.pending-clear-btn:hover { background: rgba(255,193,7,0.2); }
-.pending-list {
-  max-height: 120px;
-  overflow-y: auto;
-}
-.pending-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
-  font-size: 12px;
-}
-.pending-item:last-child { border-bottom: none; }
-.pending-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-secondary);
-}
-.pending-actions {
-  display: flex;
-  gap: 4px;
-  margin-left: 8px;
-}
-.pending-send-btn, .pending-delete-btn {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.pending-send-btn { color: #10b981; }
-.pending-send-btn:hover { background: rgba(16,185,129,0.2); }
-.pending-delete-btn { color: #ef4444; }
-.pending-delete-btn:hover { background: rgba(239,68,68,0.2); }
 
 /* Toast 提示 */
 .toast {

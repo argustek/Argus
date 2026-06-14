@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Bridge struct {
 	cancel               func()
 
 	isProcessing  bool
+	processGen    int // 每次 Process 递增，defer 据此判断是否仍为最新调用
 	writeDebugLog func(content string)
 }
 
@@ -290,12 +292,16 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 		b.mu.Unlock()
 		return nil, fmt.Errorf("busy processing another task")
 	}
+	b.processGen++
+	myGen := b.processGen
 	b.isProcessing = true
 	b.mu.Unlock()
 
 	defer func() {
 		b.mu.Lock()
-		b.isProcessing = false
+		if b.processGen == myGen {
+			b.isProcessing = false
+		}
 		b.mu.Unlock()
 		if r := recover(); r != nil {
 			fmt.Printf("[Bridge-PANIC] recover: %v\n", r)
@@ -402,7 +408,8 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 		if b.onProjectStateChange != nil {
 			b.onProjectStateChange("done")
 		}
-	} else {
+	} else if !errors.Is(result.Error, context.Canceled) &&
+		!strings.Contains(result.Error.Error(), "ArgusCore cancelled") {
 		b.emitStatus("phase:error|role:none|status:error")
 		// [FIX-v0.8.1] 推送项目状态 error
 		if b.onProjectStateChange != nil {
@@ -414,10 +421,23 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 }
 
 func (b *Bridge) Cancel() {
+	b.mu.Lock()
+	wasProcessing := b.isProcessing
+	b.isProcessing = false
+	b.mu.Unlock()
 	if b.cancel != nil {
 		b.cancel()
 	}
 	b.argus.Cancel()
+
+	// 重建 context，否则后续 Process() 无法创建子 context
+	b.ctx, b.cancel = context.WithCancel(context.Background())
+	b.argus.SetContext(b.ctx)
+
+	// 中断后立即重置项目状态为 idle，避免前端状态灯卡在 running
+	if wasProcessing && b.onProjectStateChange != nil {
+		b.onProjectStateChange("idle")
+	}
 }
 
 func (b *Bridge) IsProcessing() bool {

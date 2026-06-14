@@ -454,8 +454,8 @@ onMounted(async () => {
       seenMsgIds.add(msg.id)
     }
 
-    // 第2层去重：同角色最后一条消息内容比对
-    if (msg.role !== 'se' && msg.role !== 'ap') {
+    // 第2层去重：同角色最后一条消息内容比对（跳过 user，用户可能重复输入相同内容）
+    if (msg.role !== 'user' && msg.role !== 'se' && msg.role !== 'ap') {
       const lastSameRole = [...messages.value].reverse().find(m => m.role === msg.role)
       if (lastSameRole && (lastSameRole.content || '').trim() === (msg.content || '').trim()) {
         return
@@ -493,11 +493,19 @@ onMounted(async () => {
         messages.value.push({ role: msg.role, content: msg.content, raw: msg.raw, timestamp: msg.timestamp })
         streamingRole.value = msg.role
       }
-    } else {
+    } else if (msg.role !== 'user') {
       const lastSame = messages.value.findLast(m => m.role === msg.role)
       if (lastSame && (lastSame.content || '').trim() === (msg.content || '').trim()) {
         return
       }
+      messages.value.push({
+        role: msg.role,
+        content: msg.content,
+        raw: msg.raw,
+        timestamp: msg.timestamp
+      })
+    } else {
+      // 用户消息不按内容去重 — 相同的"再运行一次"可能输入多次
       messages.value.push({
         role: msg.role,
         content: msg.content,

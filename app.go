@@ -240,9 +240,9 @@ type App struct {
 	emittedMsgIDs map[int64]bool
 
 	// SendMessage 并发保护
-	sendMu       sync.Mutex
-	isSending    bool
-	messageQueue []string // 排队消息
+	sendMu     sync.Mutex
+	isSending  bool
+	sendTaskID int64 // 每次新消息自增，用于拦截旧goroutine的陈旧回调
 
 	// [v0.7.1] MCP Manager
 	mcpManager *mcp.Manager
@@ -3265,13 +3265,15 @@ func (a *App) IsAIThinking() bool {
 }
 
 func (a *App) StopCurrentTask() error {
-	if a.chatManager == nil {
-		return fmt.Errorf("ChatManager 未初始化")
-	}
 	a.aiThinking = false
 	a.emitToFrontend("ai-thinking", false, "StopCurrentTask", chat.PathSystem)
-	a.chatManager.StopCurrentTask()
-	a.chatManager.SetUserStopped(true)
+	if a.bridge != nil {
+		a.bridge.Cancel()
+	}
+	if a.chatManager != nil {
+		a.chatManager.StopCurrentTask()
+		a.chatManager.SetUserStopped(true)
+	}
 	a.addLog("🛑 用户手动停止当前任务")
 	return nil
 }
@@ -3324,30 +3326,32 @@ func (a *App) SetLang(lang string) {
 
 func (a *App) SendMessage(content string) error {
 	a.sendMu.Lock()
-	if a.isSending {
-		// 忙 → 排队，不拒绝
-		a.messageQueue = append(a.messageQueue, content)
+	isBusy := a.isSending || a.aiThinking
+	if a.bridge != nil && a.bridge.IsProcessing() {
+		isBusy = true
+	}
+	if isBusy {
 		a.sendMu.Unlock()
-		fmt.Printf("[SendMessage] 📥 排队: %s (队列长度=%d)\n", truncate(content, 50), len(a.messageQueue))
-		return nil
+		fmt.Printf("[SendMessage] ⚡ AI繁忙，中断当前任务并立即处理: %s\n", truncate(content, 50))
+		if a.bridge != nil {
+			a.bridge.Cancel()
+		}
+		if a.chatManager != nil {
+			a.chatManager.SetUserStopped(true)
+			a.chatManager.StopCurrentTask()
+		}
+		time.Sleep(100 * time.Millisecond)
+		a.sendMu.Lock()
 	}
 	a.isSending = true
+	a.sendTaskID++
+	taskID := a.sendTaskID
 	a.sendMu.Unlock()
 
 	defer func() {
 		a.sendMu.Lock()
 		a.isSending = false
-		// 消费队列中的下一条（在释放 isSending 之后）
-		next := ""
-		if len(a.messageQueue) > 0 {
-			next = a.messageQueue[0]
-			a.messageQueue = a.messageQueue[1:]
-		}
 		a.sendMu.Unlock()
-		if next != "" {
-			fmt.Printf("[SendMessage] 📤 从队列取出: %s (剩余%d条)\n", truncate(next, 50), len(a.messageQueue))
-			_ = a.SendMessage(next)
-		}
 	}()
 
 	a.writeDebugLog(fmt.Sprintf("[SendMessage] CALLED content=%s", truncate(content, 50)))
@@ -3416,8 +3420,12 @@ func (a *App) SendMessage(content string) error {
 			a.aiThinking = false
 			a.emitToFrontend("ai-thinking", false, "SendMessage:Stop", chat.PathSystem)
 
+			if a.bridge != nil {
+				a.bridge.Cancel()
+			}
 			if a.chatManager != nil {
 				a.chatManager.SetUserStopped(true)
+				a.chatManager.StopCurrentTask()
 				fmt.Printf("[SendMessage] Step 6: 已设置 userStopped 标志，清理记忆文件\n")
 			}
 
@@ -3444,6 +3452,21 @@ func (a *App) SendMessage(content string) error {
 			fmt.Printf("[SendMessage] 🚀 V2 Bridge.Process (async): %s\n", content)
 			go func() {
 				result, err := a.bridge.Process(content)
+
+				a.sendMu.Lock()
+				if taskID != a.sendTaskID {
+					a.sendMu.Unlock()
+					return
+				}
+				a.sendMu.Unlock()
+
+				if result == nil {
+					a.addLog(fmt.Sprintf("【V2-Error】result is nil (可能被中断): %v", err))
+					a.aiThinking = false
+					a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
+					return
+				}
+
 				fmt.Printf("[SendMessage] V2 返回: success=%v err=%v phases=%d\n",
 					result.Success, err, len(result.Phases))
 
@@ -3478,6 +3501,13 @@ func (a *App) SendMessage(content string) error {
 			go func() {
 				response, err := a.chatManager.ProcessMessage(content)
 				fmt.Printf("[SendMessage] V1 ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
+
+				a.sendMu.Lock()
+				if taskID != a.sendTaskID {
+					a.sendMu.Unlock()
+					return
+				}
+				a.sendMu.Unlock()
 
 				if err != nil {
 					a.addLog(fmt.Sprintf("【V1-Error】处理失败: %v", err))
