@@ -53,3 +53,6 @@ logs/
 # Test artifacts
 sse_test_results/
 test_log.txt
+
+# Promotion / marketing docs (local drafts, not tracked)
+docs/promotion/

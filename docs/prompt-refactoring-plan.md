@@ -1,5 +1,35 @@
 # PM Prompt Refactoring Plan
 
+## Language Strategy
+
+### Decision: Unified English prompt
+
+Argus is open source. Using English as the base prompt language ensures:
+
+- **i18n-friendly**: Language-specific instructions are injected at runtime via `GetLanguageInstruction()`, not baked into the prompt
+- **Community accessible**: English is the common language for open source projects
+- **Consistent**: One prompt, one source of truth — no more "which prompt loaded?" ambiguity
+
+### How language control works after refactoring
+
+```
+Core prompt (English, ~50 lines) ← the only prompt in code
+    │
+    └─ Appended at LLM call time:
+       GetLanguageInstruction(replyLanguage, userMessage)
+       → "You MUST reply in English." / "你必须用中文回复。"
+```
+
+This is already how `ChatStream`/`Chat` work (`client.go:216-218`). The refactoring adds the same to `ChatWithTools` (currently missing it). User's input language determines reply language — prompt stays English.
+
+### What this means for users
+
+- Chinese user types "写一个hello.go" → PM replies in Chinese (detected by `DetectLanguage`)
+- English user types "write hello.go" → PM replies in English
+- The prompt itself is always English — it's the model's behavioral instructions, not its output
+
+---
+
 ## 1. Current State Analysis
 
 ### Two conflicting PM prompts exist
@@ -35,7 +65,40 @@
 
 ---
 
-## 2. Industry Research (June 2026)
+## 2. Transplant Strategy: Not Delete, Reorganize
+
+### Core principle
+
+The current Chinese prompt (`pm_prompt.go:25-173`) has been benchmark-tested and produces coding output comparable to opencode. **We are not rewriting from scratch** — we are reorganizing the same tested content into a new architecture.
+
+### Content mapping: old → new
+
+| Old Section (Chinese, 173 lines) | Lines | Goes To | Rationale |
+|------|-------|---------|-----------|
+| Identity + 5 Principles | 25-65 | **Core Prompt** (Section 4) | Behavioral rules, keep in core |
+| Featherweight tool table | 74-87 | **Execution Rules** (Section 5) | Reference material, not behavioral |
+| Lightweight+ desc | 89-91 | **Core Prompt** → Decision Tree | One line in the decision tree |
+| Decision Tree | 96-112 | **Core Prompt** → Decision Tree | Core behavioral logic, expand to cover all task types |
+| Communication Rules | 116-122 | **Core Prompt** → Communication | Unchanged, translate to English |
+| QA/Review Process | 126-143 | **Execution Rules** (Section 5) | Only relevant for @SE flow, reference |
+| TODO Management | 147-150 | **Execution Rules** (Section 5) | Reference |
+| Anti-loop | 154-158 | **Core Prompt** → Anti-loop | Behavioral, keep in core |
+| Time/Social | 162-172 | **Remove** | Not useful for code generation |
+
+### Why this works
+
+- Every tested rule is preserved, just relocated
+- Nothing is deleted — only structural reorganization
+- The model still sees the same content (core + rules appended = comparable total length)
+- The difference: behavioral rules are now front-loaded, reference material is after
+
+### Risk: what might change
+
+| Change | Mitigation |
+|--------|-----------|
+| Chinese → English phrasing | Use same semantic meaning, verified by output comparison |
+| Content reordering | Behavioral rules first = model pays more attention to them = likely improvement |
+| Rules appended vs inline | Same total content, same model consumption |
 
 ### All major competitors use: short core prompt + external rules
 
@@ -98,9 +161,19 @@ Layer 3: Project Rules (AGENTS.md, optional, loaded from disk)
 - **Execution rules** are semi-stable — they change when we add tools or task types, not per project
 - **Project rules** are user-managed — build commands, coding conventions, non-obvious patterns
 
+### Language: all English
+
+Core prompt and execution rules are written in English. Language-specific instructions are injected at runtime by `GetLanguageInstruction()` in the LLM call layer. This is already the pattern for `ChatStream`/`Chat` — the refactoring adds it to `ChatWithTools`.
+
 ---
 
 ## 4. Core Prompt Design (~50 lines)
+
+### Source material
+
+Every line in the new core prompt is translated/adapted from the existing Chinese prompt (`pm_prompt.go:25-65` + `96-122` + `154-158`). Nothing is invented — we are transplanting tested content into a new structure.
+
+### Structure (per pm-polish-guide.md §5)
 
 ### Structure (per pm-polish-guide.md §5)
 
@@ -161,6 +234,16 @@ One @ per message maximum.
 
 ## 5. Execution Rules Design (~50 lines)
 
+### Source material
+
+Transplanted from:
+- Tool table (`pm_prompt.go:74-87`)
+- Featherweight execution norms (`pm_prompt.go:106-112`)
+- QA/Review process (`pm_prompt.go:126-143`)
+- TODO management (`pm_prompt.go:147-150`)
+
+Plus newly added: system/query/document task norms (previously missing coverage).
+
 ### Structure
 
 ```go
@@ -212,29 +295,57 @@ Note: `pmDirectExecute` does NOT need `PMRules` — its use case is simple enoug
 
 ## 6. Code Changes Required
 
-### 6.1 Delete `internal/core/prompts.go` PMPrompt (27 lines)
+### 6.1 Unify `internal/core/prompts.go` and `internal/ai/pm_prompt.go`
 
-Replace with a reference to the unified PM prompt. The `PromptKit.Get(RolePM)` should return the same core prompt from `pm_prompt.go`.
+Both PM prompts (English 27 lines from `prompts.go` + Chinese 173 lines from `pm_prompt.go`) become one unified English prompt in `pm_prompt.go`. The `PromptKit.Get(RolePM)` returns the same core prompt.
 
 Impact:
-- `argus.go:1813` — `c.prompts.Get(RolePM)` in pmDirectExecute now returns the unified core prompt
-- This changes pmDirectExecute behavior from "delegate to SE" to "execute directly" — which is what featherweight should do
+- `argus.go:1813` — `c.prompts.Get(RolePM)` in pmDirectExecute now returns the unified core prompt (English, ~50 lines)
+- `PMProcessor.getSystemPrompt()` in ProcessStream returns core + PMRules (English, ~100 lines total)
+- Both paths get identical behavioral rules — no more "which prompt loaded?" ambiguity
 
 ### 6.2 Rewrite `internal/ai/pm_prompt.go` PMPrompt constant
 
-From 173 lines to ~50 lines. Remove:
-- Redundant examples (keep 1-2 max)
-- Tool table (move to PMRules)
-- Execution norms (move to PMRules)
-- Error handling details (move to PMRules)
-- QA verification process for SE flow (keep only as reference)
-- Time perception / social guide (remove entirely — doesn't affect code generation)
+Transplant existing 173 lines (Chinese) → ~50 lines (English):
+
+| Content | Action |
+|---------|--------|
+| 5 Principles (lines 29-65) | Translate to English, keep in core |
+| Decision Tree (lines 96-112) | Translate, expand to cover system/query/docs |
+| Communication Rules (lines 116-122) | Translate, unchanged |
+| Anti-loop (lines 154-158) | Translate, unchanged |
+| Time/Social (lines 162-172) | Remove (not useful for code tasks) |
 
 ### 6.3 Add `internal/ai/pm_rules.go`
 
-New file containing `PMRules` constant (~50 lines). `ProcessStream` appends it, `pmDirectExecute` does not.
+New file:
 
-### 6.4 Fix `seExecutionSatisfied` in `argus.go:1381`
+```go
+package ai
+
+// PMRules contains detailed execution reference appended to ProcessStream context.
+// Transplanted from pm_prompt.go tool table (74-87), execution norms (106-112),
+// and QA process (126-143).
+const PMRules = `...`
+```
+
+`ProcessStream` appends it via `getSystemPrompt()`. `pmDirectExecute` does not use it.
+
+### 6.4 Add language instruction to `ChatWithTools`
+
+Currently `ChatWithTools(client.go:602)` does NOT inject language instructions. Add the same `GetLanguageInstruction()` call that `ChatStream` and `Chat` already use.
+
+```go
+// In ChatWithTools, before building the request:
+langInstruction := GetLanguageInstruction(replyLanguage, userContent)
+if langInstruction != "" {
+    systemPrompt = systemPrompt + langInstruction
+}
+```
+
+This ensures the English core prompt produces output in the user's language.
+
+### 6.5 Fix `seExecutionSatisfied` in `argus.go:1381`
 
 Remove the hard reject on `exit status` and `command failed`. These are normal outputs for many system commands. The LLM should decide if a result is acceptable, not a regex check.
 
@@ -248,7 +359,7 @@ if strings.Contains(r, "exit status") || strings.Contains(r, "command failed") {
 // Remove these lines — let the LLM interpret exit codes
 ```
 
-### 6.5 Fix `pmDirectExecute` retry prompt in `argus.go:2017-2029`
+### 6.6 Fix `pmDirectExecute` retry prompt in `argus.go:2017-2029`
 
 Current prompt is hardcoded for coding tasks ("syntax errors", "go run filename.go"). Replace with a generic version:
 
@@ -264,7 +375,7 @@ Task: %s
 Return corrected actions.
 ```
 
-### 6.6 (Future) AGENTS.md support
+### 6.7 (Future) AGENTS.md support
 
 When the project has a `.argus/AGENTS.md`, PM reads it on startup and includes it in context. This is for project-specific rules (build commands, code conventions) — not universal PM behavior.
 
@@ -272,23 +383,39 @@ When the project has a `.argus/AGENTS.md`, PM reads it on startup and includes i
 
 ## 7. Migration Plan
 
-### Phase 1: Consolidate prompts
-1. Write the unified core prompt (~50 lines)
-2. Write PMRules (~50 lines)
-3. Delete `prompts.go` PMPrompt, point to new core
-4. Make `ProcessStream` append PMRules
-5. Make sure `pmDirectExecute` does NOT get PMRules
+### Phase 1: Write unified prompt (transplant, not rewrite)
 
-### Phase 2: Fix execution logic
-1. Remove `exit status` check from `seExecutionSatisfied`
-2. Fix `pmDirectExecute` retry prompt to be generic
+1. **Translate core content** (Chinese → English)
+   - Identity + 5 Principles → Core Prompt identity/principles section
+   - Decision Tree (lines 96-112) → Core Prompt decision tree (expanded with system/query/docs)
+   - Communication Rules → unchanged, translate
+   - Anti-loop → unchanged, translate
 
-### Phase 3: Verify
-1. Test coding task (hello world → write + exec)
-2. Test system task (clean directory → exec rm)
-3. Test follow-up (再运行一次 → prevTaskLevel inheritance)
-4. Test complex task (multi-file → @SE delegation)
-5. Check conversation.log for correct PM behavior
+2. **Write PMRules** (transplant reference content)
+   - Tool table (74-87) → translate
+   - Execution norms (106-112) → translate, add system/query/docs norms
+   - QA process (126-143) → translate
+   - TODO (147-150) → translate
+
+3. **Discard**
+   - Time/Social (162-172) → remove entirely
+   - `prompts.go` PMPrompt (27 lines, "delegate to SE") → replace with unified core
+
+### Phase 2: Code changes
+
+1. Unify `PromptKit.Get(RolePM)` → same core prompt from `pm_prompt.go`
+2. Add `ChatWithTools` language injection (same as `ChatStream`/`Chat`)
+3. Remove `exit status` check from `seExecutionSatisfied`
+4. Fix `pmDirectExecute` retry prompt to be generic (not coding-only)
+
+### Phase 3: Build + verify
+
+1. `npm run build` + `wails build`
+2. Test coding task (hello world → write + exec)
+3. Test system task (clean directory → exec rm)
+4. Test follow-up (再运行一次 → prevTaskLevel inheritance)
+5. Test complex task (multi-file → @SE delegation)
+6. Check conversation.log for correct PM behavior (language, tool usage)
 
 ### Phase 4: AGENTS.md (optional)
 1. Add `.argus/AGENTS.md` loading
@@ -300,4 +427,5 @@ When the project has a `.argus/AGENTS.md`, PM reads it on startup and includes i
 
 1. Should `PromptKit` be deleted entirely, or kept for SE/AP prompts? (SE/AP prompts are shorter and don't have this complexity)
 2. Should `pmDirectExecute` be deleted entirely, or kept as the "no-frills" path for featherweight tasks? (If core prompt is unified, pmDirectExecute gets the same behavioral rules — but it doesn't need the detailed PMRules reference)
-3. How to handle the `seExecutionSatisfied` removal without breaking the normal SE execution path? (SE execution has its own satisfaction check in manager.go)
+3. `ChatWithTools` language injection: should it match the existing pattern (append to systemPrompt) or be handled differently for tool-calling models?
+4. The `ReplyLang` vs `c.language` — these are set in two different places (manager.go:413 defaults to "zh", argus.go:450 detects per-request). After unification with English prompt, `ReplyLanguage=auto` might be the right default.
