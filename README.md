@@ -435,6 +435,11 @@ argus/
 
 ---
 
+## 💬 Community
+
+- **Discussions**: https://github.com/ArgusTek/Argus/discussions — Q&A, ideas, chat
+- **Issues**: https://github.com/ArgusTek/Argus/issues — bug reports, feature requests
+
 ## 🤝 Contributing
 
 We welcome all forms of contribution! Whether it's code, documentation, bug reports, or feature suggestions.
