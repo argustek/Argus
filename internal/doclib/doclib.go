@@ -415,3 +415,122 @@ func (n *DocNode) SetDirty(dirty bool) {
 	n.Dirty = dirty
 	n.LastUpdated = time.Now().UTC().Format(time.RFC3339)
 }
+
+func docIDToPath(rootDir string) (map[string]string, error) {
+	docPaths, err := ScanForDocs(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	idToPath := make(map[string]string)
+	for absPath := range docPaths {
+		node, _, err := ReadDocFile(absPath)
+		if err != nil || node == nil {
+			continue
+		}
+		idToPath[node.ID] = absPath
+	}
+	return idToPath, nil
+}
+
+func PropagateDirty(rootDir string, docIDs []string) error {
+	if len(docIDs) == 0 {
+		return nil
+	}
+
+	tree, err := BuildTree(rootDir)
+	if err != nil {
+		return fmt.Errorf("构建文档树失败: %w", err)
+	}
+
+	idToPath, err := docIDToPath(rootDir)
+	if err != nil {
+		return fmt.Errorf("扫描文档路径失败: %w", err)
+	}
+
+	var validIDs []string
+	for _, id := range docIDs {
+		if _, ok := tree.AllDocs[id]; ok {
+			validIDs = append(validIDs, id)
+		}
+	}
+	if len(validIDs) == 0 {
+		return nil
+	}
+
+	sort.Slice(validIDs, func(i, j int) bool {
+		return GetDepth(tree, validIDs[i]) > GetDepth(tree, validIDs[j])
+	})
+
+	seen := make(map[string]bool)
+	var toProcess []string
+	for _, id := range validIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		toProcess = append(toProcess, id)
+		current := id
+		for {
+			node, ok := tree.AllDocs[current]
+			if !ok || node.Parent == "" {
+				break
+			}
+			if seen[node.Parent] {
+				break
+			}
+			seen[node.Parent] = true
+			toProcess = append(toProcess, node.Parent)
+			current = node.Parent
+		}
+	}
+
+	sort.Slice(toProcess, func(i, j int) bool {
+		return GetDepth(tree, toProcess[i]) > GetDepth(tree, toProcess[j])
+	})
+
+	for _, id := range toProcess {
+		path, ok := idToPath[id]
+		if !ok {
+			continue
+		}
+		node, body, err := ReadDocFile(path)
+		if err != nil || node == nil {
+			continue
+		}
+		node.SetDirty(true)
+		if err := WriteDocFile(path, node, body); err != nil {
+			return fmt.Errorf("写入文档 %s 失败: %w", id, err)
+		}
+	}
+
+	if err := SaveCache(tree, rootDir); err != nil {
+		return fmt.Errorf("保存缓存失败: %w", err)
+	}
+
+	return nil
+}
+
+func ClearDirty(rootDir string, docIDs []string) error {
+	if len(docIDs) == 0 {
+		return nil
+	}
+	idToPath, err := docIDToPath(rootDir)
+	if err != nil {
+		return err
+	}
+	for _, id := range docIDs {
+		path, ok := idToPath[id]
+		if !ok {
+			continue
+		}
+		node, body, err := ReadDocFile(path)
+		if err != nil || node == nil {
+			continue
+		}
+		node.SetDirty(false)
+		if err := WriteDocFile(path, node, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -224,8 +224,14 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 			if tc.Function.Name == "complete_task" {
 				completeTc = &tc
 				formatCompleteFromAction(action, completeResult)
-				s.seLog("[SE Tools] complete_task called: files=%v summary=%s\n",
-					completeFilesFromAction(action), completeSummaryFromAction(action))
+				docs := completeDocsFromAction(action)
+				s.seLog("[SE Tools] complete_task called: files=%v docs=%v summary=%s\n",
+					completeFilesFromAction(action), docs, completeSummaryFromAction(action))
+				if len(docs) > 0 {
+					if err := doclib.PropagateDirty(s.workDir, docs); err != nil {
+						s.seLog("[SE Tools] 脏标记传播失败: %v\n", err)
+					}
+				}
 				continue
 			}
 			if seIsReadTool(tc.Function.Name) {
@@ -465,6 +471,13 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 			for _, f := range v {
 				if s, ok := f.(string); ok {
 					action.Content += s + ","
+				}
+			}
+		}
+		if v, ok := args["docs"].([]interface{}); ok {
+			for _, d := range v {
+				if s, ok := d.(string); ok {
+					action.Docs = append(action.Docs, s)
 				}
 			}
 		}
@@ -717,6 +730,10 @@ func (s *SEProcessor) toolCallToSEAction(tc ToolCall) SEAction {
 
 func completeFilesFromAction(a SEAction) []string {
 	return strings.Split(strings.TrimRight(a.Content, ","), ",")
+}
+
+func completeDocsFromAction(a SEAction) []string {
+	return a.Docs
 }
 
 func completeSummaryFromAction(a SEAction) string {
@@ -1587,6 +1604,7 @@ type SEAction struct {
 	GitArgs         []string `json:"git_args,omitempty"`
 	TestPattern     string   `json:"test_pattern,omitempty"`
 	TestCoverage    bool     `json:"test_coverage,omitempty"`
+	Docs            []string `json:"docs,omitempty"`
 	TestVerbose     bool     `json:"test_verbose,omitempty"`
 	Extra           string   `json:"extra,omitempty"` // 额外JSON数据（如tags/code等）
 
