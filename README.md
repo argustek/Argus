@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/Vue-3.3+-4FC08D?logo=vue.js" alt="Vue">
   <img src="https://img.shields.io/badge/TypeScript-5.0+-3178C6?logo=typescript" alt="TypeScript">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
-  <img src="https://img.shields.io/badge/version-v0.9.2-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-v0.9.4-green" alt="Version">
 </p>
 
 ---
@@ -27,7 +27,7 @@
 
 **One Core, Multiple Roles**
 
-Argus features a **unified core architecture** with shared memory and role-based prompt switching:
+Argus features a **unified core architecture** with shared memory, hierarchical document tree, and role-based prompt switching:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -46,6 +46,12 @@ Argus features a **unified core architecture** with shared memory and role-based
 │  │      ├── PM Hat: Analyze requirements                │   │
 │  │      ├── SE Hat: Generate & execute code             │   │
 │  │      └── AP Hat: Review & approve results            │   │
+│  │                                                      │   │
+│  │   DocTree (Hierarchical Memory)                      │   │
+│  │      ├── Documents with YAML frontmatter             │   │
+│  │      ├── Dirty propagation on task completion        │   │
+│  │      ├── Go AST export extraction & verification     │   │
+│  │      └── Impact analysis & audit integration         │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                            ↓                              │
 │  ┌──────────────────┐    ┌──────────────────────────────┐  │
@@ -180,6 +186,15 @@ Argus features a **unified core architecture** with shared memory and role-based
 - **Message deduplication**: Frontend + backend filtering
 - **Auto-backup**: Before file modification, backup to `.argus/backups/`
 - **Global panic recovery**: Goroutine panic protection
+
+#### 8️⃣ Document Tree Memory System (v0.9.4+)
+- **Hierarchical document tree**: Project documents organized in `.argus/tree/` with owner, status, code_ref, dirty flags, and export tracking
+- **YAML frontmatter**: Each doc contains structured metadata — no external database required
+- **Dirty propagation**: `complete_task` automatically marks affected docs + ancestors dirty; AP approval clears dirty flags
+- **Go AST export extraction**: Auto-sync exported functions/structs/interfaces from code to document frontmatter
+- **Bidirectional verification**: AP can verify documented exports match actual code, and check impact scope before approval
+- **CLI tools**: `--tree` (print tree), `--rebuild-tree` (scan project), `--check-impact <doc_id>` (query impact)
+- **SE/AP tool integration**: `update_doc`, `log_change`, `get_impacted_docs`, `sync_doc_exports`, `verify_doc_exports`, `check_impact`
 
 ---
 
@@ -362,9 +377,12 @@ argus/
 │   ├── ai/                  # AI client & prompts
 │   │   ├── client.go        # OpenAI-compatible API client
 │   │   ├── pm_prompt.go     # PM system prompt & processor
-│   │   ├── se_prompt.go     # SE system prompt & processor
+│   │   ├── se_prompt.go     # SE system prompt & processor (+ doc tree tools)
 │   │   ├── se_prompt_test.go # SE prompt tests
-│   │   └── ap_prompt.go     # AP approval prompt & processor
+│   │   └── ap_prompt.go     # AP approval prompt & processor (+ doc audit tools)
+│   ├── doclib/              # Document tree library
+│   │   ├── doclib.go        # Core: DocNode/DocTree, frontmatter, tree ops, export extraction, propagation
+│   │   └── cli.go           # CLI handlers: --tree, --rebuild-tree, --check-impact
 │   ├── chat/                # Chat management
 │   │   ├── manager.go       # Unified ChatManager (PM/SE/AP/C orchestration)
 │   │   ├── router.go        # @mention message router
