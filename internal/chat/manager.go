@@ -3444,7 +3444,7 @@ continueProcess:
 // [v0.7.2] emitWailsEvent 改为走 MessageBus（不再走破路 runtime.EventsEmit）
 func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
 	m.msgBusSend("se", "", eventName, PathSEExec, "emitWailsEvent:"+eventName, data)
-	m.pushSSEEvent(eventName, data)
+	m.PushSSEEvent(eventName, data)
 }
 
 // [G63] msgBusSend 通过MessageBus发送消息（强制送水+校验）
@@ -3490,7 +3490,7 @@ func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, 
 		fmt.Printf("[💧MSG-EMIT] event=%s role=%s ctx_ok=%v keys=%v\n", eventName, role, emitCtx != nil, getMapKeys(enrichedData))
 	}
 
-	m.pushSSEEvent(eventName, data)
+	m.PushSSEEvent(eventName, data)
 	return msgId
 }
 
@@ -7546,7 +7546,7 @@ func getMapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-func (m *Manager) pushSSEEvent(eventType string, data interface{}) {
+func (m *Manager) PushSSEEvent(eventType string, data interface{}) {
 	if m.sseBridge == nil {
 		return
 	}

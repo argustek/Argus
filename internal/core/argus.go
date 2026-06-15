@@ -689,6 +689,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	if seErr != nil {
 		result.Error = fmt.Errorf("SE execution failed: %w", seErr)
 		c.emit("se_to_pm", fmt.Sprintf("@USR SE执行失败: %v", seErr))
+		c.emit("pm_to_user", fmt.Sprintf("@USR SE执行失败: %v", seErr))
 		return result
 	}
 
@@ -698,7 +699,11 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	actions = c.ensureExecAction(actions)
 
 	if completed {
-		c.emit("se_to_pm", fmt.Sprintf("@PM ✅ %s", c.extractCompletedSummary(seResponse)))
+		seSummary := c.extractCompletedSummary(seResponse)
+		c.emit("se_to_pm", fmt.Sprintf("@PM ✅ %s", seSummary))
+		if seSummary != "" {
+			c.emit("pm_to_user", "@USR ✅ "+seSummary)
+		}
 		c.emitStatus("done", "none", "idle")
 		result.Success = true
 		return result
@@ -721,8 +726,10 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	}
 
 	if len(actions) == 0 && !completed {
+		errMsg := "SE无法生成有效操作"
 		result.Error = fmt.Errorf("SE returned no valid actions after retries")
-		c.emit("se_to_pm", "@USR SE无法生成有效操作")
+		c.emit("se_to_pm", "@USR "+errMsg)
+		c.emit("pm_to_user", "@USR "+errMsg)
 		return result
 	}
 
@@ -1015,8 +1022,10 @@ Decide: approve or reject with specific reasons.`,
 		c.emit("pm_review", fmt.Sprintf("@SE ❌ PM rejected (attempt %d/%d): %s", reviewAttempt+1, maxReviewRetries, reviewResult.Reason))
 
 		if reviewAttempt == maxReviewRetries-1 {
+			rejectMsg := fmt.Sprintf("PM审核拒绝（已重试%d次）: %s", maxReviewRetries, reviewResult.Reason)
 			c.emit("error", fmt.Sprintf("V2 Error: PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason))
 			result.Error = fmt.Errorf("PM review rejected after %d attempts: %s", maxReviewRetries, reviewResult.Reason)
+			c.emit("pm_to_user", "@USR ❌ "+rejectMsg)
 			c.emitStatus("error", "pm", "idle")
 			return result
 		}
@@ -1091,6 +1100,7 @@ Perform final quality and security check. Approve or reject with reasons.`,
 		if apResult.Rejected {
 			if apAttempt >= maxAPRetries {
 				c.emit("ap_result", fmt.Sprintf("@SE ❌ AP rejected (final): %s", apResult.Reason))
+				c.emit("pm_to_user", fmt.Sprintf("@USR ❌ AP终审拒绝: %s", apResult.Reason))
 				c.emitStatus("error", "ap", "idle")
 				result.Error = fmt.Errorf("AP rejected: %s", apResult.Reason)
 				return result
@@ -1211,6 +1221,7 @@ Perform final quality and security check. Approve or reject with reasons.`,
 
 	if apResult.Rejected {
 		c.emit("ap_result", fmt.Sprintf("@USR ❌ 任务最终失败: %s", apResult.Reason))
+		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ 任务最终失败: %s", apResult.Reason))
 		c.emitStatus("error", "none", "idle")
 		result.Error = fmt.Errorf("AP final rejection: %s", apResult.Reason)
 		return result
@@ -1221,6 +1232,7 @@ Perform final quality and security check. Approve or reject with reasons.`,
 	// [v0.7.2] 硬编码TODO已禁用
 
 	// [v0.7.2] AP通过后，PM收尾：@USR向用户简要总结（无工具，不带历史目录扫描）
+	pmHadFinalSummary := false
 	if c.pmProcessor != nil {
 		fmt.Println("[Core-PM] 🎯 AP审批通过，请求PM做最终总结...")
 		summaryMsg := "当前任务已通过AP最终审批。请@USR向用户做一句话总结（只说本次做了什么，不要列举其他文件）。"
@@ -1232,7 +1244,13 @@ Perform final quality and security check. Approve or reject with reasons.`,
 			fmt.Printf("[Core-PM] ✅ 最终总结: %s\n", summary)
 			c.emit("pm_to_user", summary)
 			c.memory.Add(RolePM, summary)
+			pmHadFinalSummary = true
 		}
+	}
+	// 兜底：确保一定有pm_to_user（防止pmProcessor为nil或总结失败）
+	if !pmHadFinalSummary {
+		fallbackSummary := fmt.Sprintf("✅ 任务完成（执行%d个操作）", len(result.Actions))
+		c.emit("pm_to_user", fallbackSummary)
 	}
 
 	result.Success = true

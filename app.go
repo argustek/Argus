@@ -710,8 +710,13 @@ func (a *App) initChatManager() {
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
 				a.chatManager.GetMessageBus().SetDebugLogWriter(a.chatManager.WriteDebugLog) // [v0.7.2] 对话框与log一致
-				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
-				a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
+			a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
+			a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
+			a.bridge.SetPushSSEEvent(func(eventType string, data interface{}) {
+				if a.chatManager != nil {
+					a.chatManager.PushSSEEvent(eventType, data)
+				}
+			})
 				// [v0.7.2] 注入 ContextWindow 到 Bridge（真正的消息处理入口）
 				if a.contextWindow != nil {
 					a.bridge.SetContextWindow(a.contextWindow)
@@ -776,9 +781,13 @@ func (a *App) initChatManager() {
 
 				switch msg.Role {
 				case "pm":
-					a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+					a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathPMToUser)
+				case "se":
+					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathSEToUser)
+				case "ap":
+					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathAPToUser)
 				default:
-					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathCoreOutput)
+					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathSystem)
 				}
 			})
 
@@ -1051,6 +1060,30 @@ func (a *App) AckMessage(msgId string) bool {
 		return false
 	}
 	return a.chatManager.GetMessageBus().Ack(msgId)
+}
+
+// ackPendingMessages 自动确认所有待处理消息（用于 HTTP API / --send 等无前端的场景）
+// 确保 conversation.log 写入，不依赖前端 ACK
+func (a *App) ackPendingMessages() {
+	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		return
+	}
+	msgBus := a.chatManager.GetMessageBus()
+	pending := msgBus.CheckPending()
+	if a.chatManager.WriteDebugLog != nil {
+		a.chatManager.WriteDebugLog(fmt.Sprintf("[ackPendingMessages] pending count=%d", len(pending)))
+	}
+	for _, p := range pending {
+		if msgId, ok := p["msgId"].(string); ok && msgId != "" {
+			if a.chatManager.WriteDebugLog != nil {
+				a.chatManager.WriteDebugLog(fmt.Sprintf("[ackPendingMessages] Acking msgId=%s path=%v", msgId, p["path"]))
+			}
+			msgBus.Ack(msgId)
+		}
+	}
+	if a.chatManager.WriteDebugLog != nil {
+		a.chatManager.WriteDebugLog(fmt.Sprintf("[ackPendingMessages] done"))
+	}
 }
 
 // [G63] MessageBus: 获取待确认消息列表
@@ -3438,8 +3471,8 @@ func (a *App) SendMessage(content string) error {
 		}
 
 		a.addLog("【SendMessage】准备处理消息（V2 ArgusCore）")
-		a.aiThinking = true
-		a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathUserInput)
+a.aiThinking = true
+a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathSystem)
 
 		a.msgIDCounter++
 		userMsg := a.newChatMessage("user", content)
@@ -3495,8 +3528,10 @@ func (a *App) SendMessage(content string) error {
 
 				a.aiThinking = false
 				a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
+				// 异步处理完成：自动确认待处理消息（HTTP API 无前端 ACK）
+				a.ackPendingMessages()
 			}()
-		} else {
+		} else if a.chatManager != nil {
 			fmt.Printf("[SendMessage] ⚠️ Bridge未初始化，异步处理\n")
 			go func() {
 				response, err := a.chatManager.ProcessMessage(content)
@@ -3521,6 +3556,8 @@ func (a *App) SendMessage(content string) error {
 
 				a.aiThinking = false
 				a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
+				// 异步处理完成：自动确认待处理消息（HTTP API 无前端 ACK）
+				a.ackPendingMessages()
 			}()
 		}
 

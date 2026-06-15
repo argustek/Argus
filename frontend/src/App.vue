@@ -475,6 +475,8 @@ onMounted(async () => {
           delete (existingExecCard as any)._streaming
           return
         }
+        // [v0.9.2] SE消息无_execData时静默丢弃（SSE事件不应变chat气泡）
+        return
       }
 
       const lastMsgs = messages.value.slice(-3).reverse()
@@ -489,9 +491,6 @@ onMounted(async () => {
         delete (messages.value[actualIdx] as any)._streaming
         streamingRole.value = ''
         aiThinking.value = false
-      } else {
-        messages.value.push({ role: msg.role, content: msg.content, raw: msg.raw, timestamp: msg.timestamp })
-        streamingRole.value = msg.role
       }
     } else if (msg.role !== 'user') {
       const lastSame = messages.value.findLast(m => m.role === msg.role)
@@ -567,23 +566,23 @@ onMounted(async () => {
     }
   })
 
-  // [G57] 监听PM消息事件（保留向后兼容，已通过MessageBus→new-message下发）
+  // PM 通过 pm_message 事件流式推送，前端累加（不新建消息，避免多个气泡）
   EventsOff('pm_message')
   EventsOn('pm_message', (data: { delta: string; _msgId?: string }) => {
     if (!data.delta) return
     ackMessage(data._msgId || '')
-
-    // 去重：检查是否已存在相同内容的PM消息
+    // 累加到上一条 PM 消息
     const lastPm = [...messages.value].reverse().find(m => m.role === 'pm')
-    if (lastPm && (lastPm.content || '').trim() === (data.delta || '').trim()) {
-      return
+    if (lastPm) {
+      lastPm.content += data.delta
+    } else {
+      messages.value.push({
+        role: 'pm',
+        content: data.delta,
+        timestamp: Date.now()
+      } as any)
     }
-    const pmMsg = {
-      role: 'pm',
-      content: data.delta,
-      timestamp: Date.now()
-    } as any
-    messages.value.push(pmMsg)
+    recordReceive('pm', data._msgId || 'pm_' + Date.now(), data.delta, 'pm_message')
   })
 
   // 监听AP消息事件（AP审批结果）

@@ -33,6 +33,8 @@ type Bridge struct {
 	isProcessing  bool
 	processGen    int // 每次 Process 递增，defer 据此判断是否仍为最新调用
 	writeDebugLog func(content string)
+
+	pushSSEEvent func(eventType string, data interface{}) // SSE 事件推送
 }
 
 func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Bridge {
@@ -118,6 +120,12 @@ func (b *Bridge) SetDebugLogWriter(fn func(content string)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.writeDebugLog = fn
+}
+
+func (b *Bridge) SetPushSSEEvent(fn func(eventType string, data interface{})) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pushSSEEvent = fn
 }
 
 // [v0.7.2] SetContextWindow 注入 Token 监控窗口
@@ -223,10 +231,20 @@ func (b *Bridge) onCoreMessage(source, content string) {
 		return
 	}
 
-	// pm_to_user 走 MessageBus（确保 conversation.log 记录一致）
+	if b.writeDebugLog != nil {
+		b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] source=%s content=%s msgBus=%v ctx=%v", source, content, b.msgBus != nil, b.ctx != nil))
+	}
+
+	// pm_to_user 走 MessageBus（conversation.log 由 Ack 统一写）+ SSE 推送
 	if source == "pm_to_user" && b.msgBus != nil && b.ctx != nil {
 		displayContent := strings.ReplaceAll(content, "⚡", "")
-		b.msgBus.Send("pm", displayContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": displayContent})
+		msgId := b.msgBus.Send("pm", displayContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": displayContent})
+		if b.pushSSEEvent != nil {
+			b.pushSSEEvent("pm_message", map[string]interface{}{"delta": displayContent})
+		}
+		if b.writeDebugLog != nil {
+			b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] msgBus.Send returned msgId=%s displayContent=%q", msgId, displayContent))
+		}
 		return
 	}
 
@@ -245,13 +263,6 @@ func (b *Bridge) onCoreMessage(source, content string) {
 			Timestamp: time.Now(),
 		})
 	}
-}
-
-func (b *Bridge) sendToMsgBus(role, content string, path MessagePath) {
-	if b.msgBus == nil || b.ctx == nil {
-		return
-	}
-	b.msgBus.Send(role, content, role+"_to_user", path, "Bridge:"+role, map[string]interface{}{"content": content})
 }
 
 func (b *Bridge) onCoreChunk(delta string) {
@@ -313,10 +324,6 @@ func (b *Bridge) Process(userMsg string) (*core.ProcessResult, error) {
 	// [FIX-v0.8.1] 推送项目状态 running（V2 Bridge 绕过 handleToPM，需手动触发）
 	if b.onProjectStateChange != nil {
 		b.onProjectStateChange("running")
-	}
-
-	if b.writeDebugLog != nil {
-		b.writeDebugLog(fmt.Sprintf("USER: %s", userMsg))
 	}
 
 	// [v0.7.2] ContextWindow: 记录用户消息 + 推送 Token 统计
