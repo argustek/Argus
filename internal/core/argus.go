@@ -41,7 +41,7 @@ type ThoughtEvent struct {
 
 type AICaller interface {
 	ChatStream(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error)
-	ChatWithTools(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, tools []ai.Tool) (*ai.ChatResponse, error)
+	ChatWithTools(ctx context.Context, systemPrompt string, history []ai.Message, userContent string, tools []ai.Tool, replyLanguage string) (*ai.ChatResponse, error)
 }
 
 type Phase int
@@ -395,7 +395,7 @@ func (c *ArgusCore) callSEWithTools(taskDesc, memoryContext string) (string, err
 	start := time.Now()
 	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
 
-	resp, err := c.client.ChatWithTools(callCtx, systemPrompt, history, fullPrompt, ai.SETools)
+	resp, err := c.client.ChatWithTools(callCtx, systemPrompt, history, fullPrompt, ai.SETools, c.language)
 	callCancel()
 
 	duration := time.Since(start)
@@ -460,7 +460,8 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	c.memory.Add(RoleUser, userMsg)
 
-	// [v0.8.6] 前置分流：只依赖 userMsg 的启发式检测（条件A+条件C）
+	// [v0.9.4] 前置分流：只依赖用户 /level 命令和追问继承
+	// 不再使用硬编码关键词启发式 — 交给 PM 决策树自然判断
 	// 条件A：用户 /level 命令
 	userLevel := ""
 	if strings.Contains(userMsg, "/level ") {
@@ -471,46 +472,13 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		}
 	}
 
-	preFeatherweight := userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡"
+	preFeatherweight := userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡" ||
+		userLevel == "lightweight" || userLevel == "direct"
 
-	// 条件A：追问继承 — 上一个任务如果是 short/featherweight，追问默认继承同一重量
+	// 追问继承 — 上一个任务如果是 short-process，追问默认继承同一重量
 	if !preFeatherweight && c.prevTaskLevel == "short-process" {
 		preFeatherweight = true
 		fmt.Printf("[Core:Level] ⚡ 追问继承→Featherweight (prevLevel=%s)\n", c.prevTaskLevel)
-	}
-
-	// 条件C：启发式检测
-	if !preFeatherweight {
-		lowerUserMsg := strings.ToLower(userMsg)
-		isTinyTask := (strings.Contains(lowerUserMsg, "hello world") ||
-			strings.Contains(lowerUserMsg, "fibonacci") ||
-			strings.Contains(lowerUserMsg, "counter") ||
-			strings.Contains(lowerUserMsg, "单文件") ||
-			strings.Contains(lowerUserMsg, "short")) &&
-			(strings.Contains(lowerUserMsg, "create") ||
-				strings.Contains(lowerUserMsg, "write") ||
-				strings.Contains(lowerUserMsg, "创建") ||
-				strings.Contains(lowerUserMsg, "写个") ||
-				strings.Contains(lowerUserMsg, "写一个"))
-
-		isRunTask := strings.Contains(lowerUserMsg, "再运行") ||
-			strings.Contains(lowerUserMsg, "再跑") ||
-			strings.Contains(lowerUserMsg, "run again") ||
-			strings.Contains(lowerUserMsg, "再执行") ||
-			strings.Contains(lowerUserMsg, "再来一次") ||
-			(strings.Contains(lowerUserMsg, "再") && strings.Contains(lowerUserMsg, "一次")) ||
-			(strings.Contains(lowerUserMsg, "run") && !strings.Contains(lowerUserMsg, "create") && !strings.Contains(lowerUserMsg, "write"))
-
-		isCodingTask := isTinyTask || isRunTask ||
-			(strings.Contains(lowerUserMsg, " and ") &&
-				(strings.Contains(lowerUserMsg, "go program") ||
-					strings.Contains(lowerUserMsg, ".go"))) ||
-			(strings.Contains(lowerUserMsg, "create") && strings.Contains(lowerUserMsg, "run"))
-
-		if isCodingTask {
-			preFeatherweight = true
-			fmt.Printf("[Core:Level] ⚡ 启发式检测→Featherweight (coding task detected)\n")
-		}
 	}
 
 	// 前置Featherweight → 直接 pmDirectExecute，跳过 PM ProcessReview
@@ -1422,8 +1390,7 @@ func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
 	// Also must not have any hard failures
 	for _, r := range results {
 		if strings.Contains(r, "❌ exec") || strings.Contains(r, "❌ read_file") ||
-			strings.Contains(r, "syntax error") ||
-			strings.Contains(r, "exit status") || strings.Contains(r, "command failed") {
+			strings.Contains(r, "syntax error") {
 			return false
 		}
 	}
@@ -1851,7 +1818,7 @@ Requirements:
 	// 第一次 LLM 调用
 	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
 	var resp *ai.ChatResponse
-	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, memHistory, execPrompt, ai.SETools)
+	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, memHistory, execPrompt, ai.SETools, c.language)
 	callCancel()
 
 	if callErr != nil {
@@ -1919,7 +1886,7 @@ Requirements:
 
 		forceCtx, forceCancel := context.WithTimeout(c.ctx, c.timeout)
 		var resp2 *ai.ChatResponse
-		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, memHistory, forcePrompt, ai.SETools)
+		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, memHistory, forcePrompt, ai.SETools, c.language)
 		forceCancel()
 
 		if callErr != nil || len(resp2.Choices) == 0 {
@@ -2032,22 +1999,23 @@ Requirements:
 		}
 		fmt.Printf("[Core:Feather] 🔄 PM重试 #%d/%d: %s\n", attempt, maxRetries, feedbackErr)
 
-		fixPrompt := fmt.Sprintf(`⚠️ 上次执行出错，请修复后重新返回 actions。
+		fixPrompt := fmt.Sprintf(`⚠️ 上次执行结果不符合预期，请修复后重新返回 actions。
 
-错误: %s
+错误/输出: %s
 你尝试的actions: %v
 执行结果: %v
 
 任务: %s
 
 要求：
-1. 修正代码中的错误（语法错误、路径错误等）
-2. 返回完整的修正后 actions（write_file + exec）
-3. exec 命令格式: go run filename.go（使用相对路径）`,
+1. 分析输出/错误，判断问题原因
+2. 返回修正后的 actions（write_file/edit_file/exec 等）
+3. 如果 exec 非零退出，输出本身可能就是正确数据，不一定需要重试
+4. 最多重试 3 次，仍不行就 @USR 汇报`,
 			feedbackErr, actions, execResults, userMsg)
 
 		callCtx2, cancel2 := context.WithTimeout(c.ctx, c.timeout)
-		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, ai.SETools)
+		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, ai.SETools, c.language)
 		cancel2()
 		if err2 != nil {
 			fmt.Printf("[Core:Feather] ⚠️ 重试LLM调用失败: %v\n", err2)

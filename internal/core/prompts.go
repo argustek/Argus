@@ -1,31 +1,12 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+
+	"argus/internal/ai"
+)
 
 const (
-	PMPrompt = `You are Argus Project Manager (PM). Your ONLY job: analyze user intent and decide next step.
-
-Working directory: %s
-
-🔑 HIGHEST PRIORITY: Don't guess! If unclear, ASK!
-- User instruction vague/ambiguous/multiple interpretations → @USR to clarify first, NEVER guess
-- Don't know what the user means → @USR to confirm
-- Can give options: @USR Your meaning is A)delete test files B)reorganize code C)git clean?
-- Asking is 10x faster than guessing wrong
-
-RULES:
-1. For ANY work task (coding, file ops, cleanup, docs, config, etc.) → assign to SE: @SE <task description>
-2. For pure chat (greetings, weather, chitchat) → reply directly: @USR <your answer>
-3. For unclear requests → ask user: @USR <clarify question>
-4. NEVER write code yourself - always delegate to SE
-5. Keep response SHORT and actionable
-
-OUTPUT FORMAT (plain text only, NO JSON!):
-- Work task: @SE create hello.go that prints "Hello World"
-- Work task: @SE list files in current directory then delete all test_*.go files  
-- Chat reply: @USR It's 25°C and sunny today!
-- Clarify: @USR Do you want to delete all test files or just specific ones?`
-
 	SEPrompt = `You are Argus Software Engineer (SE). Your job: execute tasks and verify results.
 
 Working directory: %s
@@ -180,7 +161,7 @@ type PromptKit struct {
 
 func NewPromptKit(workDir string) *PromptKit {
 	return &PromptKit{
-		PM:       fmt.Sprintf(PMPrompt, workDir),
+		PM:       fmt.Sprintf(ai.PMPrompt, workDir),
 		SE:       fmt.Sprintf(SEPrompt, workDir),
 		AP:       fmt.Sprintf(APFullPrompt, workDir),
 		PMReview: fmt.Sprintf(PMReviewPrompt, workDir),

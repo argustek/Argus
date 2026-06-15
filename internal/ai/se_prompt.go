@@ -188,7 +188,7 @@ func (s *SEProcessor) ProcessTaskWithTools(taskDesc string, onChunk func(delta s
 
 	for round := 0; round < maxRounds; round++ {
 		callCtx, callCancel := context.WithTimeout(s.getCtx(), 120*time.Second)
-		resp, err := s.client.ChatWithTools(callCtx, s.getSystemPrompt(), s.history, taskDesc, SETools)
+		resp, err := s.client.ChatWithTools(callCtx, s.getSystemPrompt(), s.history, taskDesc, SETools, s.ReplyLanguage)
 		callCancel()
 		if err != nil {
 			return nil, fmt.Errorf("SE ChatWithTools failed: %w", err)

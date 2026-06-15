@@ -289,7 +289,7 @@ func (p *APProcessor) ProcessReview(reviewMsg string, history []ChatMessage, onC
 		if toolsSupported {
 			fmt.Printf("[AP ChatWithTools] 调用 AI，round=%d\n", round+1)
 			callCtx, callCancel := context.WithTimeout(p.getCtx(), 60*time.Second)
-			resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, reviewMsg, APTools)
+			resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, reviewMsg, APTools, p.ReplyLanguage)
 			callCancel()
 			if err != nil {
 				errStr := err.Error()

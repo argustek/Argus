@@ -100,10 +100,10 @@ func NewClient(config types.APIConfig) *Client {
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:        10,
-				MaxConnsPerHost:     5,
-				IdleConnTimeout:     30 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
+				MaxIdleConns:          10,
+				MaxConnsPerHost:       5,
+				IdleConnTimeout:       30 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
 				ResponseHeaderTimeout: 30 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			},
@@ -188,8 +188,8 @@ type ToolFunction struct {
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model      string    `json:"model"`
+	Messages   []Message `json:"messages"`
 	Stream     bool      `json:"stream"`
 	Tools      []Tool    `json:"tools,omitempty"`
 	ToolChoice string    `json:"tool_choice,omitempty"` // "auto"(默认) / "required" / "none"
@@ -313,14 +313,14 @@ type Delta struct {
 // StreamChunk 流式响应片段
 type StreamChunk struct {
 	Choices []struct {
-		Delta       Delta   `json:"delta"`
+		Delta        Delta   `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
 // ChatStream 流式聊天请求，每收到文本片段调用 onChunk，返回累积的完整文本
 func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error) {
-	maxRetries := 3  // Increased from 1 to handle unstable LLM API connections
+	maxRetries := 3 // Increased from 1 to handle unstable LLM API connections
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -329,7 +329,7 @@ func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []
 				fmt.Printf("[AI Retry] Context cancelled, giving up\n")
 				return "", lastErr
 			}
-			waitTime := time.Duration(attempt*3) * time.Second  // 3s, 6s, 9s backoff
+			waitTime := time.Duration(attempt*3) * time.Second // 3s, 6s, 9s backoff
 			fmt.Printf("[AI Retry] Attempt %d/%d, waiting %v...\n", attempt, maxRetries, waitTime)
 			time.Sleep(waitTime)
 		}
@@ -599,9 +599,14 @@ func isToolUnsupportedError(errStr string) bool {
 }
 
 // ChatWithTools 带工具调用的聊天（支持自动降级：模型不支持工具时走普通 Chat）
-func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool) (*ChatResponse, error) {
+func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool, replyLanguage string) (*ChatResponse, error) {
 	if err := c.checkBeforeCall(); err != nil {
 		return nil, err
+	}
+
+	langInstruction := GetLanguageInstruction(replyLanguage, userContent)
+	if langInstruction != "" {
+		systemPrompt = systemPrompt + langInstruction
 	}
 
 	messages := []Message{
@@ -688,7 +693,9 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 				chatResp.ToolsDefined, len(msg.Content), c.config.Model, c)
 			// 只截取前200字符避免日志爆炸
 			preview := msg.Content
-			if len(preview) > 200 { preview = preview[:200] + "..." }
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
 			c.cLog("[G-DEBUG] content_preview: %s\n", preview)
 		} else if len(msg.ToolCalls) > 0 {
 			c.cLog("[G-DEBUG] ✅ LLM返回ToolCalls=%d\n", len(msg.ToolCalls))
@@ -853,7 +860,7 @@ func isRetryableError(err error) bool {
 		"connection reset",
 		"connection aborted",
 		"forcibly closed",      // Windows wsarev: remote host forcibly closed
-		"closed by the remote",  // Connection forcibly closed
+		"closed by the remote", // Connection forcibly closed
 		"network is unreachable",
 		"no such host",
 		"dns",
