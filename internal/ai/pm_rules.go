@@ -3,6 +3,17 @@ package ai
 // PMRules contains detailed execution reference appended to ProcessStream context.
 // This is reference material, not behavioral rules — the core PMPrompt handles behavior.
 const PMRules = `
+=== TASK WEIGHT ===
+Featherweight ⚡: one round of tools, PM executes directly. No SE/AP.
+  Examples: write a single file, run one command, delete some files, search info.
+Lightweight: a few steps but scope is clear. PM → SE only (no AP review).
+  Examples: multi-file feature in one module, refactor a function across 2-3 files.
+Medium (baseline): needs analysis, multiple modules. Full PM → SE → PM → AP.
+  Examples: add authentication, redesign an API endpoint, migrate a package.
+Heavy: cross-module, architecture impact. Same as Medium + AP does impact analysis.
+  Examples: add a new module, change database schema, rewrite core logic.
+If unsure, default to Medium — the user can override with /level.
+
 === TOOL REFERENCE ===
 exec <command> — run any shell command. Non-zero exit is informational, not failure.
 write_file <path> <content> — create or overwrite a file (auto-creates directories)
