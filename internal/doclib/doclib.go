@@ -3,6 +3,9 @@ package doclib
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -533,4 +536,189 @@ func ClearDirty(rootDir string, docIDs []string) error {
 		}
 	}
 	return nil
+}
+
+type ExtractedExport struct {
+	Name      string `json:"name"`
+	Signature string `json:"signature"`
+	Kind      string `json:"kind"`
+}
+
+func ExtractExportsFromFile(filePath string) ([]ExtractedExport, error) {
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
+	if err != nil {
+		return nil, fmt.Errorf("解析文件失败: %w", err)
+	}
+
+	var exports []ExtractedExport
+
+	for _, decl := range node.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if !d.Name.IsExported() {
+				continue
+			}
+			sig := formatSignature(d)
+			exports = append(exports, ExtractedExport{
+				Name:      d.Name.Name,
+				Signature: sig,
+				Kind:      "function",
+			})
+
+		case *ast.GenDecl:
+			if d.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range d.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok || !ts.Name.IsExported() {
+					continue
+				}
+				kind := "type"
+				sig := ts.Name.Name
+				switch ts.Type.(type) {
+				case *ast.StructType:
+					kind = "struct"
+				case *ast.InterfaceType:
+					kind = "interface"
+				}
+				exports = append(exports, ExtractedExport{
+					Name:      ts.Name.Name,
+					Signature: sig,
+					Kind:      kind,
+				})
+			}
+		}
+	}
+
+	return exports, nil
+}
+
+func formatSignature(fd *ast.FuncDecl) string {
+	var sb strings.Builder
+	if fd.Recv != nil {
+		sb.WriteString("func (")
+		for i, field := range fd.Recv.List {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			for _, name := range field.Names {
+				sb.WriteString(name.Name)
+				sb.WriteString(" ")
+			}
+			sb.WriteString(exprString(field.Type))
+		}
+		sb.WriteString(") ")
+	} else {
+		sb.WriteString("func ")
+	}
+	sb.WriteString(fd.Name.Name)
+	sb.WriteString("(")
+	for i, field := range fd.Type.Params.List {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		for j, name := range field.Names {
+			if j > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(name.Name)
+		}
+		sb.WriteString(" ")
+		sb.WriteString(exprString(field.Type))
+	}
+	sb.WriteString(")")
+	if fd.Type.Results != nil {
+		sb.WriteString(" ")
+		results := fd.Type.Results
+		if len(results.List) == 1 && results.List[0].Names == nil {
+			sb.WriteString(exprString(results.List[0].Type))
+		} else {
+			sb.WriteString("(")
+			for i, field := range results.List {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(exprString(field.Type))
+			}
+			sb.WriteString(")")
+		}
+	}
+	return sb.String()
+}
+
+func exprString(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.StarExpr:
+		return "*" + exprString(t.X)
+	case *ast.SelectorExpr:
+		return exprString(t.X) + "." + t.Sel.Name
+	case *ast.ArrayType:
+		if t.Len == nil {
+			return "[]" + exprString(t.Elt)
+		}
+		return "[" + exprString(t.Len) + "]" + exprString(t.Elt)
+	case *ast.MapType:
+		return "map[" + exprString(t.Key) + "]" + exprString(t.Value)
+	case *ast.InterfaceType:
+		return "interface{}"
+	case *ast.Ellipsis:
+		return "..." + exprString(t.Elt)
+	case *ast.FuncType:
+		return "func(...)"
+	default:
+		return fmt.Sprintf("%T", e)
+	}
+}
+
+func AutoSyncExports(rootDir, docID string) (string, error) {
+	idToPath, err := docIDToPath(rootDir)
+	if err != nil {
+		return "", err
+	}
+	docPath, ok := idToPath[docID]
+	if !ok {
+		return "", fmt.Errorf("文档 %s 不存在", docID)
+	}
+
+	node, body, err := ReadDocFile(docPath)
+	if err != nil {
+		return "", err
+	}
+	if node == nil {
+		return "", fmt.Errorf("文档 %s 无 frontmatter", docID)
+	}
+	if node.CodeRef == "" {
+		return "", fmt.Errorf("文档 %s 未设置 code_ref", docID)
+	}
+
+	codePath := filepath.Join(rootDir, node.CodeRef)
+	if _, err := os.Stat(codePath); err != nil {
+		return "", fmt.Errorf("代码文件 %s 不存在: %w", node.CodeRef, err)
+	}
+
+	exports, err := ExtractExportsFromFile(codePath)
+	if err != nil {
+		return "", err
+	}
+
+	var newExports []Export
+	for _, e := range exports {
+		newExports = append(newExports, Export{
+			Name:      e.Name,
+			Signature: e.Signature,
+		})
+	}
+	node.Exports = newExports
+	node.SetDirty(true)
+
+	if err := WriteDocFile(docPath, node, body); err != nil {
+		return "", err
+	}
+
+	changed := len(newExports)
+	return fmt.Sprintf("已同步 %s 的导出: %d 个导出项", docID, changed), nil
 }

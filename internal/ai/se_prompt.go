@@ -1010,6 +1010,48 @@ func (s *SEProcessor) executeSETool(name, argsJSON string) string {
 		}
 		return fmt.Sprintf("变更已记录到 CHANGELOG.md")
 
+	case "get_impacted_docs":
+		var args struct {
+			DocID string `json:"doc_id"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.DocID == "" {
+			return "错误: doc_id 参数为空"
+		}
+
+		tree, err := doclib.LoadCache(s.workDir)
+		if err != nil {
+			tree, err = doclib.BuildTree(s.workDir)
+			if err != nil {
+				return fmt.Sprintf("加载文档树失败: %v", err)
+			}
+		}
+
+		impacted := doclib.GetImpactedDocs(tree, args.DocID)
+		if len(impacted) == 0 {
+			return fmt.Sprintf("文档 %s 没有被其他文档依赖", args.DocID)
+		}
+		result := fmt.Sprintf("文档 %s 被以下文档直接依赖：\n", args.DocID)
+		for _, id := range impacted {
+			result += fmt.Sprintf("  - %s\n", id)
+		}
+		return result
+
+	case "sync_doc_exports":
+		var args struct {
+			DocID string `json:"doc_id"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.DocID == "" {
+			return "错误: doc_id 参数为空"
+		}
+
+		result, err := doclib.AutoSyncExports(s.workDir, args.DocID)
+		if err != nil {
+			return fmt.Sprintf("同步导出失败: %v", err)
+		}
+		return result
+
 	default:
 		return fmt.Sprintf("工具 %s: 由executor执行", name)
 	}
@@ -2820,6 +2862,40 @@ var SETools = []Tool{
 					},
 				},
 				"required": []string{"role", "task_id", "action", "summary"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "get_impacted_docs",
+			Description: "查询修改指定文档会影响哪些其他文档（基于依赖关系反向索引）。在执行变更前调用以评估影响范围。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"doc_id": map[string]interface{}{
+						"type":        "string",
+						"description": "文档 ID（如 tree/auth/jwt.md）",
+					},
+				},
+				"required": []string{"doc_id"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "sync_doc_exports",
+			Description: "自动从代码文件提取导出符号并同步到文档的 exports 字段。需要文档已设置 code_ref。解析 Go 源文件获取导出的函数/类型/接口。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"doc_id": map[string]interface{}{
+						"type":        "string",
+						"description": "文档 ID（如 tree/auth/jwt.md）",
+					},
+				},
+				"required": []string{"doc_id"},
 			},
 		},
 	},
