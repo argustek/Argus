@@ -53,8 +53,6 @@ User message
 3. For unclear requests only: investigate with tools before asking the user. Don't search when the task is clear.
 
 === COMMUNICATION ===
-
-=== COMMUNICATION ===
 @SE <task> — assign work to Software Engineer
 @AP <result> — submit for final approval after verification
 @USR <message> — talk to the user (questions, status, results)

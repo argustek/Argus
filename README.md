@@ -3,12 +3,12 @@
 </p>
 
 <p align="center">
-  <strong>Argus: The AI coding assistant with PM/SE/AP/C roles – never gets stuck, never forgets.</strong>
+  <strong>Argus: AI 编程助手 with 4-role architecture (PM/SE/AP/C) + layered prompt system + document tree memory.</strong>
 </p>
 
 # Argus
 
-**Vibe Coding Platform** — A desktop coding assistant powered by a four-role AI Agent architecture (PM / SE / AP / C) that understands your intent and executes coding tasks autonomously, with a built-in independent approver to ensure code quality.
+**AI-powered development desktop app** — A four-role AI Agent (PM / SE / AP / C) with a split-prompt architecture (core + reference rules + skills) and a hierarchical document tree for project knowledge management. Features 4-level task weighting for optimal AI resource allocation.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go" alt="Go">
@@ -21,35 +21,29 @@
 
 ---
 
-## ✨ Why Choose Argus?
-
-### 🎯 V2 Architecture (Current)
-
-**One Core, Multiple Roles**
-
-Argus features a **unified core architecture** with shared memory, hierarchical document tree, and role-based prompt switching:
+## ✨ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Argus V2 Core                            │
+│                      Argus Core                             │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │              ArgusCore (Unified Brain)               │   │
 │  │                                                      │   │
 │  │   SharedMemory ← Full-context visibility             │   │
-│  │      ├── user: "Create hello.go"                     │   │
-│  │      ├── pm: "This is a coding task"                 │   │
-│  │      ├── se: "write_file + exec"                     │   │
-│  │      └── ap: "Approved"                              │   │
+│  │      ├── user → pm → se → ap (complete pipeline)    │   │
 │  │                                                      │   │
-│  │   PromptKit (Role Switching)                          │   │
-│  │      ├── PM Hat: Analyze requirements                │   │
-│  │      ├── SE Hat: Generate & execute code             │   │
-│  │      └── AP Hat: Review & approve results            │   │
+│  │   Prompt Architecture (Layered)                      │   │
+│  │      ├── Core Prompt (~50 lines English):            │   │
+│  │      │  identity, decision tree, principles, anti-loop│   │
+│  │      ├── PMRules (~70 lines reference):              │   │
+│  │      │  task weight, tool table, QA process,         │   │
+│  │      │  permissions, error handling, AP resolution   │   │
+│  │      └── Language Instruction (runtime injected)     │   │
 │  │                                                      │   │
 │  │   DocTree (Hierarchical Memory)                      │   │
-│  │      ├── Documents with YAML frontmatter             │   │
-│  │      ├── Dirty propagation on task completion        │   │
+│  │      ├── YAML frontmatter documents in .argus/tree/  │   │
+│  │      ├── Dirty propagation on complete_task          │   │
 │  │      ├── Go AST export extraction & verification     │   │
 │  │      └── Impact analysis & audit integration         │   │
 │  └─────────────────────────────────────────────────────┘   │
@@ -65,64 +59,79 @@ Argus features a **unified core architecture** with shared memory, hierarchical 
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Complete Pipeline:** USR Input → PM Analysis → SE Execution → **PM Code Review** → **AP Final Approval (OA)**
+### 4-Level Task Weight System
+
+| Weight | Path | When | Example |
+|--------|------|------|---------|
+| ⚡ Featherweight | PM direct (no SE/AP) | One round of tools | "write hello.go", "clean this dir" |
+| Lightweight | PM → SE only (no AP) | Multi-step, clear scope | "refactor a function across 2 files" |
+| Medium (baseline) | PM → SE → PM → AP | Needs analysis + review | "add authentication module" |
+| Heavy | PM → SE → PM → AP + impact analysis | Cross-module, risky | "change database schema" |
+
+PM decides the weight from the decision tree. User can override with `/level featherweight|lightweight|medium|heavy`.
+
+### Complete Pipeline
+
+```
+USR Input → PM Decision Tree → [Featherweight: PM direct execute]
+                               → [Lightweight: PM → SE only]
+                               → [Medium/Heavy: PM → SE → PM Review → AP Approval]
 ```
 
-**5-Phase Workflow:**
+### Role Pipeline
 
 ```
 ┌─────────────────────────────────────────────┐
 │                    👤 USR                    │
-│              (You - Provide Requirements)    │
+│         Natural Language Input               │
 └──────────────┬──────────────────────────────┘
-               │ Natural Language Input
+               │
                ▼
-┌─────────────────────────────────────────────┐
-│                    🎯 PM                     │
-│         Phase 1: Analyze Requirements       │
-│  • Understands your requirements            │
-│  • Breaks down tasks & plans execution      │
-│  • Communicates plan with you               │
-└──────────────┬──────────────────────────────┘
-               │ Task Assignment
-               ▼
-┌─────────────────────────────────────────────┐
-│                    💻 SE                     │
-│         Phase 2: Execute Code               │
-│  • Generates code                           │
-│  • Writes/edits files                       │
-│  • Executes commands                        │
-│  • Self-testing verification                │
-└──────────────┬──────────────────────────────┘
-               │ SE Complete → Handover to PM
-               ▼
-┌─────────────────────────────────────────────┐
-│                    🎯 PM                     │
-│     Phase 3: Code Review (Second PM Pass)   │
-│  • Reviews SE's work output                 │
-│  • Uses tools to verify correctness         │
-│  • Approves or requests fixes               │
-└──────────────┬──────────────────────────────┘
-               │ PM Review Passed
-               ▼
-┌─────────────────────────────────────────────┐
-│                    🔍 AP                     │
-│   Phase 4: Final Approval (OA)              │
-│  • Independent Code Review (uninfluenced)   │
-│  • QA Verification (runs compile/test)      │
-│  • Veto Power (AP says no → task not done)  │
-│  • Up to 3 rounds of tool calls             │
-└─────────────────────────────────────────────┘
-               ▲
-┌──────────────┴──────────────────────────────┐
-│                    📊 C                      │
-│           (Background Monitor)              │
-│  • Monitors PM/SE health status             │
-│  • Detects Git changes + auto-commit        │
-│  • Identifies stalls and alerts             │
-│  • PM→AP handover timeout fallback          │
-│  • Read-only — never acts autonomously      │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                    🎯 PM Decision Tree               │
+│                                                     │
+│  User message                                        │
+│    ├─ greeting/chat/thanks → @USR                   │
+│    ├─ unclear → investigate → @USR                  │
+│    ├─ simple (one round) → ⚡ EXECUTE DIRECTLY       │
+│    └─ complex → assign to SE                        │
+│         └─ lightweight → PM→SE→PM (no AP)           │
+│         └─ medium/heavy → PM→SE→PM→AP               │
+└─────────────────────────────────────────────────────┘
+               │
+       ┌───────┴───────────┐
+       ▼                   ▼
+  ⚡ Direct Exec     Complex Task
+  ┌──────────────┐  ┌──────────────────────┐
+  │ write_file   │  │   💻 SE              │
+  │ exec         │  │  Phase 2: Execute    │
+  │ delete_file  │  │  write/edit/exec     │
+  │ read_file    │  └──────────┬───────────┘
+  └──────────────┘             │ SE done
+                               ▼
+                    ┌──────────────────────┐
+                    │   🎯 PM Code Review  │
+                    │  Phase 3: Verify     │
+                    │  read_file + exec    │
+                    │  Pass? → @AP or done │
+                    │  Fail? → @SE rework  │
+                    └──────────┬───────────┘
+                               │ PM verified
+                               ▼
+                    ┌──────────────────────┐
+                    │   🔍 AP Final Audit  │
+                    │  Phase 4: Approve    │
+                    │  Independent review  │
+                    │  Impact analysis     │
+                    │  Veto power          │
+                    │  Clears dirty flags  │
+                    └──────────────────────┘
+
+  ┌─────────────────────────────────────────────┐
+  │  📊 C (Background Monitor — always running)│
+  │  Health checks, Git monitoring, alerts      │
+  │  Read-only — never acts autonomously        │
+  └─────────────────────────────────────────────┘
 ```
 
 | Role | Prefix | Intelligence | Responsibility |
@@ -187,13 +196,18 @@ Argus features a **unified core architecture** with shared memory, hierarchical 
 - **Auto-backup**: Before file modification, backup to `.argus/backups/`
 - **Global panic recovery**: Goroutine panic protection
 
-#### 8️⃣ Document Tree Memory System (v0.9.4+)
-- **Hierarchical document tree**: Project documents organized in `.argus/tree/` with owner, status, code_ref, dirty flags, and export tracking
-- **YAML frontmatter**: Each doc contains structured metadata — no external database required
-- **Dirty propagation**: `complete_task` automatically marks affected docs + ancestors dirty; AP approval clears dirty flags
+#### 8️⃣ Prompt Architecture & Task Weight System (v0.9.4+)
+- **Layered prompt design**: Core prompt (~50 lines English) handles identity, decision tree, principles; reference rules (PMRules) handle tool table, QA process, error handling — appended separately to avoid attention dilution
+- **4-level task weight**: Featherweight ⚡ (PM direct), Lightweight (PM→SE only), Medium (full pipeline), Heavy (Medium + impact analysis). PM decides from the decision tree; user overrides with `/level`
+- **No hardcoded heuristics**: Removed keyword-based classification from engine — PM's own LLM decides the weight naturally
+- **ChatWithTools language injection**: All chat paths now respect the user's language for replies
+
+#### 9️⃣ Document Tree Memory System (v0.9.4+)
+- **Hierarchical document tree**: Project documents organized in `.argus/tree/` with YAML frontmatter (owner, status, code_ref, dirty flags, exports, dependencies)
+- **Dirty propagation**: `complete_task` triggers ancestor-chain dirty marking; AP approval auto-clears via `ClearDirty`
 - **Go AST export extraction**: Auto-sync exported functions/structs/interfaces from code to document frontmatter
-- **Bidirectional verification**: AP can verify documented exports match actual code, and check impact scope before approval
-- **CLI tools**: `--tree` (print tree), `--rebuild-tree` (scan project), `--check-impact <doc_id>` (query impact)
+- **Bidirectional verification**: AP can verify documented exports match actual code (`verify_doc_exports`), and check impact scope before approval (`check_impact`)
+- **CLI tools**: `--tree` (print tree), `--rebuild-tree` (scan + validate + cache), `--check-impact <doc_id>` (reverse dependency query)
 - **SE/AP tool integration**: `update_doc`, `log_change`, `get_impacted_docs`, `sync_doc_exports`, `verify_doc_exports`, `check_impact`
 
 ---
@@ -319,33 +333,38 @@ See `config/dingtalk.example.json` for the full template.
 | `Ctrl+S` | Save current file |
 | `Esc` | Stop current task |
 
-### Typical Workflow
+### Typical Workflows
+
+#### ⚡ Featherweight — Simple, direct (no SE/AP)
 
 ```
-👤 User: Create a Go REST API
+👤 User: Write a hello.go that prints "hello world"
    ↓
-🎯 PM: I'll break this down:
-     1. Create main.go with HTTP server framework
-     2. Add /health endpoint
-     3. Add /api/users endpoint
-     @SE please start with task 1
+🎯 PM: [Decision Tree → simple task, direct execute]
+      write_file hello.go
+      exec go run hello.go
    ↓
-💻 SE: [Creates main.go, writes HTTP server code]
-     @PM Task 1 complete, file created
+👤 User: hello world printed ✓
+```
+
+#### 🔄 Medium — Full pipeline (PM → SE → PM → AP)
+
+```
+👤 User: Create a Go REST API with health endpoint
    ↓
-🎯 PM: [Reviews main.go using read_file/exec tools] ✓ Passed
-     @SE please continue with task 2
+🎯 PM: [Decision Tree → complex task → @SE]
+     @SE Create main.go with HTTP server + /health endpoint
    ↓
-💻 SE: [Adds /health endpoint]
-     @PM Task 2 complete
+💻 SE: [write_file main.go → exec go build]
+     @PM Task complete, build passes
    ↓
-🎯 PM: [Reviews again] ✓ All passed
-     @AP Task verified, please perform final quality approval
+🎯 PM: [read_file main.go → exec go run]
+     ✓ Verified. @AP please approve
    ↓
-🔍 AP: [Independent Code Review + runs compile/test]
-     ✅ Project approved
+🔍 AP: [Independent review + compile check]
+     ✅ Approved (dirty flags auto-cleared)
    ↓
-👤 User: Received completion notification! REST API is ready
+👤 User: REST API is ready ✓
 ```
 
 ---
@@ -357,17 +376,12 @@ See `config/dingtalk.example.json` for the full template.
 argus/
 ├── main.go                  # Wails application entry point
 ├── app.go                   # Core business logic & API bindings
-├── terminal.go              # Terminal management
-├── http_server.go           # HTTP API server
 ├── wails.json               # Wails configuration
-├── build.bat                # One-click build script
 ├── go.mod / go.sum          # Go dependencies
 │
 ├── cmd/                     # CLI tools (testing/debugging)
 │   ├── argus/               # Main launcher
-│   ├── pm/                  # Standalone PM test
-│   ├── se/                  # Standalone SE test
-│   └── test/                # Integration tests
+│   └── pm/                  # Standalone PM test
 │
 ├── config/                  # Configuration files
 │   ├── config.example.json  # API configuration template
@@ -376,18 +390,21 @@ argus/
 ├── internal/
 │   ├── ai/                  # AI client & prompts
 │   │   ├── client.go        # OpenAI-compatible API client
-│   │   ├── pm_prompt.go     # PM system prompt & processor
-│   │   ├── se_prompt.go     # SE system prompt & processor (+ doc tree tools)
-│   │   ├── se_prompt_test.go # SE prompt tests
-│   │   └── ap_prompt.go     # AP approval prompt & processor (+ doc audit tools)
+│   │   ├── pm_prompt.go     # PM core prompt (~50 lines) + processor + tools
+│   │   ├── pm_rules.go      # PMRules reference layer (task weight, QA, perms)
+│   │   ├── se_prompt.go     # SE prompt + processor (+ doc tree tools: update_doc, etc.)
+│   │   ├── se_prompt_test.go
+│   │   ├── ap_prompt.go     # AP approval prompt (+ doc audit tools: verify, check_impact)
+│   │   └── p0_test.go       # AI package tests
 │   ├── doclib/              # Document tree library
-│   │   ├── doclib.go        # Core: DocNode/DocTree, frontmatter, tree ops, export extraction, propagation
+│   │   ├── doclib.go        # Core: DocNode/DocTree, frontmatter, propagation, export extraction
+│   │   ├── doclib_test.go   # 19 tests covering BuildTree, PropagateDirty, ClearDirty, etc.
 │   │   └── cli.go           # CLI handlers: --tree, --rebuild-tree, --check-impact
 │   ├── chat/                # Chat management
-│   │   ├── manager.go       # Unified ChatManager (PM/SE/AP/C orchestration)
+│   │   ├── manager.go       # Unified ChatManager (PM/SE/AP/C orchestration + ClearDirty)
 │   │   ├── router.go        # @mention message router
 │   │   ├── sse_bridge.go    # SSE streaming bridge
-│   │   └── sse_bridge_test.go # SSE bridge tests
+│   │   └── sse_bridge_test.go
 │   ├── monitor/             # Background monitoring
 │   │   └── c_monitor.go     # C monitor (health, git, alerts, handover fallback)
 │   ├── memory/              # Memory & context system
@@ -398,10 +415,6 @@ argus/
 │   │   └── working.go       # Working memory
 │   ├── executor/            # Command executor
 │   │   └── executor.go      # Secure command execution with sandboxing
-│   ├── pm/                  # PM executor
-│   │   └── executor.go      # Task management
-│   ├── se/                  # SE executor
-│   │   └── executor.go      # Code generation & file operations
 │   ├── board/               # Task board (Kanban)
 │   │   └── board.go         # Board state management
 │   ├── dingtalk/            # DingTalk integration
@@ -409,12 +422,14 @@ argus/
 │   │   └── stream.go        # Stream mode handler
 │   ├── limiter/             # Rate limiting & safety
 │   │   ├── ratelimit.go     # API rate limiter
-│   │   ├── circuit_breaker.go # Circuit breaker
+│   │   ├── circuit_breaker.go
 │   │   └── logger.go        # Request logger
 │   ├── git/                 # Git operations
 │   │   └── git.go           # Git integration (status, diff, commit)
 │   ├── i18n/                # Internationalization
 │   │   └── i18n.go          # Locale management
+│   ├── core/                # Core orchestration
+│   │   └── argus.go         # Unified brain: PM/SE/AP orchestration, /level, pmDirectExecute
 │   └── types/               # Shared type definitions
 │       └── types.go
 │
@@ -448,7 +463,6 @@ argus/
 ### Limitations
 
 - **Windows only** (macOS/Linux builds possible but untested)
-- **Test coverage**: low, mostly manual testing
 - **Solo project**: one maintainer, so response time varies
 
 ---

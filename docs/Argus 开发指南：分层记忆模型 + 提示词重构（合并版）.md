@@ -540,7 +540,7 @@ Pass → @AP; Fail → auto-fix (compile only) or @SE rework.
 - [x] 创建测试文档，运行 `argus --tree` 输出正确树形。
 - [x] 修改子文档，调用 `complete_task`，检查父文档 dirty 传播。
 - [x] 运行 `argus --check-impact` 输出正确依赖列表。
-- [ ] AP 审核通过后 dirty 标志清除。
+- [x] AP 审核通过后 dirty 标志清除（已通过单元测试验证 `ClearDirty` / `TestPropagateAndClearDirty_Integrated`）。
 
 ### 提示词重构验收
 - [ ] 启动 Argus，输入"写一个 hello.go"，PM 应直接执行（写入文件并运行），回复语言与用户输入一致。
