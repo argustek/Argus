@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"argus/internal/doclib"
+
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -41,6 +43,26 @@ func main() {
 
 	if len(os.Args) > 1 {
 		fmt.Fprintf(os.Stderr, "[main] 检测到参数: %s\n", os.Args[1])
+
+		switch os.Args[1] {
+		case "--tree":
+			cwd, _ := os.Getwd()
+			doclib.CLITree(cwd)
+			return
+		case "--rebuild-tree":
+			cwd, _ := os.Getwd()
+			doclib.CLIRebuildTree(cwd)
+			return
+		case "--check-impact":
+			if len(os.Args) < 3 {
+				fmt.Println("用法: argus --check-impact <doc_id>")
+				return
+			}
+			cwd, _ := os.Getwd()
+			doclib.CLICheckImpact(cwd, os.Args[2])
+			return
+		}
+
 		app := NewApp()
 
 		switch os.Args[1] {
@@ -70,6 +92,9 @@ func main() {
 			fmt.Println("  --monitor        查看 C 监控状态")
 			fmt.Println("  --recover        强制恢复未完成任务")
 			fmt.Println("  --dump-tasks     查看全局任务列表")
+			fmt.Println("  --tree           查看文档树")
+			fmt.Println("  --rebuild-tree   重建文档树索引")
+			fmt.Println("  --check-impact   检查文档影响范围")
 			return
 		}
 	}

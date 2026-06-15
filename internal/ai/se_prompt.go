@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"argus/internal/doclib"
 )
 
 const SEPrompt = `你是Argus的软件工程师(SE)，负责执行具体的编码任务。
@@ -926,6 +928,71 @@ func (s *SEProcessor) executeSETool(name, argsJSON string) string {
 		}
 		return s.indexer.SemSearch(args.Query)
 
+	case "update_doc":
+		var args struct {
+			DocID   string `json:"doc_id"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("参数解析失败: %v", err)
+		}
+		if args.DocID == "" {
+			return "错误: doc_id 参数为空"
+		}
+
+		docPath := filepath.Join(s.workDir, ".argus", args.DocID)
+		if !strings.HasPrefix(docPath, filepath.Join(s.workDir, ".argus")) {
+			return "错误: doc_id 超出 .argus 目录范围"
+		}
+
+		node, _, err := doclib.ReadDocFile(docPath)
+		if err != nil {
+			return fmt.Sprintf("读取文档失败: %v", err)
+		}
+		if node == nil {
+			return fmt.Sprintf("文档 %s 没有 frontmatter", args.DocID)
+		}
+
+		if strings.ToUpper(node.OwnerRole) != "SE" {
+			return fmt.Sprintf("权限拒绝: SE 只能修改 owner_role=SE 的文档 (当前为 %s)", node.OwnerRole)
+		}
+
+		if err := doclib.WriteDocFile(docPath, node, args.Content); err != nil {
+			return fmt.Sprintf("写入文档失败: %v", err)
+		}
+		return fmt.Sprintf("文档 %s 已更新", args.DocID)
+
+	case "log_change":
+		var args struct {
+			Role          string   `json:"role"`
+			TaskID        string   `json:"task_id"`
+			Action        string   `json:"action"`
+			AffectedFiles []string `json:"affected_files"`
+			AffectedDocs  []string `json:"affected_docs"`
+			Summary       string   `json:"summary"`
+		}
+		if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+			return fmt.Sprintf("参数解析失败: %v", err)
+		}
+
+		logPath := filepath.Join(s.workDir, ".argus", "logs", "CHANGELOG.md")
+		os.MkdirAll(filepath.Dir(logPath), 0755)
+
+		entry := fmt.Sprintf("\n## %s\n\n- **Role**: %s\n- **Task**: %s\n- **Action**: %s\n- **Files**: %v\n- **Docs**: %v\n- **Summary**: %s\n",
+			time.Now().UTC().Format(time.RFC3339),
+			args.Role, args.TaskID, args.Action,
+			args.AffectedFiles, args.AffectedDocs, args.Summary)
+
+		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Sprintf("打开变更日志失败: %v", err)
+		}
+		defer f.Close()
+		if _, err := f.WriteString(entry); err != nil {
+			return fmt.Sprintf("写入变更日志失败: %v", err)
+		}
+		return fmt.Sprintf("变更已记录到 CHANGELOG.md")
+
 	default:
 		return fmt.Sprintf("工具 %s: 由executor执行", name)
 	}
@@ -967,16 +1034,6 @@ var searchEngines = []searchEngine{
 		Name: "DuckDuckGo",
 		URL: func(q string) string {
 			return fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", url.QueryEscape(q))
-		},
-	},
-	{
-		Name: "Bing",
-		URL:  func(q string) string { return fmt.Sprintf("https://www.bing.com/search?q=%s", url.QueryEscape(q)) },
-	},
-	{
-		Name: "Google",
-		URL: func(q string) string {
-			return fmt.Sprintf("https://www.google.com/search?q=%s&hl=en", url.QueryEscape(q))
 		},
 	},
 }
@@ -2685,6 +2742,66 @@ var SETools = []Tool{
 					},
 				},
 				"required": []string{"pkg_name"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "update_doc",
+			Description: "更新文档树中的文档内容（包括 frontmatter 和正文）。SE 只能修改 owner_role=SE 的文档。修改后自动标记 dirty。doc_id 为相对于 .argus/ 的路径。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"doc_id": map[string]interface{}{
+						"type":        "string",
+						"description": "文档 ID（相对于 .argus/ 的路径，如 tree/auth/jwt.md 或 PROJECT_PLAN.md）",
+					},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "文档正文内容（不含 frontmatter）",
+					},
+				},
+				"required": []string{"doc_id", "content"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "log_change",
+			Description: "向 CHANGELOG.md 追加变更记录。每次代码或文档变更后都应调用。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"role": map[string]interface{}{
+						"type":        "string",
+						"description": "执行角色（PM/SE/AP）",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "关联的任务 ID",
+					},
+					"action": map[string]interface{}{
+						"type":        "string",
+						"description": "操作类型（如 create/update/delete）",
+					},
+					"affected_files": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "受影响的代码文件列表",
+					},
+					"affected_docs": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "受影响的文档 ID 列表",
+					},
+					"summary": map[string]interface{}{
+						"type":        "string",
+						"description": "变更摘要（一句话描述）",
+					},
+				},
+				"required": []string{"role", "task_id", "action", "summary"},
 			},
 		},
 	},
