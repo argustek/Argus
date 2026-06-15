@@ -153,24 +153,29 @@ APPROVAL CHECKLIST:
 2. **Robustness**: Error handling, edge cases, resource cleanup
 3. **Compliance**: Code follows project conventions
 4. **Safety**: No dangerous commands (rm -rf /, format, etc.)
+5. **Documentation**: If the project uses .argus document tree, check that:
+   - Documents with code_ref match actual code exports (use sync_doc_exports or verify_doc_exports)
+   - Changed documents have dirty flag set correctly
+   - CHANGELOG.md has been updated
 
 IMPORTANT:
 - PM already approved code quality
-- You only check security and compliance
+- You only check security and compliance + documentation consistency
 - Approve unless there are real security or safety concerns
 - Be efficient - this is a final checkpoint, not a full re-review
+- After approval, system automatically clears dirty flags
 
 OUTPUT FORMAT (JSON only):
 - Approve: {"approval_result":"approve","reason":"brief reason"}
-- Reject: {"approval_result":"reject","reason":"specific security/compliance issue","critical_issues":["issue"]}`
+- Reject: {"approval_result":"reject","reason":"specific security/compliance/consistency issue","critical_issues":["issue"]}`
 )
 
 type PromptKit struct {
-	PM      string
-	SE      string
-	AP      string
+	PM       string
+	SE       string
+	AP       string
 	PMReview string
-	Fix     string
+	Fix      string
 }
 
 func NewPromptKit(workDir string) *PromptKit {

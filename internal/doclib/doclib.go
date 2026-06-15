@@ -722,3 +722,95 @@ func AutoSyncExports(rootDir, docID string) (string, error) {
 	changed := len(newExports)
 	return fmt.Sprintf("已同步 %s 的导出: %d 个导出项", docID, changed), nil
 }
+
+type VerifyResult struct {
+	DocID         string
+	CodeFile      string
+	AddedInCode   []string
+	MissingInCode []string
+	Match         bool
+	Detail        string
+}
+
+func VerifyDocExports(rootDir, docID string) (*VerifyResult, error) {
+	idToPath, err := docIDToPath(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	docPath, ok := idToPath[docID]
+	if !ok {
+		return nil, fmt.Errorf("文档 %s 不存在", docID)
+	}
+
+	node, _, err := ReadDocFile(docPath)
+	if err != nil {
+		return nil, err
+	}
+	if node == nil {
+		return nil, fmt.Errorf("文档 %s 无 frontmatter", docID)
+	}
+
+	result := &VerifyResult{
+		DocID:    docID,
+		CodeFile: node.CodeRef,
+		Match:    true,
+	}
+
+	if node.CodeRef == "" {
+		result.Detail = "文档未设置 code_ref，无法验证"
+		result.Match = false
+		return result, nil
+	}
+
+	codePath := filepath.Join(rootDir, node.CodeRef)
+	if _, err := os.Stat(codePath); err != nil {
+		// code_ref 指向的文件可能不存在（尚未创建），这不是错误
+		result.Detail = fmt.Sprintf("代码文件 %s 尚未创建", node.CodeRef)
+		result.Match = false
+		return result, nil
+	}
+
+	codeExports, err := ExtractExportsFromFile(codePath)
+	if err != nil {
+		return nil, err
+	}
+
+	codeExportSet := make(map[string]bool)
+	for _, e := range codeExports {
+		codeExportSet[e.Name] = true
+	}
+
+	docExportSet := make(map[string]bool)
+	for _, e := range node.Exports {
+		docExportSet[e.Name] = true
+	}
+
+	for _, e := range codeExports {
+		if !docExportSet[e.Name] {
+			result.AddedInCode = append(result.AddedInCode, e.Name)
+			result.Match = false
+		}
+	}
+
+	for _, e := range node.Exports {
+		if !codeExportSet[e.Name] {
+			result.MissingInCode = append(result.MissingInCode, e.Name)
+			result.Match = false
+		}
+	}
+
+	if result.Match {
+		result.Detail = fmt.Sprintf("文档与代码一致，共 %d 个导出项", len(node.Exports))
+	} else {
+		var sb strings.Builder
+		if len(result.AddedInCode) > 0 {
+			sb.WriteString(fmt.Sprintf("代码中新增了导出但文档未记录: %v\n", result.AddedInCode))
+		}
+		if len(result.MissingInCode) > 0 {
+			sb.WriteString(fmt.Sprintf("文档记录了导出但代码中已不存在: %v\n", result.MissingInCode))
+		}
+		result.Detail = strings.TrimSpace(sb.String())
+	}
+
+	return result, nil
+}

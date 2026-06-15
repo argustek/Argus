@@ -376,19 +376,34 @@ Argus 提供以下内部工具函数（供 AI 模型调用）。定义在 `inter
 
 **验证方法**：模拟 SE 调用 `complete_task(docs=[...])`，检查父文档的 `dirty` 标志是否被正确标记。
 
-### Phase 2：依赖管理与影响分析（待开始）
+### Phase 2：依赖管理与影响分析（已完成 ✅）
 
-- [ ] 为 AI 注册 `get_impacted_docs` 工具
-- [ ] 集成静态分析（至少一种语言，如 Go），自动从代码提取 `exports` 和 `dependencies`
-- [ ] 自动增量更新 `dependencies` 字段
+- [x] 注册 `get_impacted_docs` AI 工具（SE 工具集） — `internal/ai/se_prompt.go`
+- [x] 实现 Go AST 导出符号提取 — `internal/doclib/doclib.go:ExtractExportsFromFile`
+- [x] 实现 `sync_doc_exports` AI 工具 — 自动从代码提取 exports 并更新文档 frontmatter
+- [x] `get_impacted_docs` 也注册为 AP 审核工具（作为 `check_impact`）
 
-**验证方法**：修改一个被其他文档依赖的接口，运行 `check-impact` 应列出依赖方。
+**关键实现决策**：
+- 使用标准库 `go/ast` + `go/parser` 提取导出的函数、结构体、接口
+- 签名格式化支持 receiver、参数、返回值（含复合类型）
+- `ExtractExportsFromFile` 是纯函数，可被 `sync_doc_exports` 和 `verify_doc_exports` 共享
 
-### Phase 3：AP 审核集成（待开始）
+**验证方法**：对一个设置了 `code_ref` 的文档运行 `sync_doc_exports`，检查 frontmatter 的 exports 是否与实际代码匹配。
 
-- [ ] 在 AP 的提示词中加入审核清单（作为 skills 规则）
-- [ ] 实现代码与文档对比工具（读取 `code_ref` 指向的代码文件，解析导出符号，与文档 `exports` 对比）
-- [ ] 审核通过后自动清除任务的脏文档标记
+### Phase 3：AP 审核集成（已完成 ✅）
+
+- [x] 在 AP 提示词中加入文档审计检查项 — `internal/core/prompts.go` + `internal/ai/ap_prompt.go`
+- [x] 实现代码与文档对比工具 `verify_doc_exports` — `internal/doclib/doclib.go:VerifyDocExports`
+- [x] 在 AP 工具集中注册 `verify_doc_exports` 和 `check_impact` — `internal/ai/ap_prompt.go`
+- [x] AP 审核通过后自动清除脏标记 — `internal/chat/manager.go:forceProjectApproved`
+
+**实现决策**：
+- `VerifyDocExports` 双向对比：报告代码有但文档缺的 + 文档有但代码已删的
+- 如果 `code_ref` 指向的文件不存在（尚未创建），不报错，只是提示
+- 脏标记清除在 AP 批准后异步执行，不阻塞主流程
+- 清除所有文档的 dirty 标志（整个树审核通过）
+
+**验证方法**：模拟一个文档的 exports 过时，运行 `verify_doc_exports` 应报告差异。AP 批准后检查 dirty 标志是否被清除。
 
 ---
 

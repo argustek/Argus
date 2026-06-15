@@ -17,6 +17,7 @@ import (
 	"argus/internal/ai"
 	"argus/internal/board"
 	"argus/internal/dingtalk"
+	"argus/internal/doclib"
 	"argus/internal/executor"
 	"argus/internal/i18n"
 	"argus/internal/mcp"
@@ -6936,6 +6937,23 @@ func (m *Manager) forceProjectApproved() {
 			})
 		}()
 	}
+
+	// 清除文档树脏标记
+	go func() {
+		// 异步清除，不影响主流程
+		tree, err := doclib.BuildTree(m.workDir)
+		if err == nil && tree.Root != nil {
+			var allIDs []string
+			for id := range tree.AllDocs {
+				allIDs = append(allIDs, id)
+			}
+			if err := doclib.ClearDirty(m.workDir, allIDs); err != nil {
+				fmt.Printf("[AP] ⚠️ 清除脏标记失败: %v\n", err)
+			} else {
+				fmt.Printf("[AP] ✅ 文档树脏标记已清除 (%d 个文档)\n", len(allIDs))
+			}
+		}
+	}()
 
 	// [v0.7.2] PM 最终总结：AP通过后PM向用户汇报完成情况 + 更新TODO
 	go m.PMFinalSummary()
