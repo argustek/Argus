@@ -32,6 +32,9 @@ Working directory: %s
 User message
   ├─ greeting/chat/thanks → @USR <reply>
   │
+  ├─ [IDE:xxx] prefix → USE ide_send TOOL TO REPLY. Do NOT use exec/write_file/@SE/@USR.
+  │     This is an external IDE conversation, not a task to execute.
+  │
   ├─ unclear/ambiguous → use tools to investigate (list_files/grep/search),
   │     then @USR <question with options> if still unclear
   │
@@ -58,10 +61,22 @@ User message
 @USR <message> — talk to the user (questions, status, results)
 One @ per message maximum.
 
+=== IDE COORDINATION (MANDATORY) ===
+Messages with [IDE:xxx] prefix come from external IDEs. You MUST use ide_send tool — do NOT use exec/write_file/read_file or any other tool.
+1. ide_send(target="IDE-A"|"IDE-B"|"all", message="你的回复", action="discuss")
+2. When the goal is met: action="terminate" to end discussion
+3. You may analyze and contribute your own perspective
+4. Before terminate, output the final conclusion
+
 === ANTI-LOOP ===
 - If SE completes a task, do not re-assign the same task to SE
 - If a tool errors twice on the same input, try a different approach, not a retry
 - If you can't make progress after 3 attempts, @USR <what happened + what you tried>
+
+=== OUTPUT RULES (strict) ===
+- Respond in 3 sentences max. Direct answer only — no explanations, no suggestions, no politeness.
+- One @ mention per message. No greetings, no sign-offs.
+- Tool result: ✅ tool_name args (summary)
 `
 
 // PMProcessor PM处理器
@@ -82,6 +97,8 @@ type PMProcessor struct {
 	shellEmitter     types.ShellEventEmitter // 三层模型 Shell 事件推送（可选）
 	currentTaskId    string                  // 当前 TaskList ID
 	currentTaskIndex int                     // 当前执行到的步骤索引
+
+	ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
 }
 
 // NewPMProcessor 创建PM处理器
@@ -123,6 +140,10 @@ func (p *PMProcessor) SetContext(ctx context.Context) {
 
 func (p *PMProcessor) SetShellEmitter(emitter types.ShellEventEmitter) {
 	p.shellEmitter = emitter
+}
+
+func (p *PMProcessor) SetIDEMessageEmitter(emitter func(target, message, action string) bool) {
+	p.ideMessageEmitter = emitter
 }
 
 func (p *PMProcessor) SetTaskContext(taskId string, taskIndex int) {
@@ -397,6 +418,33 @@ var PMTools = []Tool{
 					},
 				},
 				"required": []string{"path"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "ide_send",
+			Description: "向外部 IDE 发送自然语言消息。PM 作为协调人主持 IDE-A 和 IDE-B 之间的讨论。使用 discuss 征求意见，instruct 发指令，terminate 结束对话。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"target": map[string]interface{}{
+						"type":        "string",
+						"description": "目标 IDE：IDE-A, IDE-B, 或 all（全部）",
+						"enum":        []string{"IDE-A", "IDE-B", "all"},
+					},
+					"message": map[string]interface{}{
+						"type":        "string",
+						"description": "要发送的自然语言消息内容",
+					},
+					"action": map[string]interface{}{
+						"type":        "string",
+						"description": "discuss=征求意见/讨论, instruct=发指令执行任务, terminate=结束对话",
+						"enum":        []string{"discuss", "instruct", "terminate"},
+					},
+				},
+				"required": []string{"target", "message", "action"},
 			},
 		},
 	},
@@ -1195,6 +1243,24 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			return "错误: url参数为空"
 		}
 		return pmWebFetch(args.URL)
+	case "ide_send":
+		var args struct {
+			Target  string `json:"target"`
+			Message string `json:"message"`
+			Action  string `json:"action"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if args.Target == "" {
+			return "错误: target 参数为空"
+		}
+		delivered := false
+		if p.ideMessageEmitter != nil {
+			delivered = p.ideMessageEmitter(args.Target, args.Message, args.Action)
+		}
+		if delivered {
+			return fmt.Sprintf("✅ 已向 %s 发送消息 (%s): %s", args.Target, args.Action, args.Message)
+		}
+		return fmt.Sprintf("⚠️ %s 未连接，消息未发送", args.Target)
 	default:
 		return fmt.Sprintf("未知工具: %s", name)
 	}

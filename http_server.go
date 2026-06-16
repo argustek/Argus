@@ -50,7 +50,9 @@ func (a *App) StartHTTPServer() {
 	fmt.Printf("[HTTPServer]   POST /tool/search-files   文件内容搜索\n")
 	fmt.Printf("[HTTPServer]   GET  /tool/shell-status   shell 会话状态\n")
 	fmt.Printf("[HTTPServer] SSE 端点 (/api/v1/sse/):\n")
-	fmt.Printf("[HTTPServer]   POST /subscribe     SSE流式推送\n")
+	fmt.Printf("[HTTPServer]   POST /subscribe     SSE流式推送（调试/IDE模式）\n")
+	fmt.Printf("[HTTPServer]   POST /ide-input     IDE对话期间发送消息\n")
+	fmt.Printf("[HTTPServer]   POST /ide-ack       IDE消息投递确认\n")
 	fmt.Printf("[HTTPServer] Admin 端点 (/admin/):\n")
 	fmt.Printf("[HTTPServer]   GET  /status        系统状态\n")
 	fmt.Printf("[HTTPServer]   GET  /memory        记忆状态\n")
@@ -118,8 +120,12 @@ func (a *App) registerAPIRoutes(mux *http.ServeMux) {
 }
 
 func (a *App) registerSSERoutes(mux *http.ServeMux) {
-	// ✅ SSE 订阅端点已启用，用于调试
+	// ✅ SSE 订阅端点 — 调试模式（无 source）或 IDE 对话模式（有 source）
 	mux.HandleFunc("POST /api/v1/sse/subscribe", a.authMiddleware(http.HandlerFunc(a.handleSSESubscribe)).ServeHTTP)
+	// ✅ IDE 输入端点 — IDE 在对话期间发送跟进消息
+	mux.HandleFunc("POST /api/v1/sse/ide-input", a.authMiddleware(http.HandlerFunc(a.handleIDEInput)).ServeHTTP)
+	// ✅ IDE 消息 ACK 端点 — IDE 确认收到 ide_message
+	mux.HandleFunc("POST /api/v1/sse/ide-ack", a.authMiddleware(http.HandlerFunc(a.handleIDEACK)).ServeHTTP)
 }
 
 func (a *App) registerAdminRoutes(mux *http.ServeMux) {
@@ -188,13 +194,10 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Message string `json:"message"`
+		Source  string `json:"source"`  // IDE对话模式标识（可选），不传=调试模式
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
-		return
-	}
-	if req.Message == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
 		return
 	}
 
@@ -211,21 +214,37 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 
 	bridge := a.chatManager.GetSSEBridge()
 	id := fmt.Sprintf("sse-%d", time.Now().UnixNano())
-	ch, ok2 := bridge.Subscribe(id)
+
+	// 根据 source 区分模式：有 source=IDE模式，无 source=调试模式（单连接）
+	subName := req.Source
+	if subName == "" {
+		subName = "debug"
+	}
+
+	ch, ok2 := bridge.Subscribe(id, subName)
 	if !ok2 {
-		writeJSON(w, http.StatusConflict, map[string]string{"status": "error", "error": "已有一个活跃的SSE连接，请稍后重试"})
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"status": "error",
+			"error":  "调试模式已有活跃连接，请稍后重试",
+		})
 		return
 	}
 	defer bridge.Unsubscribe(id)
 
 	fmt.Fprintf(w, ": connected\n\n")
+	// 发送 connected 事件（含 session_id，供 IDE 客户端识别自身）
+	connectedData, _ := json.Marshal(map[string]string{"session_id": id, "source": subName})
+	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", string(connectedData))
 	flusher.Flush()
 
-	fmt.Printf("[HTTPServer/SSE] SendMessage: %s\n", req.Message)
-	if err := a.SendMessage(req.Message); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\":\"%s\",\"stage\":\"system\"}\n\n", err.Error())
-		flusher.Flush()
-		return
+	// 如果有初始消息，发送给 PM 处理
+	if req.Message != "" {
+		fmt.Printf("[HTTPServer/SSE] SendMessage: %s (source: %s)\n", req.Message, subName)
+		if err := a.SendMessage(req.Message); err != nil {
+			fmt.Fprintf(w, "event: error\ndata: {\"error\":\"%s\",\"stage\":\"system\"}\n\n", err.Error())
+			flusher.Flush()
+			return
+		}
 	}
 
 	for {
@@ -238,15 +257,88 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 			jsonData, _ := json.Marshal(event.Data)
 			fmt.Fprintf(w, "data: %s\n\n", string(jsonData))
 			flusher.Flush()
-			if event.Type == "done" || event.Type == "error" {
+			// IDE模式（带source）保持连接不断，用于多轮对话
+			// 调试模式（无source）仍按原有逻辑在done/error时断开
+			if subName == "debug" && (event.Type == "done" || event.Type == "error") {
 				return
 			}
 		case <-time.After(120 * time.Second):
 			fmt.Fprintf(w, "event: error\ndata: {\"error\":\"timeout\"}\n\n")
 			flusher.Flush()
-			return
+			if subName == "debug" {
+				return
+			}
 		}
 	}
+}
+
+// handleIDEInput POST /api/v1/sse/ide-input
+// 外部 IDE 在对话期间发送跟进消息
+func (a *App) handleIDEInput(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "error": "ChatManager 未初始化"})
+		return
+	}
+
+	var req struct {
+		SessionID string `json:"session_id"`
+		Message   string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.SessionID == "" || req.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id and message are required"})
+		return
+	}
+
+	// 查找订阅者
+	bridge := a.chatManager.GetSSEBridge()
+	info, ok := bridge.GetSubscriberByID(req.SessionID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session_id 不存在或已断开"})
+		return
+	}
+
+	// 注入 IDE 消息到 PM 上下文
+	input := fmt.Sprintf("[IDE:%s] %s", info.Name, req.Message)
+	fmt.Printf("[HTTPServer/SSE] IDEInput from %s (%s): %s\n", info.Name, req.SessionID, req.Message)
+
+	if err := a.SendMessage(input); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleIDEACK POST /api/v1/sse/ide-ack
+// 外部 IDE 确认收到 ide_message
+func (a *App) handleIDEACK(w http.ResponseWriter, r *http.Request) {
+	if a.chatManager == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "error", "error": "ChatManager 未初始化"})
+		return
+	}
+
+	var req struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.MessageID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message_id is required"})
+		return
+	}
+
+	ok := a.chatManager.HandleIDEAck(req.MessageID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"status": "error", "error": "message_id not found or already acked"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message_id": req.MessageID})
 }
 
 func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {

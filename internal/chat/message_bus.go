@@ -25,6 +25,7 @@ const (
 	PathSystem     MessagePath = "system"      // 系统消息（错误/状态）
 	PathCoreOutput MessagePath = "core_output" // V2 ArgusCore输出（Bridge统一推送）
 	PathStatus     MessagePath = "status"      // V2 状态同步（PM/SE/AP灯 + 阶段切换）
+	PathIDEEvent   MessagePath = "ide_event"   // IDE连接状态事件（前端TopBar）
 )
 
 // MessageTag 消息标签（包含路径+校验信息）
@@ -257,7 +258,7 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	case PathSystem:
 		return true
 
-	case PathStatus:
+	case PathStatus, PathIDEEvent:
 		return false
 
 	case PathPMToUser, PathSEToUser, PathAPToUser:

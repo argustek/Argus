@@ -436,6 +436,22 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	// 注意：ctx在SetContext时设置，这里先创建，ctx后续注入
 	manager.msgBus = NewMessageBus(nil)
 
+	// IDE连接状态变化 → 通过MessageBus推送ide_status事件到前端（动态IDE列表）
+	manager.sseBridge.SetOnChange(func() {
+		infos := manager.sseBridge.GetSubscriberInfos()
+		ides := []string{}
+		seen := map[string]bool{}
+		for _, info := range infos {
+			if info.Name != "" && info.Name != "debug" && !seen[info.Name] {
+				ides = append(ides, info.Name)
+				seen[info.Name] = true
+			}
+		}
+		manager.msgBus.Send("system", "", "ide_status", PathIDEEvent, "setupIDEEmitter", map[string]interface{}{
+			"ides": ides,
+		})
+	})
+
 	// 初始化配置管理器（决策 + 权限）
 	configManager, err := NewConfigManager(workDir)
 	if err != nil {
@@ -564,6 +580,8 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
 		func() { m.ClearTodoList() },
 	)
+	// IDE消息推送
+	m.setupIDEMessageEmitter()
 
 	fmt.Printf("[Manager] API配置已更新: BaseURL=%s, Model=%s\n", apiConfig.BaseURL, apiConfig.Model)
 }
@@ -642,6 +660,7 @@ func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
 		func() { m.ClearTodoList() },
 	)
+	m.setupIDEMessageEmitter()
 	m.seDebugLog(fmt.Sprintf("[UpdatePMConfig] ✅ PM model changed to: %s (BaseURL=%s)",
 		pmConfig.Model, pmConfig.BaseURL))
 	fmt.Printf("[Manager] PM配置已更新: Model=%s\n", pmConfig.Model)
@@ -906,6 +925,7 @@ func (m *Manager) initCMonitor() {
 			func(id, status string) { m.UpdateTodoStatus(id, status) },
 			func() { m.ClearTodoList() },
 		)
+		m.setupIDEMessageEmitter()
 		// 重置状态
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		return nil
@@ -5399,8 +5419,8 @@ func (m *Manager) buildCompressionSummary(msgs []Message) string {
 func (m *Manager) addPMToUserMsg(content string) {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		fmt.Println("[PM→USR] ⚠️ 内容为空，跳过发送")
-		return
+		content = "[PM 返回了空回复]"
+		fmt.Println("[PM→USR] ⚠️ PM返回空内容，替换为占位文本")
 	}
 
 	content = strings.ReplaceAll(content, "⚡", "")
@@ -7572,6 +7592,156 @@ func (m *Manager) PushSSEEvent(eventType string, data interface{}) {
 	// 同时写入 conversation.log（CLI/SSE 模式调试用）
 	dataJSON, _ := json.Marshal(data)
 	m.WriteDebugLog(fmt.Sprintf("[SSE] → %s | %s", eventType, string(dataJSON)))
+}
+
+// IDEMessageAck 跟踪 IDE 消息的 ACK 状态
+type IDEMessageAck struct {
+	MessageID string
+	Target    string
+	Message   string
+	Action    string
+	SentAt    time.Time
+	Acked     bool
+}
+
+var (
+	idePendingAcks   = make(map[string]*IDEMessageAck)
+	ideAckMu         sync.Mutex
+	ideMsgCounter    int64
+)
+
+// setupIDEMessageEmitter 设置 PM 的 IDE 消息推送回调
+func (m *Manager) setupIDEMessageEmitter() {
+	if m.pmProcessor == nil || m.sseBridge == nil {
+		return
+	}
+	m.pmProcessor.SetIDEMessageEmitter(func(target, message, action string) bool {
+		infos := m.sseBridge.GetSubscriberInfos()
+
+		// 检查目标是否已连接
+		hasTarget := false
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name != "" && info.Name != "debug" {
+					hasTarget = true
+					break
+				}
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					hasTarget = true
+					break
+				}
+			}
+		}
+		if !hasTarget {
+			return false
+		}
+
+		// 生成唯一 message_id
+		ideAckMu.Lock()
+		ideMsgCounter++
+		counter := ideMsgCounter
+		ideAckMu.Unlock()
+		msgID := fmt.Sprintf("ide_msg_%d_%d", time.Now().Unix(), counter)
+
+		// 注册待确认消息
+		ackEntry := &IDEMessageAck{
+			MessageID: msgID,
+			Target:    target,
+			Message:   message,
+			Action:    action,
+			SentAt:    time.Now(),
+		}
+		ideAckMu.Lock()
+		idePendingAcks[msgID] = ackEntry
+		ideAckMu.Unlock()
+
+		// 推送消息到目标 IDE
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name == "" || info.Name == "debug" {
+					continue
+				}
+				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+					Type: "ide_message",
+					Data: map[string]interface{}{
+						"from":       "PM",
+						"message":    message,
+						"action":     action,
+						"message_id": msgID,
+					},
+				})
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+						Type: "ide_message",
+						Data: map[string]interface{}{
+							"from":       "PM",
+							"message":    message,
+							"action":     action,
+							"message_id": msgID,
+						},
+					})
+					break
+				}
+			}
+		}
+
+		// terminate 时发送 done 事件给所有 IDE
+		if action == "terminate" {
+			for _, info := range infos {
+				if info.Name == "" || info.Name == "debug" {
+					continue
+				}
+				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+					Type: "done",
+					Data: map[string]string{"status": "completed"},
+				})
+			}
+		}
+		return true
+	})
+}
+
+// GetIDEAckStats 返回 IDE 消息 ACK 统计（前端/API 调用）
+func (m *Manager) GetIDEAckStats() map[string]interface{} {
+	ideAckMu.Lock()
+	defer ideAckMu.Unlock()
+
+	total := len(idePendingAcks)
+	acked := 0
+	pending := 0
+	for _, ack := range idePendingAcks {
+		if ack.Acked {
+			acked++
+		} else {
+			pending++
+		}
+	}
+	return map[string]interface{}{
+		"total":   total,
+		"acked":   acked,
+		"pending": pending,
+	}
+}
+
+// HandleIDEAck 处理 IDE 对消息的 ACK 确认（由 http_server.go 调用）
+func (m *Manager) HandleIDEAck(messageID string) bool {
+	ideAckMu.Lock()
+	defer ideAckMu.Unlock()
+
+	entry, ok := idePendingAcks[messageID]
+	if !ok {
+		return false
+	}
+	entry.Acked = true
+	fmt.Printf("[IDE-ACK] ✅ message %s acked by %s (target=%s, action=%s)\n",
+		messageID, entry.Target, entry.Target, entry.Action)
+	return true
 }
 
 func (m *Manager) syncBackendStatus(stage string, event string) {

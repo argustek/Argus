@@ -1,7 +1,7 @@
-# Argus SSE 调试手册
+# Argus SSE 调试 & IDE 对话手册
 
-> 最后更新：2026-05-14
-> 适用版本：v0.1.0+
+> 最后更新：2026-06-16
+> 适用版本：v0.9.6+（IDE 对话模式：v0.9.6+）
 
 ---
 
@@ -9,34 +9,40 @@
 
 ```
 ┌──────────────┐    POST /api/v1/sse/subscribe     ┌─────────────────┐
-│  HTTP 客户端  │ ───────────────────────────────▶ │   http_server.go │
-│ (curl/脚本)   │ ◀── text/event-stream 流式响应 ──│  handleSSESubscribe│
+│ HTTP 客户端   │ ───────────────────────────────▶ │  http_server.go │
+│ (调试/IDE)    │ ◀── text/event-stream 流式响应 ──│ handleSSESubscribe│
 └──────────────┘                                  └────────┬────────┘
-                                                          │
-                                                   Subscribe(id)
-                                                          ▼
-                                                  ┌──────────────┐
-                                                  │  SSEBridge    │
-                                                  │ sse_bridge.go │
-                                                  │              │
-                                                  │ ch(64)       │◀── PushEvent()
-                                                  └──────┬───────┘
-                                                         │
-                              ┌──────────────────────────┼──────────────────────────┐
-                              ▼                          ▼                          ▼
-                     manager.go:800             manager.go:1236            manager.go:1451
-                     handleToPM()               executeSEActions()         PM审核完成
-                     → pm_started               → se_action / se_output   → done
-                     → pm_message              → se_completed
+                                                           │
+                                              ┌────────────┤
+                                              ▼            ▼
+                                       Subscribe(id)  Subscribe(id,name)
+                                              │            │
+                                              ▼            ▼
+                                       ┌─────────────────────────┐
+                                       │       SSEBridge          │
+                                       │    sse_bridge.go         │
+                                       │                         │
+                                       │  subscribers: map       │◀── PushEvent()
+                                       │  subscriberInfo: map    │◀── PushToSubscriber()
+                                       │  onChange: func()       │──→ ide_status → 前端TopBar
+                                       └──────┬──────────────────┘
+                                              │
+                          ┌───────────────────┼───────────────────────┐
+                          ▼                   ▼                       ▼
+                  调试模式(单连接)        IDE模式(多连接)          IDE消息确认
+                  manager.go           manager.go               POST /api/v1/sse/ide-ack
+                  → pm_started         → ide_message + msg_id
+                  → pm_message         → ide-input 双向对话
+                  → se_action          → terminate → done
 ```
 
 ### 核心组件
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| **SSEBridge** | `internal/chat/sse_bridge.go` | 单订阅者事件总线，channel 缓冲 64 |
-| **HTTP Handler** | `http_server.go:117-198` | SSE 长连接入口，转发事件到客户端 |
-| **埋点** | `internal/chat/manager.go` | 14 处 PushEvent 调用，覆盖完整生命周期 |
+| **SSEBridge** | `internal/chat/sse_bridge.go` | 多订阅者事件总线（调试=单连接，IDE=多连接），channel 缓冲 64，元数据跟踪 |
+| **HTTP Handler** | `http_server.go` | SSE 订阅+IDE 输入+IDE ACK 三个端点 |
+| **埋点** | `internal/chat/manager.go` | PushEvent + PushToSubscriber，覆盖调试+IDE 双模式 |
 
 ---
 
@@ -91,15 +97,18 @@ curl -N --max-time 130 -X POST http://localhost:8080/api/v1/sse/subscribe \
 
 | 事件类型 | 触发位置 | 数据示例 | 说明 |
 |---------|---------|---------|------|
-| **pm_started** | [manager.go:800](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L800) | `{}` | PM 开始处理 |
-| **pm_message** | [manager.go:1430](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1430), [1509](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1509) | `{"delta":"..."}` | PM 输出内容片段 |
-| **se_task_assigned** | [manager.go:1510](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1510) | `{"task":"...","steps":3}` | PM 分配任务给 SE |
-| **se_action** | [manager.go:1236](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1236) | `{"action":"write_file","path":"..."}` | SE 执行动作 |
-| **se_output** | [manager.go:1248,1263,1277,1295](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1248) | `{"output":"...","exit_code":0}` | 命令执行输出 |
-| **se_completed** | [manager.go:1090](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1090) | `{"result":"..."}` | SE 任务完成 |
-| **done** | [manager.go:1451,1992,2145](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L1451) | `{"status":"completed\|cancelled"}` | 全流程结束 |
-| **error** | [manager.go:831,978,1927](file:///E:/Argus/argus-desktop/internal/chat/manager.go#L831) | `{"error":"...","stage":"pm\|se\|system"}` | 出错 |
-| **heartbeat** | [sse_bridge.go:109](file:///E:/Argus/argus-desktop/internal/chat/sse_bridge.go#L109) | `{"pm_status":"idle","se_status":"idle"}` | 每10秒心跳保活 |
+| **connected** | [http_server.go](file:///E:/Argus/argus-desktop/http_server.go) | `{"session_id":"sse-...","source":"IDE-A"}` | 连接建立（含 session_id） |
+| **pm_started** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{}` | PM 开始处理 |
+| **pm_message** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"delta":"..."}` | PM 输出内容片段 |
+| **se_task_assigned** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"task":"...","steps":3}` | PM 分配任务给 SE |
+| **se_action** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"action":"write_file","path":"..."}` | SE 执行动作 |
+| **se_output** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"output":"...","exit_code":0}` | 命令执行输出 |
+| **se_completed** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"result":"..."}` | SE 任务完成 |
+| **ide_message** | [manager.go:setupIDEMessageEmitter](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"from":"PM","message":"...","action":"discuss","message_id":"ide_msg_..."}` | **仅IDE模式** PM 通过 ide_send 发给 IDE |
+| **ide_status** | [manager.go:onChange](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"ides":["IDE-A","VSCode"]}` | **前端消息总线** IDE 连接/断开时推送动态列表，谁连上显示谁 |
+| **done** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"status":"completed\|cancelled"}` | 全流程结束 |
+| **error** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"error":"...","stage":"pm\|se\|system"}` | 出错 |
+| **heartbeat** | [sse_bridge.go](file:///E:/Argus/argus-desktop/internal/chat/sse_bridge.go) | `{"pm_status":"idle","se_status":"idle"}` | 每10秒心跳保活 |
 
 ### 完整事件流示例
 
@@ -136,7 +145,114 @@ data: {"status":"completed"}
 
 ---
 
-## 四、常见问题排查
+## 四、IDE 对话模式（v0.9.6+）
+
+### 4.1 概览
+
+PM 可通过 `ide_send` 工具与外部 IDE 进行多轮对话协调。支持**任意数量、动态命名**的 IDE 同时参与——谁连上就显示谁，无需预注册。
+
+| 角色 | 说明 |
+|------|------|
+| **PM** | 主持人，使用 `ide_send` 工具与 IDE 对话，决定何时 terminate |
+| **IDE（动态）** | 通过 SSE 长连接接收 PM 消息，通过 `ide-input` 回复。名称由 `source` 字段决定（如 `IDE-A`、`VSCode`、`Cursor` 等） |
+| **用户** | 设定目标，PM 围绕目标组织讨论 |
+
+### 4.2 连接方式（动态命名）
+
+IDE 建立 SSE 连接时通过 `source` 字段声明自身名称（任意值），进入多连接模式。同一名称允许多个客户端同时连接。
+
+```powershell
+# IDE-A 连接（source=IDE-A）
+curl -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Authorization: Bearer your-token" `
+  -H "Content-Type: application/json" `
+  -d '{"message":"准备就绪","source":"IDE-A"}'
+
+# 任意名称连接（source 无限制）
+curl -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Authorization: Bearer your-token" `
+  -H "Content-Type: application/json" `
+  -d '{"message":"准备好","source":"VSCode"}'
+
+curl -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Authorization: Bearer your-token" `
+  -H "Content-Type: application/json" `
+  -d '{"message":"准备好","source":"Cursor"}'
+```
+
+连接成功后收到 `connected` 事件，含 `session_id`（后续发消息用）：
+
+```
+event: connected
+data: {"session_id":"sse-1741234567","source":"IDE-A"}
+```
+
+### 4.3 消息收发
+
+**IDE 发消息给 PM：**
+```powershell
+curl -X POST http://localhost:8080/api/v1/sse/ide-input `
+  -H "Authorization: Bearer your-token" `
+  -H "Content-Type: application/json" `
+  -d '{"session_id":"sse-1741234567","message":"分析结果：需要重构3个函数"}'
+```
+
+**PM 发消息给 IDE（通过 `ide_message` 事件）：**
+```
+event: ide_message
+data: {"from":"PM","message":"IDE-B 你的意见呢？","action":"discuss","message_id":"ide_msg_1741234567_1"}
+```
+
+每条 `ide_message` 包含 `message_id`，IDE 收到后应回传 ACK：
+
+```powershell
+curl -X POST http://localhost:8080/api/v1/sse/ide-ack `
+  -H "Authorization: Bearer your-token" `
+  -H "Content-Type: application/json" `
+  -d '{"message_id":"ide_msg_1741234567_1"}'
+```
+
+### 4.4 PM 工具：ide_send
+
+PM 内部使用 `ide_send` 工具与 IDE 通信，IDE 端无需关心此工具，只需接收 `ide_message` 事件。
+
+| 参数 | 值 | 含义 |
+|------|----|------|
+| `target` | `ALL` 或任意连接的 IDE 名称（如 `IDE-A`、`VSCode`） | 目标（动态名称） |
+| `action` | `discuss` / `instruct` / `terminate` | 讨论/指令/结束 |
+| `message` | 自然语言 | 内容 |
+
+`terminate` 后 PM 会向所有 IDE 发送 `done` 事件，对话结束。
+
+### 4.5 完整对话示例
+
+```
+1. IDE-A 连接 → 收到 connected
+2. IDE-B 连接 → 收到 connected
+3. IDE-A 发消息: "建议用策略模式重构"
+4. PM 处理后用 ide_send 转发给 IDE-B:
+   → event: ide_message {"message":"IDE-B 你觉得呢？","action":"discuss","message_id":"..."}
+5. IDE-B 回复 ACK + 通过 ide-input 回复
+6. 循环直到 PM 认为方案成熟
+7. PM 发 terminate → 所有 IDE 收到 done 事件
+```
+
+### 4.6 前端 TopBar 连接状态（动态）
+
+IDE 连接/断开时，前端 TopBar 右侧会动态显示已连接 IDE 的绿色圆点指示器。谁连上就显示谁，无需预配置：
+
+```
+... [PM] [MC] [SE] [AP] | ●A ●R ●r
+                          ↑  ↑    ↑
+                        IDE-A VSCode Cursor
+```
+
+- 绿色圆点：已连接（取名称末位字母）
+- 无指示器：未连接（过一会儿自动消失）
+
+---
+
+## 五、常见问题排查
 
 ### 问题 1：连接后无任何事件返回
 
@@ -168,12 +284,14 @@ curl http://localhost:8080/api/v1/status
 ### 问题 2：收到 `409 Conflict`
 
 ```json
-{"status":"error","error":"已有一个活跃的SSE连接，请稍后重试"}
+{"status":"error","error":"调试模式已有活跃连接，请稍后重试"}
 ```
 
-**原因：** SSE 是**单连接模型**，同一时间只能有一个客户端订阅。
+**原因：** 调试模式（不传 `source`）是**单连接模型**，同一时间只能有一个调试客户端订阅。
 
-**解决：**
+**注意：** IDE 模式（传了 `source`）**没有此限制**，多个 IDE 可同时连接。
+
+**解决（调试模式）：**
 - 关闭之前的连接（Ctrl+C 或关闭终端）
 - 或等待旧连接超时（120 秒自动断开）
 - 检查是否有其他进程占用
@@ -228,7 +346,7 @@ data: {"error":"timeout"}
 
 ---
 
-## 五、关键代码位置索引
+## 六、关键代码位置索引
 
 ### SSE Bridge 核心
 
@@ -273,7 +391,7 @@ data: {"error":"timeout"}
 
 ---
 
-## 六、调试技巧
+## 七、调试技巧
 
 ### 6.1 开启详细日志
 
@@ -328,13 +446,14 @@ go test ./internal/chat/ -run TestSSE -v
 
 ---
 
-## 七、已知限制
+## 八、已知限制
 
 | # | 限制 | 影响 | 状态 |
 |---|------|------|------|
-| 1 | 单连接模型 | 同时只能一个 HTTP 客户端 | 设计如此 |
-| 2 | channel 缓冲 64 | 高频事件可能丢失 | #25 待修 |
-| 3 | 超时固定 120s | 长任务可能被截断 | 可配置化 |
-| 4 | 心跳数据硬编码 | pm_status/se_status 固定 idle | 低优先级 |
-| 5 | 前端未接入 | se_output 事件无人消费 | #19 待修 |
+| 1 | 调试模式单连接 | 同时只能一个调试客户端 | 设计如此 |
+| 2 | IDE 模式多连接 | IDE-A/IDE-B 可同时在线 | ✅ v0.9.6 |
+| 3 | channel 缓冲 64 | 高频事件可能丢失 | #25 待修 |
+| 4 | 超时固定 120s | 长任务可能被截断 | 可配置化 |
+| 5 | 心跳数据硬编码 | pm_status/se_status 固定 idle | 低优先级 |
 | 6 | 无断线重连 | 客户端断开后状态丢失 | P2 |
+| 7 | IDE ACK 无自动重试 | 未收到 ACK 不自动重推 | 待增强 |

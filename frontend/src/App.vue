@@ -4,6 +4,7 @@
     <TopBar 
       :active-windows="activeWindows"
       :ai-status="aiStatus"
+      :ide-connected="ideConnected"
       :work-dir="workDir"
       :recent-projects="recentProjects"
       :c-monitor-enabled="cMonitorEnabled"
@@ -279,6 +280,9 @@ const aiStatus = reactive({
   currentTask: '',
   progress: ''
 })
+
+// IDE 连接状态（动态：{ "IDE-A": true, "IDE-B": true, ... }）
+const ideConnected = reactive<Record<string, boolean>>({})
 
 // C监控状态
 const cMonitorEnabled = ref(true) // 默认开启
@@ -793,6 +797,19 @@ onMounted(async () => {
       aiThinking.value = ['pm', 'se', 'ap', 'review', 'approve'].includes(data.phase)
     }
     ;(window as any).__stateUpdated?.()
+  })
+
+  // IDE连接状态（动态列表，来自SSEBridge的变更通知）
+  EventsOn('ide_status', (data: { _msgId?: string; ides?: string[]; [key: string]: any }) => {
+    ackMessage(data._msgId || '')
+    const active = new Set(data.ides || [])
+    // 保留已连接的，移除已断开的
+    for (const key of Object.keys(ideConnected)) {
+      if (!active.has(key)) delete ideConnected[key]
+    }
+    for (const name of active) {
+      ideConnected[name] = true
+    }
   })
 
   // [Legacy] 兼容旧版字符串状态（逐步废弃）

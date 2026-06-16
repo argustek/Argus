@@ -271,7 +271,7 @@ func TestPDCA_HelloWorld(t *testing.T) {
 			// 注册 SSE 事件监听
 			sseBridge := manager.GetSSEBridge()
 			if sseBridge != nil {
-				sseCh, _ := sseBridge.Subscribe("pdca_test")
+				sseCh, _ := sseBridge.Subscribe("pdca_test", "debug")
 				defer sseBridge.Unsubscribe("pdca_test")
 				go func() {
 					for evt := range sseCh {

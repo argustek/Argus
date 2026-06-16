@@ -86,6 +86,10 @@
         <span class="status-item se" :class="{ busy: aiStatus.seStatus === 'busy' }" title="SE">SE</span>
         <span class="status-item ap" :class="{ busy: aiStatus.apStatus === 'busy' }" title="AP 审批者">AP</span>
       </div>
+      <div class="divider"></div>
+      <div class="ide-status">
+        <span v-for="(_, name) in ideConnected" :key="name" class="ide-indicator connected" :title="name">{{ name.slice(-1) }}</span>
+      </div>
       <button class="icon-btn" @click.stop="$emit('open-settings')" :title="t('topBar.settings')">⚙️</button>
       <div class="lang-selector" @mousedown.stop>
         <button class="icon-btn lang-btn" @click.prevent="toggleLangMenu" :title="t('topBar.switchLanguage')">
@@ -146,6 +150,7 @@ import { OpenFolderDialog, ClearWorkDir, ForceQuit, ShowWindow, OpenWorkDir, Ope
 const props = defineProps<{
   activeWindows: { fileTree: boolean; editor: boolean; terminal: boolean; changes: boolean; debug?: boolean; mcp?: boolean; token?: boolean }
   aiStatus: { pmStatus: string; seStatus: string; apStatus: string; cRunning: boolean; currentTask: string }
+  ideConnected: Record<string, boolean>
   workDir: string
   recentProjects: string[]
   cMonitorEnabled: boolean
@@ -868,14 +873,25 @@ const projectStatusText = computed(() => {
   font-family: 'Consolas', monospace;
 }
 
-/* 运行中 - 蓝色 */
+/* 运行中 - 蓝色（每秒4次闪烁） */
 .project-status-indicator.running {
-  background: rgba(59, 130, 246, 0.15);
-  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.15) !important;
+  color: #3b82f6 !important;
+  animation: runningBlinkBg 0.25s ease-in-out infinite;
 }
 .project-status-indicator.running .status-light {
-  background: #3b82f6;
-  box-shadow: 0 0 8px #3b82f6;
+  background: #3b82f6 !important;
+  animation: runningBlink 0.25s ease-in-out infinite;
+}
+
+@keyframes runningBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.1; }
+}
+
+@keyframes runningBlinkBg {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 /* 错误 - 红色闪烁 */
@@ -949,6 +965,34 @@ const projectStatusText = computed(() => {
   color: #f97316;
   background: rgba(249, 115, 22, 0.12);
   border: 1px solid rgba(249, 115, 22, 0.25);
+}
+
+/* IDE 连接状态指示器 */
+.ide-status {
+  display: flex;
+  gap: 4px;
+}
+
+.ide-indicator {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  transition: all 0.3s ease;
+}
+
+.ide-indicator.connected {
+  background: #22c55e;
+  color: #fff;
+  border-color: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
 }
 
 /* 空闲/就绪 - 黄色 */
