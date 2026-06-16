@@ -56,3 +56,5 @@ test_log.txt
 
 # Promotion / marketing docs (local drafts, not tracked)
 docs/promotion/
+
+config/state.json
