@@ -302,7 +302,7 @@ func (a *App) handleIDEInput(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 注入 IDE 消息到 PM 上下文
-	input := fmt.Sprintf("[IDE:%s] %s", info.Name, req.Message)
+	input := fmt.Sprintf("[%s] %s", info.Name, req.Message)
 	fmt.Printf("[HTTPServer/SSE] IDEInput from %s (%s): %s\n", info.Name, req.SessionID, req.Message)
 
 	if err := a.SendMessage(input); err != nil {
