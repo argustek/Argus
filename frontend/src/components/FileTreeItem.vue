@@ -6,7 +6,7 @@
       @click="onLeftClick"
       @contextmenu.prevent="showContextMenu($event)"
     >
-      <span class="icon">{{ item.type === 'folder' ? (isOpen ? '📂' : '📁') : '📄' }}</span>
+      <span class="icon">{{ itemIcon }}</span>
       <span class="name">{{ item.name }}</span>
     </div>
     <div v-if="item.type === 'folder' && isOpen && item.children" class="children">
@@ -54,6 +54,13 @@ const emit = defineEmits(['select', 'context'])
 
 const isOpen = ref(props.item.expanded || false)
 const isSelected = computed(() => props.selectedPath === props.item.path)
+
+const itemIcon = computed(() => {
+  const name = props.item.name || ''
+  if (props.item.type !== 'folder') return '📄'
+  if (name === '.argus') return isOpen.value ? '⚙️' : '⚙️'
+  return isOpen.value ? '📂' : '📁'
+})
 
 // 右键菜单状态
 const ctxMenu = reactive({ visible: false, x: 0, y: 0, item: null as any })

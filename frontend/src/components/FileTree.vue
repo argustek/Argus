@@ -1,8 +1,8 @@
 <template>
   <div class="file-tree-panel">
     <div class="panel-header">
-      <span class="title">资源管理器</span>
-      <button class="refresh-btn" @click="refresh" :title="'刷新'">↻</button>
+      <span class="address-bar" :title="workDir">{{ workDir || '未设置工作目录' }}</span>
+      <button class="refresh-btn" @click.stop="refresh" :title="'刷新'">↻</button>
     </div>
     <div class="tree-body">
       <div v-if="loading" class="loading">加载中...</div>
@@ -169,14 +169,33 @@ watch(() => props.workDir, (newDir) => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
+  padding: 4px 8px;
   font-size: 12px;
-  font-weight: 600;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-color);
   user-select: none;
+  gap: 4px;
+  min-height: 30px;
 }
-.title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.address-bar {
+  flex: 1;
+  font-size: 11.5px;
+  font-family: 'Consolas', 'Cascadia Code', monospace;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  transition: border-color 0.15s;
+}
+.address-bar:hover {
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
 
 .refresh-btn {
   background: none; border: none; cursor: pointer;

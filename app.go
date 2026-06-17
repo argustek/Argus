@@ -2264,7 +2264,12 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 		}
 
 		relPath, _ := filepath.Rel(projectDir, path)
-		if relPath == "." || relPath == ".argus" || strings.HasPrefix(relPath, ".argus"+string(filepath.Separator)) {
+		if relPath == "." {
+			return nil
+		}
+		// Skip .argus/cache and .argus/logs, but show tree/docs/skills
+		relPathSlash := strings.ReplaceAll(relPath, "\\", "/")
+		if strings.HasPrefix(relPathSlash, ".argus/cache") || strings.HasPrefix(relPathSlash, ".argus/logs") {
 			return nil
 		}
 
