@@ -1314,25 +1314,6 @@ func (a *App) StopHTTPServer() {
 	}
 }
 
-// SendCLI sends a message from command line without Wails GUI
-func (a *App) SendCLI(message string) {
-	a.loadConfig()
-	a.initChatManagerCLI()
-
-	if a.chatManager == nil {
-		fmt.Println("ChatManager 初始化失败")
-		return
-	}
-
-	fmt.Printf("发送: %s\n", message)
-	response, err := a.chatManager.ProcessMessage(message)
-	if err != nil {
-		fmt.Printf("错误: %v\n", err)
-		return
-	}
-	fmt.Printf("回复: %s\n", response)
-}
-
 func (a *App) GetStatus() MonitorStatus {
 	return a.status
 }
@@ -3544,70 +3525,14 @@ a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathSystem)
 				// 异步处理完成：自动确认待处理消息（HTTP API 无前端 ACK）
 				a.ackPendingMessages()
 			}()
-		} else if a.chatManager != nil {
-			fmt.Printf("[SendMessage] ⚠️ Bridge未初始化，异步处理\n")
-			go func() {
-				response, err := a.chatManager.ProcessMessage(content)
-				fmt.Printf("[SendMessage] V1 ProcessMessage 返回: err=%v, response_len=%d\n", err, len(response))
-
-				a.sendMu.Lock()
-				if taskID != a.sendTaskID {
-					a.sendMu.Unlock()
-					return
-				}
-				a.sendMu.Unlock()
-
-				if err != nil {
-					a.addLog(fmt.Sprintf("【V1-Error】处理失败: %v", err))
-					errorMsg := a.newChatMessage("error", fmt.Sprintf("错误: %v", err))
-					errorMsg.Summary = "System"
-					a.messages = append(a.messages, errorMsg)
-					a.saveMessages()
-					a.emitToFrontend("new-message", errorMsg, "SendMessage:V1Error", chat.PathSystem)
-					a.sendToDingTalk(fmt.Sprintf("[ERR] %v", err))
-				}
-
-				a.aiThinking = false
-				a.emitToFrontend("ai-thinking", false, "SendMessage:Done", chat.PathSystem)
-				// 异步处理完成：自动确认待处理消息（HTTP API 无前端 ACK）
-				a.ackPendingMessages()
-			}()
 		}
 
 		return nil
 	}
 
-	// ChatManager 未初始化，使用旧逻辑
-	a.addLog("【SendMessage】ChatManager 未初始化，使用旧逻辑")
-	return a.sendMessageLegacy(content)
-}
-
-// sendMessageLegacy 旧的 SendMessage 逻辑
-func (a *App) sendMessageLegacy(content string) error {
-	if a.aiThinking {
-		return fmt.Errorf("AI正在思考中，请稍后再试")
-	}
-
-	userMsg := a.newChatMessage("user", content)
-	a.messages = append(a.messages, userMsg)
-	a.saveMessages()
-	a.emitToFrontend("new-message", userMsg, "Legacy:UserMsg", chat.PathUserInput)
-
-	a.aiThinking = true
-	a.emitToFrontend("ai-thinking", true, "Legacy:Start", chat.PathUserInput)
-	if a.chatManager != nil {
-		go func() {
-			a.chatManager.ProcessMessage(content)
-			a.aiThinking = false
-			a.emitToFrontend("ai-thinking", false, "Legacy:Done", chat.PathSystem)
-		}()
-	} else {
-		a.aiThinking = false
-		a.emitToFrontend("ai-thinking", false, "Legacy:NoMgr", chat.PathSystem)
-		a.addErrorMessage("ChatManager未初始化，无法处理消息")
-	}
-
-	return nil
+	// 不可达：Bridge 和 ChatManager 至少一个已初始化
+	a.addLog("【SendMessage】⚠️ 既无Bridge也无ChatManager")
+	return fmt.Errorf("chat system not initialized")
 }
 
 // 添加PM消息
