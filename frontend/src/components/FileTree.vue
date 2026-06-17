@@ -23,7 +23,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, inject } from 'vue'
+import { ref, watch, onMounted, onUnmounted, inject } from 'vue'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime'
 import FileTreeItem from './FileTreeItem.vue'
 
 const props = defineProps<{
@@ -39,18 +40,19 @@ const error = ref('')
 const selectedPath = ref('')
 
 // 调用后端 ListFiles()，将扁平列表转为树形结构
-async function refresh() {
+async function refresh(silent = false) {
   if (!props.workDir) { treeItems.value = []; return }
-  loading.value = true; error.value = ''
+  if (!silent) { loading.value = true }
+  error.value = ''
   try {
     // @ts-ignore Wails binding
     const files: any[] = await window.go.main.App.ListFiles()
     treeItems.value = buildTree(files || [])
   } catch (e: any) {
-    error.value = e?.message || String(e)
+    if (!silent) { error.value = e?.message || String(e) }
     treeItems.value = []
   } finally {
-    loading.value = false
+    if (!silent) { loading.value = false }
   }
 }
 
@@ -147,7 +149,16 @@ function buildTree(files: any[]): any[] {
   return objToArray(root)
 }
 
-onMounted(() => { if (props.workDir) refresh() })
+onMounted(() => {
+  if (props.workDir) refresh()
+  EventsOn('file-tree-dirty', () => {
+    if (props.workDir) refresh(true)
+  })
+})
+
+onUnmounted(() => {
+  EventsOff('file-tree-dirty')
+})
 
 // 监听 workDir 变化（App.vue 异步加载，FileTree 先挂载）
 watch(() => props.workDir, (newDir) => {

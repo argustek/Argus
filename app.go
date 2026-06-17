@@ -235,6 +235,10 @@ type App struct {
 	// HTTP 服务器（支持优雅停止）
 	httpServer *http.Server
 
+	// 文件变更检测（替代轮询，纯标准库）
+	fileWatcherStop chan struct{}
+	fileSnapshot    map[string]int64 // path → modTime.Unix
+
 	// 消息去重（防止前端重复显示）
 	msgIDCounter  int64
 	emittedMsgIDs map[int64]bool
@@ -1051,6 +1055,9 @@ func (a *App) RecordReceive(role, messageID, content, source string) {
 func (a *App) Ready() {
 	if a.chatManager != nil && a.chatManager.GetMessageBus() != nil {
 		a.chatManager.GetMessageBus().SetFrontendReady()
+	}
+	if dir := a.getProjectDir(); dir != "" {
+		a.startFileWatcher(dir)
 	}
 }
 
@@ -1901,6 +1908,7 @@ func (a *App) SetWorkDir(dir string) error {
 	}
 
 	a.config.WorkDir = dir
+	a.startFileWatcher(dir)
 
 	// 添加到最近项目
 	a.addRecentProject(dir)
@@ -3902,6 +3910,80 @@ func (a *App) getProjectDir() string {
 
 	fmt.Printf("[getProjectDir] ⚠️ work_dir 未配置，请通过界面选择工作目录\n")
 	return ""
+}
+
+// startFileWatcher 启动文件变更检测（2s间隔，纯标准库，无闪烁）
+func (a *App) startFileWatcher(dir string) {
+	a.stopFileWatcher()
+	if dir == "" {
+		return
+	}
+	a.fileWatcherStop = make(chan struct{})
+	a.fileSnapshot = make(map[string]int64)
+	fmt.Printf("[FileWatcher] start watching: %s\n", dir)
+
+	// 构建初始快照
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		info, err := e.Info()
+		if err == nil {
+			a.fileSnapshot[e.Name()] = info.ModTime().Unix()
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				a.checkFileChanges(dir)
+			case <-a.fileWatcherStop:
+				return
+			}
+		}
+	}()
+}
+
+func (a *App) stopFileWatcher() {
+	if a.fileWatcherStop != nil {
+		close(a.fileWatcherStop)
+		a.fileWatcherStop = nil
+	}
+}
+
+func (a *App) checkFileChanges(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	changed := false
+	current := make(map[string]int64)
+
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		mt := info.ModTime().Unix()
+		current[e.Name()] = mt
+		if oldMT, ok := a.fileSnapshot[e.Name()]; !ok || oldMT != mt {
+			changed = true
+		}
+	}
+
+	// 检查是否有文件被删除
+	if len(current) != len(a.fileSnapshot) {
+		changed = true
+	}
+
+	if changed {
+		a.fileSnapshot = current
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "file-tree-dirty", map[string]interface{}{"dir": dir})
+		}
+	}
 }
 
 // [v0.7.1] initMCPManager 初始化 MCP Manager，启动配置中的所有 Server

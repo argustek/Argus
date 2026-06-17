@@ -486,8 +486,8 @@ onMounted(async () => {
   document.addEventListener('keydown', onKeydown)
 })
 
+// 不调 EventsOff('terminal:output') — App.vue 全局 ACK 常驻，防止关闭后消息丢失
 onUnmounted(() => {
-  EventsOff('terminal:output')
   document.removeEventListener('mousedown', closeContextMenu)
   document.removeEventListener('keydown', onKeydown)
 })
@@ -500,18 +500,6 @@ watch(encoding, (newEnc) => {
   if (tabs.length > 0) {
     SetTerminalEncoding(newEnc).catch(() => {})
   }
-})
-
-watch(encoding, (newEnc) => {
-  if (tabs.length > 0) {
-    SetTerminalEncoding(newEnc).catch(() => {})
-  }
-})
-
-onUnmounted(() => {
-  EventsOff('terminal:output')
-  document.removeEventListener('mousedown', closeContextMenu)
-  document.removeEventListener('keydown', onKeydown)
 })
 </script>
 
