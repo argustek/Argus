@@ -3937,7 +3937,7 @@ func (a *App) startFileWatcher(dir string) {
 		for {
 			select {
 			case <-ticker.C:
-				a.checkFileChanges(dir)
+				a.pollFileChanges(dir)
 			case <-a.fileWatcherStop:
 				return
 			}
@@ -3952,7 +3952,7 @@ func (a *App) stopFileWatcher() {
 	}
 }
 
-func (a *App) checkFileChanges(dir string) {
+func (a *App) pollFileChanges(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
