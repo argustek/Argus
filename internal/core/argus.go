@@ -1442,7 +1442,8 @@ func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
 	// Must have at least one successful operation (any tool type)
 	successPrefixes := []string{"✅ exec", "✅ read_file", "✅ write_file", "✅ edit_file",
 		"✅ read_pdf", "✅ read_docx", "✅ write_docx", "✅ compare_docs",
-		"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ list_files"}
+		"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ list_files", "✅ delete_file",
+		"✅ complete_task"}
 	hasSuccess := false
 	for _, r := range results {
 		for _, prefix := range successPrefixes {
@@ -2044,15 +2045,77 @@ Requirements:
 		}
 	}
 
-	// Step 3: 检查结果 + 重试（最多3次）
+	// Step 3a: 多轮延续 — 工具执行后让 LLM 继续处理（如删除空目录）
+	if execErr == nil && len(execResults) > 0 {
+		maxFollow := 3
+		followHistory := make([]ai.Message, 0, len(memHistory)+10)
+		followHistory = append(followHistory, memHistory...)
+		followHistory = append(followHistory, ai.Message{Role: "user", Content: execPrompt})
+		followHistory = append(followHistory, msg)
+		for _, r := range execResults {
+			followHistory = append(followHistory, ai.Message{Role: "tool", Content: r})
+		}
+		for fr := 0; fr < maxFollow; fr++ {
+			prompt := "[工具已执行，请继续分析。若需进一步操作（如删除空目录）请继续调用工具；若已完成请回复用户。]"
+			followHistory = append(followHistory, ai.Message{Role: "user", Content: prompt})
+			fCtx, fCancel := context.WithTimeout(c.ctx, c.timeout)
+			fResp, fErr := c.client.ChatWithTools(fCtx, systemPrompt, followHistory, prompt, ai.SETools, c.language)
+			fCancel()
+			if fErr != nil || len(fResp.Choices) == 0 {
+				break
+			}
+			fMsg := fResp.Choices[0].Message
+			if len(fMsg.Content) > 20 {
+				displayContent = fMsg.Content
+			}
+			if len(fMsg.ToolCalls) == 0 {
+				break
+			}
+			var more []ai.SEAction
+			for _, tc := range fMsg.ToolCalls {
+				var args map[string]interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				a := ai.SEAction{Type: tc.Function.Name}
+				if p, ok := args["path"].(string); ok {
+					a.Path = p
+				}
+				if ct, ok := args["content"].(string); ok {
+					a.Content = ct
+				}
+				if cmd, ok := args["command"].(string); ok {
+					a.Command = cmd
+				}
+				more = append(more, a)
+			}
+			if len(more) == 0 {
+				break
+			}
+			moreResults, moreErr := c.executeActions(more, "pm")
+			execResults = append(execResults, moreResults...)
+			actions = append(actions, more...)
+			result.Outputs = execResults
+			result.Actions = actions
+			if moreErr != nil {
+				execErr = moreErr
+				break
+			}
+			for _, r := range moreResults {
+				followHistory = append(followHistory, ai.Message{Role: "tool", Content: r})
+			}
+		}
+	}
+
+	// Step 3b: 检查结果 + 重试（最多3次）
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if execErr == nil && c.seExecutionSatisfied(execResults) {
-			// 成功！汇报结果
+		// 先检查核心任务是否已完成（有✅结果），即使清理命令报错也视为成功
+		if c.seExecutionSatisfied(execResults) {
+			execErr = nil
 			break
 		}
-
-		// 最后一次也失败了
+		if execErr == nil {
+			break
+		}
 		if attempt == maxRetries {
 			if execErr != nil {
 				result.Error = fmt.Errorf("pmDirectExecute failed after %d retries: %w", maxRetries, execErr)
@@ -2062,14 +2125,11 @@ Requirements:
 			fmt.Printf("[Core:Feather] ❌ PM直执失败 (重试%d次耗尽)\n", maxRetries)
 			break
 		}
-
-		// 重试：带上错误信息让 PM 修复
 		feedbackErr := "<no error>"
 		if execErr != nil {
 			feedbackErr = execErr.Error()
 		}
 		fmt.Printf("[Core:Feather] 🔄 PM重试 #%d/%d: %s\n", attempt, maxRetries, feedbackErr)
-
 		fixPrompt := fmt.Sprintf(`⚠️ 上次执行结果不符合预期，请修复后重新返回 actions。
 
 错误/输出: %s
@@ -2084,7 +2144,6 @@ Requirements:
 3. 如果 exec 非零退出，输出本身可能就是正确数据，不一定需要重试
 4. 最多重试 3 次，仍不行就 @USR 汇报`,
 			feedbackErr, actions, execResults, userMsg)
-
 		callCtx2, cancel2 := context.WithTimeout(c.ctx, c.timeout)
 		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, ai.SETools, c.language)
 		cancel2()
@@ -2095,12 +2154,10 @@ Requirements:
 		if len(resp2.Choices) == 0 {
 			continue
 		}
-
 		msg2 := resp2.Choices[0].Message
 		if len(msg2.Content) > 20 {
 			displayContent = msg2.Content
-		} // 更新汇报文本
-
+		}
 		actions = nil
 		for _, tc := range msg2.ToolCalls {
 			var args map[string]interface{}
@@ -2128,9 +2185,10 @@ Requirements:
 	if result.Error != nil {
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
 		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", result.Error))
+	} else if execErr != nil {
+		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", execErr))
+		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", execErr))
 	} else if len(execResults) > 0 {
-		// 有 actions → exec 卡片已通过 emitAction 显示在前端
-		// 不重复 emit 文本，只存 memory 供后续上下文
 		cleanSummary := c.extractCleanSummary(displayContent)
 		if cleanSummary != "" {
 			c.memory.Add(RolePM, cleanSummary+"\n"+strings.Join(execResults, "\n"))
@@ -2145,7 +2203,7 @@ Requirements:
 		}
 	}
 	c.emitStatus("done", "none", "idle")
-	result.Success = (result.Error == nil)
+	result.Success = (result.Error == nil && execErr == nil)
 	return result
 }
 
@@ -2466,6 +2524,8 @@ func (c *ArgusCore) executeActions(actions []ai.SEAction, executor string) ([]st
 				}
 				output = fmt.Sprintf("🔍 eval(%s) = %s%s", action.Expression, result.Value, vType)
 			}
+		case "complete_task":
+			output = "✅ complete_task 任务已完成"
 		default:
 			err = fmt.Errorf("unknown action type: %s", action.Type)
 			output = fmt.Sprintf("❌ unknown action: %s", action.Type)

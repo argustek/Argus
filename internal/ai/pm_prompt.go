@@ -57,6 +57,8 @@ User message
 1. Always use tools — never respond with just text unless it's a greeting.
 2. Concise and direct — report results, don't add suggestions unless asked. Don't explain trivial code. Don't ask "shall I continue".
 3. For unclear requests only: investigate with tools before asking the user. Don't search when the task is clear.
+4. NEVER fabricate tool execution results. If you need to run/compile/test something, you MUST call the actual tool (exec/write_file/etc). Do NOT claim in text that a tool was called if it wasn't.
+5. When a user questions your previous results, DO NOT defend yourself with text. Instead, re-run the relevant tools (exec/read_file) to SHOW the actual current state, then present the facts.
 
 === COMMUNICATION ===
 @SE <task> — assign work to Software Engineer
@@ -177,6 +179,18 @@ func pmIsReadTool(name string) bool {
 	case "read_file", "list_files", "web_search", "fetch_url",
 		"grep_content", "find_files":
 		return true
+	}
+	return false
+}
+
+// [v0.9.6] 判断原始请求是否需要执行命令
+func needsExecution(request string) bool {
+	keywords := []string{"run", "exec", "compile", "build", "execute", "启动", "运行", "编译", "执行"}
+	lower := strings.ToLower(request)
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
 	}
 	return false
 }
@@ -509,8 +523,10 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	// [v0.7.2] 使用 ChatWithTools 让 PM 能调用 add_todo/update_todo
 	maxToolRounds := 8
 	var finalContent string
-	var hasToolCalls bool // [v0.8] 记录是否有ToolCalls
-	toolNagCount := 0     // [v0.8.4] 记录连续ToolCalls=0次数
+	var hasToolCalls bool        // [v0.8] 记录是否有ToolCalls
+	var execCalled bool          // [v0.9.6] 记录是否调用了exec工具
+	originalRequest := userInput // [v0.9.6] 保存原始用户请求
+	toolNagCount := 0            // [v0.8.4] 记录连续ToolCalls=0次数
 
 	for round := 0; round < maxToolRounds; round++ {
 		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
@@ -547,6 +563,14 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 				userInput = "[请分析是否需要调用工具执行任务]"
 				continue
 			}
+			// [v0.9.6] 如果之前调用了工具但从未调用exec，而原始请求需要执行，则强制提醒
+			if hasToolCalls && !execCalled && needsExecution(originalRequest) {
+				nagMsg := "[系统提示] ⚠️ 用户请求可能需要执行命令（运行/编译/测试等），但你尚未调用 exec 工具。请调用 exec 来实际运行必要的命令，不要仅靠文本描述结果。"
+				aiHistory = append(aiHistory, msg)
+				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_exec"})
+				userInput = nagMsg
+				continue
+			}
 			// 已有 ToolCalls（任务已执行）或已提醒过 → 结束
 			break
 		}
@@ -560,6 +584,9 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 
 		var readTools, writeTools []ToolCall
 		for _, tc := range msg.ToolCalls {
+			if tc.Function.Name == "exec" { // [v0.9.6]
+				execCalled = true
+			}
 			if pmIsReadTool(tc.Function.Name) {
 				readTools = append(readTools, tc)
 			} else {
@@ -626,9 +653,10 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			}
 		}
 		hasToolCalls = true
-		// 不循环回 LLM — 工具结果已可直接展示
-		// 对于需要多轮工具调用的复杂任务，由 ProcessStream 调用方在上下文里处理
-		break
+		// 继续循环，把工具结果送回 LLM 分析，支持多轮工具调用
+		continuePrompt := "[工具结果已返回。如果还需要执行操作（运行/编译/测试/删除等），请继续调用对应工具完成。不得在文本中编造工具执行结果——你说调了就是调了，没调就是没调。仅在所有必要的工具都实际执行完毕后，才回复用户。]"
+		userInput = continuePrompt
+		aiHistory = append(aiHistory, Message{Role: "user", Content: continuePrompt})
 	}
 
 	p.extractAndUpdateState(finalContent)
@@ -972,6 +1000,7 @@ func (p *PMProcessor) autoVerifyFallback() string {
 }
 
 func (p *PMProcessor) executeTool(name, argsJSON string) string {
+	fmt.Printf("[PM executeTool] calling: %s\n", name) // [v0.9.6] 日志记录
 	// [FIX-v0.8.1] 工具执行 panic 保护 — 防止 web_search 等工具崩溃导致进程闪崩
 	defer func() {
 		if r := recover(); r != nil {
