@@ -248,6 +248,19 @@ func (b *Bridge) onCoreMessage(source, content string) {
 		return
 	}
 
+	// 关键对话事件推送到 SSE（pm_to_user 已在上面推送）
+	if b.pushSSEEvent != nil && !strings.HasPrefix(source, "status") {
+		sseSources := map[string]string{
+			"se_to_pm":  "se_message",
+			"pm_review": "review_result",
+			"ap_result": "ap_result",
+			"error":     "error",
+		}
+		if sseType, ok := sseSources[source]; ok {
+			b.pushSSEEvent(sseType, map[string]interface{}{"delta": content})
+		}
+	}
+
 	if b.onMessage != nil {
 		parts := strings.Split(source, "_to_")
 		from := parts[0]

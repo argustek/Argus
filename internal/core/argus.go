@@ -694,11 +694,42 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 	}
 
 	if len(actions) == 0 && !completed {
-		errMsg := "SE无法生成有效操作"
-		result.Error = fmt.Errorf("SE returned no valid actions after retries")
-		c.emit("se_to_pm", "@USR "+errMsg)
-		c.emit("pm_to_user", "@USR "+errMsg)
-		return result
+		// [v0.9.7] 路由到PM：让PM分析SE空action问题并决定下一步
+		if c.pmProcessor != nil {
+			c.emitStatus("review", "pm", "busy")
+			c.emit("pm_review", "@USR 🔄 PM正在分析SE空响应...")
+			pmCtx := fmt.Sprintf("⚠️ **SE执行出错** — SE无法生成有效操作。\n\n用户请求: %s\n\nSE最终响应: %s\n\n请分析原因并决定下一步：\n- 如果可修复→@SE给出修正方案\n- 如果需要用户输入→@USR提问\n- 如果无法完成→@USR说明原因",
+				userMsg, seResponse)
+			entries := c.memory.GetAll()
+			history := make([]ai.ChatMessage, 0, len(entries))
+			for _, e := range entries {
+				history = append(history, ai.ChatMessage{Role: mapRoleToStandard(e.Role), Content: e.Content})
+			}
+			pmResp, pmErr := c.pmProcessor.ProcessStream(pmCtx, history, func(delta string) {
+				trimmed := strings.TrimSpace(delta)
+				if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
+					return
+				}
+				c.emitChunk(delta)
+			})
+			if pmErr == nil && pmResp != nil {
+				c.memory.Add(RolePM, pmResp.Content)
+				if strings.Contains(pmResp.Content, "@SE") {
+					seResponse2, seErr2 := c.callAI(RoleSE, pmResp.Content, c.memory.FormatForPrompt())
+					if seErr2 == nil {
+						actions, completed = c.parseSEResponse(seResponse2)
+						actions = c.ensureExecAction(actions)
+					}
+				}
+			}
+		}
+		if len(actions) == 0 && !completed {
+			errMsg := "SE无法生成有效操作"
+			result.Error = fmt.Errorf("SE returned no valid actions after retries")
+			c.emit("se_to_pm", "@USR "+errMsg)
+			c.emit("pm_to_user", "@USR "+errMsg)
+			return result
+		}
 	}
 
 	// 执行操作
@@ -718,6 +749,46 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 				result.Error = fmt.Errorf("execution failed after %d attempts: %w", maxSelfFix, execErr)
 			} else {
 				result.Error = fmt.Errorf("SE execution incomplete after %d attempts: missing verification output", maxSelfFix)
+			}
+			// [v0.9.7] 路由到PM：让PM分析SE执行错误并决定下一步
+			if c.pmProcessor != nil {
+				c.emitStatus("review", "pm", "busy")
+				c.emit("pm_review", "@USR 🔄 PM正在分析SE执行错误...")
+				pmCtx := fmt.Sprintf("⚠️ **SE执行出错**，经%d次自动修复均失败。\n\n错误: %v\n\n执行的Actions: %v\n执行结果: %v\n\n用户请求: %s\n\n请分析原因并决定下一步：\n- 如果可修复→@SE给出修正方案重新执行\n- 如果需要用户输入→@USR提问\n- 如果无法完成→@USR说明原因",
+					maxSelfFix, result.Error, actions, execResults, userMsg)
+				entries := c.memory.GetAll()
+				history := make([]ai.ChatMessage, 0, len(entries))
+				for _, e := range entries {
+					history = append(history, ai.ChatMessage{Role: mapRoleToStandard(e.Role), Content: e.Content})
+				}
+				pmResp, pmErr := c.pmProcessor.ProcessStream(pmCtx, history, func(delta string) {
+					trimmed := strings.TrimSpace(delta)
+					if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
+						return
+					}
+					c.emitChunk(delta)
+				})
+				if pmErr == nil && pmResp != nil {
+					c.memory.Add(RolePM, pmResp.Content)
+					if strings.Contains(pmResp.Content, "@SE") {
+						// PM给了修正方案，再试一次
+						seResponse2, seErr2 := c.callAI(RoleSE, pmResp.Content, c.memory.FormatForPrompt())
+						if seErr2 == nil {
+							c.memory.Add(RoleSE, "SE PM-guided retry")
+							actions2, _ := c.parseSEResponse(seResponse2)
+							actions2 = c.ensureExecAction(actions2)
+							if len(actions2) > 0 {
+								execResults2, execErr2 := c.executeActions(actions2, "se")
+								if execErr2 == nil && c.seExecutionSatisfied(execResults2) {
+									execResults = execResults2
+									actions = actions2
+									result.Error = nil
+									selfAttempt = 0 // 重置让循环退出
+								}
+							}
+						}
+					}
+				}
 			}
 			break
 		}

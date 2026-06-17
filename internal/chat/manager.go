@@ -1668,24 +1668,14 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.emitStreamChunk("pm", delta)
 	}
 
-	// [v0.9.7] PM错误重试：AI调用失败时重试1次
-	maxPMRetries := 2
-	for pmAttempt := 0; pmAttempt < maxPMRetries; pmAttempt++ {
-		if isReviewScenario {
-			resp, err = m.pmProcessor.ProcessReview(content, pmHistory, pmStreamCallback)
-		} else {
-			resp, err = m.pmProcessor.ProcessStream(content, pmHistory, pmStreamCallback)
-		}
-		if err == nil {
-			break
-		}
-		if pmAttempt == 0 {
-			fmt.Printf("[handleToPM] 🔄 PM重试 #%d: %v\n", pmAttempt+1, err)
-			time.Sleep(2 * time.Second)
-		}
+	if isReviewScenario {
+		fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
+		resp, err = m.pmProcessor.ProcessReview(content, pmHistory, pmStreamCallback)
+	} else {
+		resp, err = m.pmProcessor.ProcessStream(content, pmHistory, pmStreamCallback)
 	}
 	if err != nil {
-		fmt.Printf("[handleToPM] PMProcessor调用失败(已重试): %v (isReview=%v)\n", err, isReviewScenario)
+		fmt.Printf("[handleToPM] PMProcessor调用失败: %v (isReview=%v)\n", err, isReviewScenario)
 	} else {
 		fmt.Printf("[handleToPM] PMProcessor调用成功，响应长度: %d (isReview=%v)\n", len(resp.Content), isReviewScenario)
 		hasAP := strings.Contains(strings.ToLower(resp.Content), "@ap")
@@ -3087,20 +3077,10 @@ Generate corrected actions JSON (use ONLY relative filenames):
 
 					errMsg := fmt.Sprintf(i18n.T("err.se_recover_failed"), err2, err)
 					m.addSEToPMMsg(errMsg)
-
-					// 路由到PM：让PM分析错误并决定下一步（自动修复失败）
-					pmRouteMsg := fmt.Sprintf("⚠️ SE执行出错且自动修复失败，请分析原因并决定下一步\n\n原始错误: %v\n自动修复失败: %v", err, err2)
-					m.addSEToPMMsg(pmRouteMsg)
-					routeErr := m.handleSEAskPM(pmRouteMsg)
-					if routeErr == nil {
-						return nil
-					}
-					fmt.Printf("[AUTO-FIX] ⚠️ PM路由也失败: %v\n", routeErr)
-
 					if m.onProjectStateChanged != nil {
 						m.onProjectStateChanged("error")
 					}
-					return fmt.Errorf("SE process failed after action error: %w, PM route error: %v", err2, routeErr)
+					return fmt.Errorf("SE process failed after action error: %w", err2)
 				}
 
 				// 添加SE回复到历史（自动加@PM）

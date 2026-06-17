@@ -1,7 +1,7 @@
 # Argus SSE 调试 & IDE 对话手册
 
-> 最后更新：2026-06-16
-> 适用版本：v0.9.6+（IDE 对话模式：v0.9.6+）
+> 最后更新：2026-06-17
+> 适用版本：v0.9.7+（v2 Bridge SSE 扩展 + `--send`）
 
 ---
 
@@ -62,14 +62,36 @@ Authorization: Bearer <token>
 
 ### 2.2 快速测试命令
 
+#### CLI 参数 `--send`（推荐，无需 HTTP 客户端）
+```powershell
+# 已运行 GUI 时，通过单例锁的二次实例发送消息
+& "E:\ArgusTek\Argus\build\bin\argus-desktop.exe" --send "写个Hello World"
+
+# 或者直接启动并发送（阻塞直到处理完成）
+./argus-desktop.exe --send "用Go写一个hello.go，输出Hello World，运行验证"
+
+# 查看 SSE 事件流（同时观察对话框变化）
+# 另开一个终端跑 SSE 订阅，同时在原终端发 --send
+```
+
+**注意：** `--send` 走 `app.SendMessage()` 路径，与 GUI 发消息完全一致。v2 Bridge 路径（`!= nil`）下走 `Bridge.Process()`，v1 路径（`bridge == nil`）下走 `ChatManager.ProcessMessage()`。
+
+#### 实时观察对话框（推荐配合 `--send` 使用）
+SSE 设计的核心目的是**实时观察对话框内容**，无需读 `conversation.log`：
+
+```powershell
+# 终端1：启动应用 + 发送消息
+& "E:\ArgusTek\Argus\build\bin\argus-desktop.exe" --send "写个Hello World"
+
+# 终端2：通过 SSE 实时观察 PM/SE/AP 的完整对话流
+curl.exe -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Content-Type: application/json" `
+  -d "{\"message\": \"观察中\"}"
+# 会收到：pm_message → se_message → review_result → ap_result → done
+```
+
 #### PowerShell（推荐 Windows）
 ```powershell
-# 基本测试
-$headers = @{ "Authorization" = "Bearer your-token" }
-$body = '{"message": "你好"}'
-Invoke-RestMethod -Uri "http://localhost:8080/api/v1/sse/subscribe" `
-  -Method POST -Headers $headers -Body $body -ContentType "application/json"
-
 # 流式查看原始数据（推荐调试用）
 curl.exe -N -X POST http://localhost:8080/api/v1/sse/subscribe `
   -H "Authorization: Bearer your-token" `
@@ -98,19 +120,26 @@ curl -N --max-time 130 -X POST http://localhost:8080/api/v1/sse/subscribe \
 | 事件类型 | 触发位置 | 数据示例 | 说明 |
 |---------|---------|---------|------|
 | **connected** | [http_server.go](file:///E:/Argus/argus-desktop/http_server.go) | `{"session_id":"sse-...","source":"IDE-A"}` | 连接建立（含 session_id） |
-| **pm_started** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{}` | PM 开始处理 |
-| **pm_message** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"delta":"..."}` | PM 输出内容片段 |
+| **pm_started** | [manager.go / argus.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{}` | PM 开始处理 |
+| **pm_message** | [manager.go / bridge.go:onCoreMessage](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"delta":"..."}` | PM 输出内容片段（v2 Bridge 路径同样推送） |
+| **se_message** | [bridge.go:onCoreMessage](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"delta":"..."}` | **v0.9.7+** SE 输出内容（se_to_pm），SE 执行结果/错误 |
+| **review_result** | [bridge.go:onCoreMessage](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"delta":"..."}` | **v0.9.7+** PM 审核结果（pm_review），批准/驳回 |
+| **ap_result** | [bridge.go:onCoreMessage](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"delta":"..."}` | **v0.9.7+** AP 审批结果（ap_result） |
+| **error** | [manager.go / bridge.go:onCoreMessage](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"error":"...","stage":"pm\|se\|system"}` | 出错（v2 Bridge 路径同样推送） |
 | **se_task_assigned** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"task":"...","steps":3}` | PM 分配任务给 SE |
-| **se_action** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"action":"write_file","path":"..."}` | SE 执行动作 |
-| **se_output** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"output":"...","exit_code":0}` | 命令执行输出 |
-| **se_completed** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"result":"..."}` | SE 任务完成 |
+| **se_action** | [manager.go / argus.go:emitAction](file:///E:/Argus/argus-desktop/internal/core/argus.go) | `{"action":"write_file","path":"..."}` | SE 执行动作 |
+| **se_output** | [manager.go / argus.go:executeActions](file:///E:/Argus/argus-desktop/internal/core/argus.go) | `{"output":"...","exit_code":0}` | 命令执行输出 |
+| **se_completed** | [manager.go / argus.go](file:///E:/Argus/argus-desktop/internal/core/argus.go) | `{"result":"..."}` | SE 任务完成 |
+| **project_level** | [bridge.go:Process](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"level":"short-process\|normal-process\|full-process"}` | **v0.9.7+** 项目级别推送 |
+| **project_state** | [bridge.go:SetOnProjectStateChange](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"state":"running\|done\|error\|idle"}` | **v0.9.7+** 项目状态变更 |
 | **ide_message** | [manager.go:setupIDEMessageEmitter](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"from":"PM","message":"...","action":"discuss","message_id":"ide_msg_..."}` | **仅IDE模式** PM 通过 ide_send 发给 IDE |
-| **ide_status** | [manager.go:onChange](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"ides":["IDE-A","VSCode"]}` | **前端消息总线** IDE 连接/断开时推送动态列表，谁连上显示谁 |
-| **done** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"status":"completed\|cancelled"}` | 全流程结束 |
-| **error** | [manager.go](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"error":"...","stage":"pm\|se\|system"}` | 出错 |
+| **ide_status** | [manager.go:onChange](file:///E:/Argus/argus-desktop/internal/chat/manager.go) | `{"ides":["IDE-A","VSCode"]}` | **前端消息总线** IDE 连接/断开时推送动态列表 |
+| **done** | [manager.go / bridge.go:Process](file:///E:/Argus/argus-desktop/internal/chat/bridge.go) | `{"status":"completed\|cancelled"}` | 全流程结束 |
 | **heartbeat** | [sse_bridge.go](file:///E:/Argus/argus-desktop/internal/chat/sse_bridge.go) | `{"pm_status":"idle","se_status":"idle"}` | 每10秒心跳保活 |
 
 ### 完整事件流示例
+
+#### v1 路径（manager.go，`bridge == nil`）
 
 ```
 : connected                          ← 连接建立确认
@@ -142,6 +171,33 @@ data: {"delta":"✅ 已完成，程序输出正确"}
 event: done                         ← 全部完成
 data: {"status":"completed"}
 ```
+
+#### v2 Bridge 路径（bridge.go + argus.go，`bridge != nil`，v0.9.7+ 默认）
+
+```
+: connected                          ← 连接建立确认
+
+event: pm_message                   ← PM 输出分析/直执结果（Featherweight 模式）
+data: {"delta":"✅ hello.go 已创建，运行输出 Hello World"}
+
+event: se_message                   ← SE 执行结果（非 Featherweight 时）
+data: {"delta":"✅ exec 'go run hello.go'\nHello World"}
+
+event: review_result                ← PM 审核结果
+data: {"delta":"@USR 📋 PM Code Review ✅ APPROVED"}
+
+event: ap_result                    ← AP 审批结果
+data: {"delta":"@USR 🔒 AP Approval ✅ PASSED"}
+
+event: done                         ← 全部完成
+data: {"status":"completed"}
+```
+
+**v2 Bridge 路径特点：**
+- 不走 `se_task_assigned`/`se_action`/`se_output`/`se_completed` SSE 事件（这些走 MessageBus → 前端 `EventsOn`）
+- 改用 `se_message` 一次性包含 SE 执行结果
+- 新增 `review_result`（PM 审核）和 `ap_result`（AP 审批）事件
+- 错误时推送 `error` 事件，随后 PM 通过 `review_result` 介入分析
 
 ---
 
@@ -393,7 +449,9 @@ data: {"error":"timeout"}
 
 ## 七、调试技巧
 
-### 6.1 开启详细日志
+> 核心原则：**SSE 优先，log 兜底**。SSE 事件包含完整的对话流（pm_message/se_message/review_result/ap_result/error），实时可见，无需读文件。只有当 SSE 连接不可用（如进程未启动）或需要查历史时才回退到 conversation.log。
+
+### 7.1 开启详细日志
 
 程序启动后，以下关键字出现在 stdout 即表示 SSE 工作正常：
 
@@ -405,7 +463,7 @@ data: {"error":"timeout"}
 [SSEBridge] 订阅者 sse-xxx 已断开 (活跃连接: 0)      ← 正常断开
 ```
 
-### 6.2 用 curl 做最简测试
+### 7.2 用 curl 做最简测试
 
 ```bash
 # 最小可用命令（无需 token 时）
@@ -418,7 +476,50 @@ curl -N -X POST http://localhost:8080/api/v1/sse/subscribe \
   -d '{"message":"hi"}'
 ```
 
-### 6.3 测试单连接限制
+### 7.3 用 `--send` + SSE 做闭环测试
+
+```powershell
+# 1. 启动应用（带 GUI）
+./argus-desktop.exe
+
+# 2. 另一个终端：SSE 订阅观察完整对话流
+curl.exe -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Content-Type: application/json" `
+  -d "{\"message\": \"观察中\"}"
+# 收到: connected → (等 --send 触发) → pm_message → se_message/error → review_result → ap_result → done
+
+# 3. 第三个终端：发送测试消息
+& "E:\ArgusTek\Argus\build\bin\argus-desktop.exe" --send "写一个hello.go，故意写一个语法错误"
+# 观察 SSE 输出：应该看到 error 事件后 PM 介入（review_result）再尝试修复
+
+# 4. 如果 SSE 连接被 GUI 占用（无 source 参数的单连接限制）
+#    → 使用 IDE 模式（加 source 参数）
+curl.exe -N -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Content-Type: application/json" `
+  -d "{\"message\": \"test\", \"source\": \"TestCLI\"}"
+# IDE 模式允许多连接并发
+```
+
+### 7.4 conversation.log 回退方案
+
+SSE 是实时观察的首选方式，但如果不需要实时流，或需要回顾历史：
+
+```powershell
+# conversation.log 包含完整的对话记录（包括 SSE 事件写入）
+Get-Content "E:\ArgusTek\Argus\logs\conversation.log" -Tail 100 -Encoding UTF8
+
+# debug_events.log 包含详细的系统事件时间线
+Get-Content "E:\ArgusTek\Argus\config\debug_events.log" -Tail 50 -Encoding UTF8
+```
+
+**SSE vs conversation.log：**
+| 维度 | SSE | conversation.log |
+|------|-----|-----------------|
+| 实时性 | 实时流推送 | 事后查看 |
+| 内容 | 对话内容 + 关键事件（v0.9.7+ 含 se_message/review_result/ap_result） | 完整历史（含 debug 级别日志） |
+| 使用场景 | 调试工具自动观察、IDE 对话 | 人工回溯、问题排查 |
+
+### 7.5 测试单连接限制
 
 ```bash
 # 终端1：先占住连接
@@ -429,7 +530,7 @@ curl -X POST http://localhost:8080/api/v1/sse/subscribe -d '{"message":"test2"}'
 # → {"status":"error","error":"已有一个活跃的SSE连接，请稍后重试"}
 ```
 
-### 6.4 测试单元测试
+### 7.6 单元测试
 
 ```bash
 go test ./internal/chat/ -run TestSSE -v
