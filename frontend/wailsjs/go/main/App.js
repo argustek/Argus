@@ -490,10 +490,6 @@ export function SaveVersion(arg1) {
   return window['go']['main']['App']['SaveVersion'](arg1);
 }
 
-export function SendCLI(arg1) {
-  return window['go']['main']['App']['SendCLI'](arg1);
-}
-
 export function SendMessage(arg1) {
   return window['go']['main']['App']['SendMessage'](arg1);
 }

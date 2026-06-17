@@ -250,8 +250,6 @@ export function SaveFile(arg1:string,arg2:string):Promise<string>;
 
 export function SaveVersion(arg1:string):Promise<void>;
 
-export function SendCLI(arg1:string):Promise<void>;
-
 export function SendMessage(arg1:string):Promise<void>;
 
 export function SetGitCredentials(arg1:string,arg2:string):Promise<void>;
