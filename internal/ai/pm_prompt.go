@@ -542,8 +542,6 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		}
 
 		msg := resp.Choices[0].Message
-		// [v0.9.6] 不累积LLM叙事文本（可能含编造内容），只靠工具结果展示
-
 		// [v0.8.4] 没有工具调用 → 判断是否应结束
 		// 如果之前已经有 ToolCalls 执行过，说明任务已完成，直接结束
 		// 如果从未有过 ToolCalls，可能 LLM 在纯文本回复，提醒一次
@@ -565,6 +563,14 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_exec"})
 				userInput = nagMsg
 				continue
+			}
+			// [v0.9.6] 从未调用工具 → 这是纯文本回复（非编造），累积到 finalContent
+			if !hasToolCalls && msg.Content != "" {
+				if finalContent != "" {
+					finalContent += "\n" + msg.Content
+				} else {
+					finalContent = msg.Content
+				}
 			}
 			// 已有 ToolCalls（任务已执行）或已提醒过 → 结束
 			break

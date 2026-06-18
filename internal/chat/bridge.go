@@ -236,16 +236,17 @@ func (b *Bridge) onCoreMessage(source, content string) {
 	}
 
 	// pm_to_user 走 MessageBus（conversation.log 由 Ack 统一写）+ SSE 推送
+	// [v0.9.6] 不再 return，继续走到 b.onMessage → app.go → EventsEmit('new-message') 更新对话框
+	msgContent := content
 	if source == "pm_to_user" && b.msgBus != nil && b.ctx != nil {
-		displayContent := strings.ReplaceAll(content, "⚡", "")
-		msgId := b.msgBus.Send("pm", displayContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": displayContent})
+		msgContent = strings.ReplaceAll(content, "⚡", "")
+		msgId := b.msgBus.Send("pm", msgContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": msgContent})
 		if b.pushSSEEvent != nil {
-			b.pushSSEEvent("pm_message", map[string]interface{}{"delta": displayContent})
+			b.pushSSEEvent("pm_message", map[string]interface{}{"delta": msgContent})
 		}
 		if b.writeDebugLog != nil {
-			b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] msgBus.Send returned msgId=%s displayContent=%q", msgId, displayContent))
+			b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] msgBus.Send returned msgId=%s displayContent=%q", msgId, msgContent))
 		}
-		return
 	}
 
 	// 关键对话事件推送到 SSE（pm_to_user 已在上面推送）
@@ -272,7 +273,7 @@ func (b *Bridge) onCoreMessage(source, content string) {
 			From:      from,
 			To:        to,
 			Role:      b.roleFromSource(source),
-			Content:   content,
+			Content:   msgContent,
 			Timestamp: time.Now(),
 		})
 	}
