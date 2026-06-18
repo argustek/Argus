@@ -195,36 +195,6 @@ func needsExecution(request string) bool {
 	return false
 }
 
-// knownToolPrefixes 已知工具的 ✅ 前缀列表，用于提取实际工具执行结果
-var knownToolPrefixes = []string{
-	"✅ exec", "✅ write_file", "✅ read_file", "✅ edit_file", "✅ delete_file",
-	"✅ list_files", "✅ read_pdf", "✅ read_docx", "✅ write_docx", "✅ compare_docs",
-	"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ complete_task",
-	"❌ exec", "❌ write_file", "❌ read_file", "❌ edit_file", "❌ delete_file",
-}
-
-// [v0.9.6] 从内容中提取实际工具执行结果，移除LLM编造的声明
-func extractToolResultsOnly(content string) string {
-	if content == "" {
-		return ""
-	}
-	lines := strings.Split(content, "\n")
-	var result []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		for _, prefix := range knownToolPrefixes {
-			if strings.HasPrefix(trimmed, prefix) {
-				result = append(result, trimmed)
-				break
-			}
-		}
-	}
-	return strings.Join(result, "\n")
-}
-
 // PMTools PM可用的工具列表
 var PMTools = []Tool{
 	{
@@ -557,6 +527,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	var execCalled bool          // [v0.9.6] 记录是否调用了exec工具
 	originalRequest := userInput // [v0.9.6] 保存原始用户请求
 	toolNagCount := 0            // [v0.8.4] 记录连续ToolCalls=0次数
+	execNagCount := 0            // [v0.9.6] 记录exec nag已提醒次数
 
 	for round := 0; round < maxToolRounds; round++ {
 		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
@@ -571,14 +542,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		}
 
 		msg := resp.Choices[0].Message
-		// 累积所有轮次的内容（工具轮 + 最终文本轮），避免 @SE 被后续工具轮覆盖
-		if msg.Content != "" {
-			if finalContent != "" && !strings.Contains(finalContent, msg.Content) {
-				finalContent += "\n" + msg.Content
-			} else if finalContent == "" {
-				finalContent += msg.Content
-			}
-		}
+		// [v0.9.6] 不累积LLM叙事文本（可能含编造内容），只靠工具结果展示
 
 		// [v0.8.4] 没有工具调用 → 判断是否应结束
 		// 如果之前已经有 ToolCalls 执行过，说明任务已完成，直接结束
@@ -593,8 +557,9 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 				userInput = "[请分析是否需要调用工具执行任务]"
 				continue
 			}
-			// [v0.9.6] 如果之前调用了工具但从未调用exec，而原始请求需要执行，则强制提醒
-			if hasToolCalls && !execCalled && needsExecution(originalRequest) {
+			// [v0.9.6] 如果之前调用了工具但从未调用exec，而原始请求需要执行，则强制提醒（最多1次）
+			if hasToolCalls && !execCalled && needsExecution(originalRequest) && execNagCount == 0 {
+				execNagCount++
 				nagMsg := "[系统提示] ⚠️ 用户请求可能需要执行命令（运行/编译/测试等），但你尚未调用 exec 工具。请调用 exec 来实际运行必要的命令，不要仅靠文本描述结果。"
 				aiHistory = append(aiHistory, msg)
 				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_exec"})
@@ -687,11 +652,6 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		continuePrompt := "[工具结果已返回。如果还需要执行操作（运行/编译/测试/删除等），请继续调用对应工具完成。不得在文本中编造工具执行结果——你说调了就是调了，没调就是没调。仅在所有必要的工具都实际执行完毕后，才回复用户。]"
 		userInput = continuePrompt
 		aiHistory = append(aiHistory, Message{Role: "user", Content: continuePrompt})
-	}
-
-	// [v0.9.6] 如果从未调用exec但finalContent中有exec声明，移除编造内容、只保留实际工具结果
-	if !execCalled {
-		finalContent = extractToolResultsOnly(finalContent)
 	}
 
 	p.extractAndUpdateState(finalContent)

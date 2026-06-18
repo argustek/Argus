@@ -2196,19 +2196,20 @@ Requirements:
 		execText := strings.Join(execResults, "\n")
 		hasExecResult := strings.Contains(execText, "✅ exec") || strings.Contains(execText, "❌ exec")
 		if hasExecResult {
-			// exec已实际执行，直接使用工具结果
 			c.memory.Add(RolePM, execText)
+			c.emit("pm_to_user", "@USR "+execText)
 		} else if !originalHasExec && !hasExecResult {
-			// LLM未要求exec，工具结果中也没有exec → 正常汇报
 			cleanSummary := c.extractCleanSummary(displayContent)
 			if cleanSummary != "" {
 				c.memory.Add(RolePM, cleanSummary+"\n"+execText)
+				c.emit("pm_to_user", "@USR "+cleanSummary)
 			} else {
 				c.memory.Add(RolePM, execText)
+				c.emit("pm_to_user", "@USR "+execText)
 			}
 		} else {
-			// LLM未调用exec，工具结果中也没有exec → 可能编造了exec声明，只保留实际工具结果
 			c.memory.Add(RolePM, execText)
+			c.emit("pm_to_user", "@USR "+execText)
 		}
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)
