@@ -2,7 +2,7 @@
   <div class="file-tree-panel">
     <div class="panel-header">
       <span class="address-bar" :title="workDir">{{ workDir || '未设置工作目录' }}</span>
-      <button class="refresh-btn" @click.stop="refresh" :title="'刷新'">↻</button>
+      <button class="refresh-btn" @click.stop="refresh(true)" :title="'刷新'">↻</button>
     </div>
     <div class="tree-body">
       <div v-if="loading" class="loading">加载中...</div>

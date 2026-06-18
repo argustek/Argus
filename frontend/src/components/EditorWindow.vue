@@ -150,7 +150,14 @@ function initMonacoEditor() {
     fontSize: 14,
     fontFamily: "'Consolas', 'Monaco', 'Courier New', monospace",
     lineNumbers: 'on',
-    minimap: { enabled: true },
+    // [FIX] minimap 默认值: size='proportional'(按比例缩小,小窗口显小), scale=1, renderCharacters=true(文字模式)
+    // 上一版/默认: minimap: { enabled: true }
+    minimap: {
+      enabled: true,
+      size: 'fill',             // fill=填满编辑区高度 (默认 proportional 按比例缩小)
+      scale: 2,                 // 放大缩略图内容 (默认 1)
+      renderCharacters: false   // 色块模式更清晰 (默认 true 文字模式)
+    },
     scrollBeyondLastLine: false,
     wordWrap: 'on',
     tabSize: 2,

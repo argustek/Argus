@@ -9,9 +9,9 @@
       <div class="file-tree">
         <FileTreeItem 
           v-for="item in files" 
-          :key="item.name"
+          :key="item.name + item.path"
           :item="item"
-          @select="$emit('file-select', $event)"
+          @select="(e: any) => emit('file-select', e)"
         />
       </div>
     </div>
@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import FileTreeItem from './FileTreeItem.vue'
 
@@ -81,17 +81,67 @@ const { t } = useI18n()
 
 const props = defineProps<{
   panel: string
-  files: any[]
 }>()
 
-defineEmits(['file-select', 'ai-command'])
+const emit = defineEmits(['file-select', 'ai-command'])
 
 const searchQuery = ref('')
 const searchResults = ref<string[]>([])
+const files = ref<any[]>([])
+const fileLoading = ref(false)
 
-function refreshFiles() {
-  // refresh file list
+async function refreshFiles() {
+  fileLoading.value = true
+  try {
+    // @ts-ignore Wails binding
+    const raw: any[] = await window.go.main.App.ListFiles()
+    files.value = buildTree(raw || [])
+  } catch (e) {
+    console.error('[LeftPanel] refresh error:', e)
+    files.value = []
+  } finally {
+    fileLoading.value = false
+  }
 }
+
+// 扁平列表 → 树形结构
+function buildTree(fileList: any[]): any[] {
+  const root: Record<string, any> = {}
+  const sorted = [...fileList].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+    return a.path.localeCompare(b.path)
+  })
+  for (const f of sorted) {
+    const parts = f.path.replace(/\\/g, '/').split('/')
+    let current = root
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i]
+      if (!current[part]) current[part] = { name: part, type: 'folder', path: parts.slice(0, i + 1).join('/'), children: {} }
+      current = current[part].children
+    }
+    const leaf = parts[parts.length - 1]
+    current[leaf] = {
+      name: f.name,
+      type: f.isDir ? 'folder' : 'file',
+      path: f.path,
+      size: f.size,
+      modTime: f.modTime,
+      children: f.isDir ? {} : undefined,
+    }
+  }
+  function objToArray(obj: Record<string, any>): any[] {
+    if (!obj) return []
+    return Object.values(obj).map((node: any) => ({
+      ...node,
+      children: node.children ? objToArray(node.children) : undefined,
+    }))
+  }
+  return objToArray(root)
+}
+
+onMounted(() => {
+  refreshFiles()
+})
 </script>
 
 <style scoped>

@@ -440,7 +440,8 @@ onMounted(async () => {
     if (raw?._msgId) ackMessage(raw._msgId)
   })
   // 全局 ACK terminal:output — TerminalWindow 关闭后 ACK 常驻，防止 message_lost
-  EventsOff('terminal:output')
+  // ⚠️ NO EventsOff here! Child component (TerminalWindow) onMounted runs before parent App.vue,
+  // so EventsOff would remove TerminalWindow's handleOutput handler, causing terminal to go silent.
   EventsOn('terminal:output', (raw: any) => {
     if (raw?._msgId) ackMessage(raw._msgId)
   })
