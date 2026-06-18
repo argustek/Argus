@@ -2012,9 +2012,15 @@ Requirements:
 	result.Actions = actions
 
 	// [v0.8.2] 自动补 exec：LLM只写了代码没运行，根据文件类型自动执行（不消耗LLM调用）
+	originalHasExec := false
+	for _, a := range actions {
+		if a.Type == "exec" {
+			originalHasExec = true
+			break
+		}
+	}
 	if execErr == nil {
 		hasWriteFile := false
-		hasExec := false
 		var lastPath string
 		for _, a := range actions {
 			if a.Type == "write_file" || a.Type == "edit_file" {
@@ -2023,11 +2029,8 @@ Requirements:
 					lastPath = a.Path
 				}
 			}
-			if a.Type == "exec" {
-				hasExec = true
-			}
 		}
-		if hasWriteFile && !hasExec && lastPath != "" {
+		if hasWriteFile && !originalHasExec && lastPath != "" {
 			cmd := inferExecCommand(lastPath)
 			if cmd != "" {
 				ta := time.Now()
@@ -2189,11 +2192,23 @@ Requirements:
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", execErr))
 		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", execErr))
 	} else if len(execResults) > 0 {
-		cleanSummary := c.extractCleanSummary(displayContent)
-		if cleanSummary != "" {
-			c.memory.Add(RolePM, cleanSummary+"\n"+strings.Join(execResults, "\n"))
+		// [v0.9.6] 优先使用实际执行结果而非LLM编造文本
+		execText := strings.Join(execResults, "\n")
+		hasExecResult := strings.Contains(execText, "✅ exec") || strings.Contains(execText, "❌ exec")
+		if hasExecResult {
+			// exec已实际执行，直接使用工具结果
+			c.memory.Add(RolePM, execText)
+		} else if !originalHasExec && !hasExecResult {
+			// LLM未要求exec，工具结果中也没有exec → 正常汇报
+			cleanSummary := c.extractCleanSummary(displayContent)
+			if cleanSummary != "" {
+				c.memory.Add(RolePM, cleanSummary+"\n"+execText)
+			} else {
+				c.memory.Add(RolePM, execText)
+			}
 		} else {
-			c.memory.Add(RolePM, strings.Join(execResults, "\n"))
+			// LLM未调用exec，工具结果中也没有exec → 可能编造了exec声明，只保留实际工具结果
+			c.memory.Add(RolePM, execText)
 		}
 	} else if len(strings.TrimSpace(displayContent)) > 0 {
 		cleanSummary := c.extractCleanSummary(displayContent)

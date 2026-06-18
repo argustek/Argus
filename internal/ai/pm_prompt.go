@@ -195,6 +195,36 @@ func needsExecution(request string) bool {
 	return false
 }
 
+// knownToolPrefixes 已知工具的 ✅ 前缀列表，用于提取实际工具执行结果
+var knownToolPrefixes = []string{
+	"✅ exec", "✅ write_file", "✅ read_file", "✅ edit_file", "✅ delete_file",
+	"✅ list_files", "✅ read_pdf", "✅ read_docx", "✅ write_docx", "✅ compare_docs",
+	"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ complete_task",
+	"❌ exec", "❌ write_file", "❌ read_file", "❌ edit_file", "❌ delete_file",
+}
+
+// [v0.9.6] 从内容中提取实际工具执行结果，移除LLM编造的声明
+func extractToolResultsOnly(content string) string {
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	var result []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		for _, prefix := range knownToolPrefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				result = append(result, trimmed)
+				break
+			}
+		}
+	}
+	return strings.Join(result, "\n")
+}
+
 // PMTools PM可用的工具列表
 var PMTools = []Tool{
 	{
@@ -657,6 +687,11 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		continuePrompt := "[工具结果已返回。如果还需要执行操作（运行/编译/测试/删除等），请继续调用对应工具完成。不得在文本中编造工具执行结果——你说调了就是调了，没调就是没调。仅在所有必要的工具都实际执行完毕后，才回复用户。]"
 		userInput = continuePrompt
 		aiHistory = append(aiHistory, Message{Role: "user", Content: continuePrompt})
+	}
+
+	// [v0.9.6] 如果从未调用exec但finalContent中有exec声明，移除编造内容、只保留实际工具结果
+	if !execCalled {
+		finalContent = extractToolResultsOnly(finalContent)
 	}
 
 	p.extractAndUpdateState(finalContent)
