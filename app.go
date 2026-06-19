@@ -714,13 +714,13 @@ func (a *App) initChatManager() {
 			if a.chatManager.GetMessageBus() != nil {
 				a.chatManager.GetMessageBus().SetContext(a.ctx)
 				a.chatManager.GetMessageBus().SetDebugLogWriter(a.chatManager.WriteDebugLog) // [v0.7.2] 对话框与log一致
-			a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
-			a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
-			a.bridge.SetPushSSEEvent(func(eventType string, data interface{}) {
-				if a.chatManager != nil {
-					a.chatManager.PushSSEEvent(eventType, data)
-				}
-			})
+				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
+				a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
+				a.bridge.SetPushSSEEvent(func(eventType string, data interface{}) {
+					if a.chatManager != nil {
+						a.chatManager.PushSSEEvent(eventType, data)
+					}
+				})
 				// [v0.7.2] 注入 ContextWindow 到 Bridge（真正的消息处理入口）
 				if a.contextWindow != nil {
 					a.bridge.SetContextWindow(a.contextWindow)
@@ -753,6 +753,10 @@ func (a *App) initChatManager() {
 				a.chatManager.GetMessageBus().SetOnStateChange(func(state core.RoleState) {
 					a.emitToFrontend("role-state", state, "MessageBus:State", chat.PathStatus)
 				})
+				// [FIX-v1.0.22] 绑定 IDE 消息推送回调到 Bridge 的 PMProcessor（Bridge 独立创建的实例）
+				if bridgePM := a.bridge.GetPMProcessor(); bridgePM != nil {
+					a.chatManager.SetupIDEMessageEmitterFor(bridgePM)
+				}
 			}
 
 			a.bridge.SetOnMessage(func(msg *chat.Message) {
@@ -785,7 +789,7 @@ func (a *App) initChatManager() {
 
 				switch msg.Role {
 				case "pm":
-					a.emitToFrontend("pm_message", map[string]interface{}{"delta": msg.Content}, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathPMToUser)
+					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathPMToUser)
 				case "se":
 					a.emitToFrontend("new-message", chatMsg, fmt.Sprintf("Bridge:%s", msg.Role), chat.PathSEToUser)
 				case "ap":
@@ -3465,8 +3469,8 @@ func (a *App) SendMessage(content string) error {
 		}
 
 		a.addLog("【SendMessage】准备处理消息（V2 ArgusCore）")
-a.aiThinking = true
-a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathSystem)
+		a.aiThinking = true
+		a.emitToFrontend("ai-thinking", true, "SendMessage:Start", chat.PathSystem)
 
 		a.msgIDCounter++
 		userMsg := a.newChatMessage("user", content)

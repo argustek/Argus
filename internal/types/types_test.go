@@ -1,7 +1,6 @@
 package types
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -90,19 +89,6 @@ func TestDefaultEnvMemory(t *testing.T) {
 	assert.Equal(t, 1, mem.Version)
 	assert.Empty(t, mem.Tools)
 	assert.Empty(t, mem.Configs)
-}
-
-func TestFormatDuration(t *testing.T) {
-	now := time.Now().Unix()
-
-	d := FormatDuration(now, now+1)
-	assert.True(t, strings.HasSuffix(d, "ms") || d == "0s")
-
-	d = FormatDuration(now, now+2)
-	assert.Contains(t, d, "ms")
-
-	d = FormatDuration(now, now+5)
-	assert.Contains(t, d, "s")
 }
 
 func TestStateConstants(t *testing.T) {

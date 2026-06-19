@@ -56,201 +56,79 @@
         :class="['message', msg.role, { 'search-highlight': isSearchMatch(index), streaming: (msg as any)._streaming }]"
         @contextmenu.prevent="showContextMenu($event, msg, index)"
       >
-        <!-- 时间戳 -->
         <div class="msg-timestamp" :title="formatFullTime(msg.timestamp)">
           {{ formatTime(msg.timestamp) }}
         </div>
 
-        <!-- 用户消息 -->
+        <!-- user -->
         <template v-if="msg.role === 'user'">
           <div class="message-header">
             <span class="role-badge usr">USR</span>
           </div>
-          <div class="message-content user-content">
-            {{ msg.raw || msg.content }}
-          </div>
+          <div class="message-content user-content">{{ msg.raw || msg.content }}</div>
           <div class="message-actions-bar">
-            <button class="action-icon-btn" @click="copyMessage(msg.raw || msg.content)" :title="t('chatPanel.copyMessage') + ' (Ctrl+C)'">📋</button>
-            <button class="action-icon-btn" @click="quoteMessage(msg.raw || msg.content, index)" :title="t('chatPanel.quoteMessage')">💬</button>
+            <button class="action-icon-btn" @click="copyMessage(msg.raw || msg.content)" title="📋">📋</button>
+            <button class="action-icon-btn" @click="quoteMessage(msg.raw || msg.content, index)" title="💬">💬</button>
           </div>
         </template>
 
-        <!-- MC / C监控消息 -->
+        <!-- mc -->
         <template v-else-if="msg.role === 'mc' || msg.role?.startsWith('Sys_')">
           <div class="message-header">
             <span class="role-badge mc">{{ msg.role === 'mc' ? 'Argus-MC' : 'SYS' }}</span>
           </div>
-          <div class="message-content mc-content">
-            {{ msg.content }}
-          </div>
+          <div class="message-content mc-content">{{ msg.content }}</div>
         </template>
 
-        <!-- PM 消息 - 结构化渲染 -->
-        <template v-else-if="msg.role === 'pm'">
+        <!-- PM / SE / AP — unified text block -->
+        <template v-else-if="['pm','se','ap'].includes(msg.role || '')">
           <div class="message-header">
-            <span class="role-badge pm">PM</span>
-            <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
-            <span v-if="(msg as any)._execData" class="action-count">{{ (msg as any)._execData?.actions?.length || 0 }}/{{ (msg as any)._execData?.totalActions || 0 }} 操作</span>
-            <span v-if="(msg as any)._streaming" class="status-tag running">🔄 执行中...</span>
-            <span v-else-if="(msg as any)._execData" class="status-tag success">✅ 完成</span>
+            <span class="role-badge" :class="msg.role">{{ msg.role.toUpperCase() }}</span>
+            <span v-if="(msg as any)._streaming" class="status-tag running">🔄</span>
           </div>
-          <div class="message-content pm-content structured-msg">
-            <!-- 三层模型 RichMessage -->
-            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
-            <!-- exec 执行卡片 -->
-            <div v-else-if="(msg as any)._execData" class="se-exec-panel">
-              <div class="se-steps">
-                <div v-for="step in (msg as any)._execData?.actions" :key="step.index" class="se-step" :class="step.status">
-                  <span class="step-icon">{{ step.status === 'done' ? '✅' : step.status === 'running' ? '🔄' : step.status === 'error' ? '❌' : '🚫' }}</span>
-                  <span class="step-label">{{ step.label }}</span>
-                  <span v-if="step.error" class="step-error">{{ step.error }}</span>
+          <div class="message-content ai-content">
+            <div class="msg-body-text">{{ msg.content }}</div>
+            <!-- sections -->
+            <div v-if="(msg as any).sections?.length" class="msg-sections">
+              <div
+                v-for="(sec, si) in (msg as any).sections"
+                :key="si"
+                class="msg-section"
+                :class="sec.type"
+              >
+                <div class="section-header" @click="toggleSection(index, si)">
+                  <span class="section-toggle">{{ sectionCollapsed(index, si) ? '▶' : '▼' }}</span>
+                  <span class="section-label">{{ sec.label || sec.type }}</span>
                 </div>
-              </div>
-              <div v-if="(msg as any)._execData?.outputs?.length" class="se-terminal" :class="{ expanded: expandedMessages.has(index) }">
-                <div class="terminal-header" @click="toggleExpand(index)">
-                  <span>🖥️ 终端输出 ({{ (msg as any)._execData.outputs.length }})</span>
-                  <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
-                </div>
-                <div v-show="expandedMessages.has(index)" class="terminal-body">
-                  <pre v-for="(out, oi) in (msg as any)._execData.outputs" :key="oi" class="terminal-output"><code><span v-if="out.command" class="cmd-prompt">$ {{ out.command }}</span>{{ out.output }}</code></pre>
+                <div v-show="!sectionCollapsed(index, si)" class="section-body">
+                  <pre v-if="sec.type === 'terminal'" class="terminal-output">{{ sec.content }}</pre>
+                  <div v-else class="section-text">{{ sec.content }}</div>
                 </div>
               </div>
             </div>
-            <div v-else>
-              <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
-                <span class="summary-text">{{ getSummary(msg) }}</span>
-                <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
-              </div>
-              <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
-              <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
-                {{ getPreviewText(msg) }}
-              </div>
-            </div>
+          </div>
+          <div class="message-actions-bar">
+            <button class="action-icon-btn" @click="copyMessage(msg.content)" title="📋">📋</button>
+            <button class="action-icon-btn" @click="quoteMessage(msg.content, index)" title="💬">💬</button>
           </div>
         </template>
 
-        <!-- SE 消息 - 操作卡片 -->
-        <template v-else-if="msg.role === 'se'">
-          <div class="message-header">
-            <span class="role-badge se">SE</span>
-            <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
-            <span v-if="getSEActionCount(msg)" class="action-count">{{ getSEActionCount(msg) }} 个操作</span>
-          </div>
-          <div class="message-content se-content structured-msg">
-            <SERichMessage
-              v-if="getSEActions(msg)"
-              :message="msg"
-              :actions="getSEActions(msg)"
-              :shellOutput="getSEShellOutput(msg)"
-              @open-file-in-editor="onOpenFileInEditor"
-              @run-in-terminal="onRunInTerminal"
-            />
-            <RichMessage v-else-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
-            <div v-else class="se-plain" v-html="renderSEText(msg)"></div>
-          </div>
-        </template>
-
-        <!-- AP 消息 - 审批者 -->
-        <template v-else-if="msg.role === 'ap'">
-          <div class="message-header">
-            <span class="role-badge ap">AP</span>
-            <span v-if="getMsgStatus(msg)" class="status-tag" :class="getMsgStatus(msg).type">{{ getMsgStatus(msg).text }}</span>
-          </div>
-          <div class="message-content ap-content structured-msg">
-            <RichMessage v-if="getRichMessage(msg)" :message="getRichMessage(msg)!" />
-            <div v-else>
-            <div v-if="getSummary(msg)" class="msg-summary" @click="toggleExpand(index)">
-              <span class="summary-text">{{ getSummary(msg) }}</span>
-              <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
-            </div>
-            <div v-show="expandedMessages.has(index) || !getSummary(msg)" class="msg-full" v-html="renderStructured(msg)"></div>
-            <div v-if="!expandedMessages.has(index) && getSummary(msg)" class="msg-preview" @click="toggleExpand(index)">
-              {{ getPreviewText(msg) }}
-            </div>
-            </div>
-          </div>
-        </template>
-
-        <!-- 错误消息 -->
+        <!-- error -->
         <template v-else-if="msg.role === 'error'">
           <div class="message-header">
             <span class="role-badge err">ERR</span>
           </div>
-          <div class="message-content error-content">
-            {{ msg.error || msg.content }}
-          </div>
+          <div class="message-content error-content">{{ msg.error || msg.content }}</div>
         </template>
 
-        <!-- 执行输出面板（通用：SE/PM均可）—— 必须接在角色链上，禁止独立 v-if -->
-        <template v-else-if="(msg as any)._execData && !getRichMessage(msg)">
+        <!-- system / other -->
+        <template v-else>
           <div class="message-header">
-            <span class="role-badge" :class="(msg as any)._execData?.executor === 'pm' ? 'pm' : 'se'">
-              {{ (msg as any)._execData?.executor === 'pm' ? '⚡ PM' : '⚡ SE' }}
-            </span>
-            <span class="action-count">{{ (msg as any)._execData?.actions?.length || 0 }}/{{ (msg as any)._execData?.totalActions || 0 }} 操作</span>
-            <span v-if="(msg as any)._streaming" class="status-tag running">🔄 执行中...</span>
-            <span v-else class="status-tag success">✅ 完成</span>
+            <span class="role-badge sys">SYS</span>
           </div>
-          <div class="se-exec-panel">
-            <div class="se-steps">
-              <div v-for="step in (msg as any)._execData?.actions" :key="step.index" class="se-step" :class="step.status">
-                <span class="step-icon">{{ step.status === 'done' ? '✅' : step.status === 'running' ? '🔄' : step.status === 'error' ? '❌' : '🚫' }}</span>
-                <span class="step-label">{{ step.label }}</span>
-                <span v-if="step.error" class="step-error">{{ step.error }}</span>
-              </div>
-            </div>
-            <div v-if="(msg as any)._execData?.outputs?.length" class="se-terminal" :class="{ expanded: expandedMessages.has(index) }">
-              <div class="terminal-header" @click="toggleExpand(index)">
-                <span>🖥️ 终端输出 ({{ (msg as any)._execData.outputs.length }})</span>
-                <span class="expand-hint">{{ expandedMessages.has(index) ? '收起 ▲' : '展开 ▼' }}</span>
-              </div>
-              <div v-show="expandedMessages.has(index)" class="terminal-body">
-                <pre v-for="(out, oi) in (msg as any)._execData.outputs" :key="oi" class="terminal-output"><code><span v-if="out.command" class="cmd-prompt">$ {{ out.command }}</span>{{ out.output }}</code></pre>
-              </div>
-            </div>
-          </div>
+          <div class="message-content ai-content">{{ msg.content }}</div>
           <div class="message-actions-bar">
-            <button class="action-icon-btn" @click="copyMessage(getExecContent(msg))" :title="'复制输出'">📋</button>
-            <button class="action-icon-btn" @click="emit('send-to-terminal', getExecContent(msg))" :title="'发送到终端'">💻</button>
-          </div>
-        </template>
-
-        <!-- 其他未捕获的消息（仅渲染已知role之外的fallback） -->
-        <template v-else-if="!['user','pm','se','ap','mc','error'].includes(msg.role || '') && !(msg.role || '').startsWith('Sys_')">
-          <div class="message-header">
-            <span class="role-badge" :class="getRoleClass(msg.role)">{{ getRoleDisplayName(msg.role) }}</span>
-          </div>
-          <div class="message-content ai-content">
-            <div v-if="msg.changes && msg.changes.length > 0" class="changes-list">
-              <div v-for="(change, idx) in msg.changes" :key="idx" class="change-item">
-                <span class="change-icon">{{ getChangeIcon(change.type) }}</span>
-                <span class="change-file">{{ change.file }}</span>
-              </div>
-            </div>
-            <div v-if="msg.description" class="description">{{ msg.description }}</div>
-            <div v-if="msg.content" class="content" v-html="formatContent(msg.content)"></div>
-            <div v-if="msg.codeBlocks && msg.codeBlocks.length > 0" class="code-blocks">
-              <div v-for="(block, idx) in msg.codeBlocks" :key="idx" class="code-block">
-                <div class="code-header">
-                  <span class="code-lang">{{ block.language || 'code' }}</span>
-                  <button class="copy-btn" @click="copyCode(block.code)">复制</button>
-                </div>
-                <pre class="code-content"><code v-html="highlightCode(block.code, block.language)"></code></pre>
-              </div>
-            </div>
-            <div v-if="msg.error" class="error-message">
-              <span class="error-icon">❌</span>
-              <span>{{ msg.error }}</span>
-            </div>
-            <div v-if="msg.changes && msg.changes.length > 0" class="message-actions">
-              <button class="action-btn" @click="viewDetails(index)">{{ t('chatPanel.viewDetails') }}</button>
-              <button class="action-btn" @click="openInEditor(index)">{{ t('chatPanel.openInEditor') }}</button>
-              <button class="action-btn" @click="modify(index)">{{ t('chatPanel.modify') }}</button>
-            </div>
-          </div>
-          <div class="message-actions-bar">
-            <button class="action-icon-btn" @click="copyMessage(getFullMessageContent(msg))" :title="t('chatPanel.copyMessage') + ' (Ctrl+C)'">📋</button>
-            <button class="action-icon-btn" @click="quoteMessage(getFullMessageContent(msg), index)" :title="t('chatPanel.quoteMessage')">💬</button>
+            <button class="action-icon-btn" @click="copyMessage(msg.content)" title="📋">📋</button>
           </div>
         </template>
       </div>
@@ -390,7 +268,7 @@ const props = defineProps<{
   ideConnected?: Record<string, boolean>
 }>()
 
-const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message', 'open-file-in-editor', 'run-in-terminal'])
+const emit = defineEmits(['send-message', 'upload-file', 'quote-message'])
 
 const inputMessage = ref('')
 
@@ -401,35 +279,14 @@ const globalTasks = computed<GlobalTask[]>(() => {
     const role = msg.role.toUpperCase() as 'PM' | 'SE' | 'AP' | 'USR'
     const ts = new Date(msg.timestamp as number)
 
-    // 1) SE/PM 执行步骤 (_execData.actions)
-    const execData = (msg as any)._execData
-    if (execData?.actions?.length) {
-      for (let i = 0; i < execData.actions.length; i++) {
-        const a = execData.actions[i]
-        const idx = typeof a.index === 'number' ? a.index : i
-        const label = a.label || a.type || `Step ${idx + 1}`
-        tasks.push({
-          id: `exec-${msg.timestamp}-${idx}`,
-          description: label,
-          role: (execData.executor === 'pm' ? 'PM' : 'SE') as 'PM' | 'SE',
-          status: a.status === 'running' ? 'doing' : a.status === 'done' || a.status === 'success' ? 'done' : a.status === 'error' ? 'failed' : 'pending',
-          createdAt: ts,
-          updatedAt: ts,
-        })
-      }
-      continue
-    }
-
-    // 2) PM 规划消息 → 追踪为 PM 任务
-    if (role === 'PM' && msg.content && !(msg as any)._execData) {
-      // 提取 PM 的任务描述（通常包含 📋 或 @USR）
-      const summary = (msg as any).summary || msg.content.substring(0, 80)
+    if (role === 'PM' && msg.content) {
+      const summary = msg.content.substring(0, 80)
       if (summary.length > 3) {
         tasks.push({
           id: `pm-${msg.timestamp}`,
           description: summary.replace(/\n/g, ' ').substring(0, 60),
           role: 'PM',
-          status: 'done', // PM 消息发出即视为完成规划
+          status: 'done',
           createdAt: ts,
           updatedAt: ts,
         })
@@ -437,7 +294,6 @@ const globalTasks = computed<GlobalTask[]>(() => {
       continue
     }
 
-    // 3) AP 审批消息 → 追踪为 AP 任务
     if (role === 'AP') {
       const apText = msg.content.substring(0, 60)
       if (apText.length > 3) {
@@ -454,7 +310,6 @@ const globalTasks = computed<GlobalTask[]>(() => {
       continue
     }
 
-    // 4) 用户消息 → 追踪为 USR 待处理（最后一条）
     if (role === 'USR') {
       const usrText = msg.content.substring(0, 60)
       if (usrText.length > 3) {
@@ -475,12 +330,6 @@ const globalTasks = computed<GlobalTask[]>(() => {
 // [3.4] AI 思考链状态
 const thinkingCollapsed = ref(true) // 默认折叠，不占空间
 
-// 前端调试日志函数
-const LogPrint = (msg: string) => {
-  console.log('[ChatPanel] ' + msg)
-}
-const showThinking = ref(false)
-const currentThinkingStep = ref(0)
 const clarifyVisible = ref(false)
 const clarifyQuestions = ref<Array<{ text: string; type: string; options?: any[] }>>([])
 const clarifyFollowUp = ref(false)
@@ -488,8 +337,6 @@ const clarifyRef = ref<any>(null)
 const messagesRef = ref<HTMLElement>()
 const thinkingBodyRef = ref<HTMLElement>()
 const textareaRef = ref<HTMLTextAreaElement>()
-const debugInfo = ref('')
-const expandedMessages = ref(new Set<number>())
 const inputFocused = ref(false)
 const textareaHeight = ref(44)
 const replyLanguage = ref('auto')
@@ -505,8 +352,21 @@ const searchInputRef = ref<HTMLInputElement>()
 import CliPanel from './CliPanel.vue'
 import GlobalTaskBar from './GlobalTaskBar.vue'
 import TaskClarify from './TaskClarify.vue'
-import SERichMessage from './chat/SERichMessage.vue'
 import type { GlobalTask } from '../../types/task'
+
+// section collapse state
+const collapsedSections = ref(new Set<string>())
+function toggleSection(msgIdx: number, secIdx: number) {
+  const key = `${msgIdx}-${secIdx}`
+  if (collapsedSections.value.has(key)) {
+    collapsedSections.value.delete(key)
+  } else {
+    collapsedSections.value.add(key)
+  }
+}
+function sectionCollapsed(msgIdx: number, secIdx: number): boolean {
+  return !collapsedSections.value.has(`${msgIdx}-${secIdx}`)
+}
 const showCli = ref(false)
 const cliCommand = ref('')
 
@@ -531,12 +391,7 @@ const searchMatches = ref(0)
 const searchCurrentIndex = ref(-1)
 const matchedIndices = ref<number[]>([])
 
-// #2 AI 思考进度
-const currentThinkingText = ref('')
-const currentStepIndex = ref(0)
-const thinkingDots = ref('.')
-let thinkingInterval: ReturnType<typeof setInterval> | null = null
-let stepInterval: ReturnType<typeof setInterval> | null = null
+
 
 // #9 右键菜单
 const contextMenu = ref({ visible: false, x: 0, y: 0, msg: null as any, index: -1 })
@@ -668,23 +523,6 @@ function onLanguageChange() {
 }
 
 onMounted(() => {
-  EventsOn('ai-thinking-step', (data: { step: number, text: string }) => {
-    currentStepIndex.value = data.step
-    currentThinkingText.value = data.text
-  })
-
-  EventsOn('task_added', (data: any) => {
-    globalTasks.value.push({ id: data.id, description: data.description, role: data.role || 'SE', status: 'doing', createdAt: new Date(), updatedAt: new Date() })
-  })
-
-  EventsOn('task_updated', (data: any) => {
-    const idx = globalTasks.value.findIndex(t => t.id === data.id)
-    if (idx >= 0) {
-      globalTasks.value[idx].status = data.status || 'done'
-      globalTasks.value[idx].updatedAt = new Date()
-    }
-  })
-
   EventsOn('task-clarify', (data: any) => {
     if (data?._msgId) (window as any).__argusAck?.(data._msgId)
     if (data && data.questions && data.questions.length > 0) {
@@ -693,11 +531,6 @@ onMounted(() => {
       clarifyVisible.value = true
       if (clarifyRef.value) clarifyRef.value.reset()
     }
-  })
-
-  EventsOn('debug-query', () => {
-    const state = (window as any).__debugState || {}
-    EventsEmit('debug-query-response', JSON.stringify(state))
   })
 
   EventsOn('reset', () => {
@@ -818,89 +651,6 @@ function handleEnterKey(e: KeyboardEvent) {
   handleSend()
 }
 
-function toggleThinking() {
-  showThinking.value = !showThinking.value
-  emit('expand-thinking')
-}
-
-function getChangeIcon(type: string): string {
-  const icons: Record<string, string> = { create: '✅', modify: '🔧', delete: '🗑️', install: '📦' }
-  return icons[type] || '•'
-}
-
-function getRoleDisplayName(role: string): string {
-  const roleMap: Record<string, string> = { user: 'USR', pm: 'PM', se: 'SE', ap: 'AP', mc: 'MC', error: 'ERR', system: 'SYS' }
-  const lowerRole = (role || '').toLowerCase()
-  if (lowerRole.startsWith('sys_')) {
-    const sub = role.slice(4)
-    return roleMap[sub] || sub.toUpperCase() || 'SYS'
-  }
-  return roleMap[lowerRole] || role || 'UNKNOWN'
-}
-
-function getRoleClass(role: string): string {
-  const lower = (role || '').toLowerCase()
-  if (lower === 'pm') return 'pm'
-  if (lower === 'se') return 'se'
-  if (lower === 'ap') return 'ap'
-  if (lower === 'mc' || lower.startsWith('sys_')) return 'mc'
-  if (lower === 'error') return 'err'
-  if (lower === 'user') return 'usr'
-  return 'default'
-}
-
-function formatContent(content: string): string {
-  if (!content) return ''
-  content = escapeHtml(content)
-  return content.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br>')
-}
-
-// #3 代码语法高亮（轻量级）
-function highlightCode(code: string, language?: string): string {
-  let escaped = escapeHtml(code)
-  
-  const lang = (language || '').toLowerCase()
-  
-  // 关键字
-  const keywords = {
-    go: ['func', 'var', 'const', 'type', 'struct', 'interface', 'map', 'chan', 'go', 'defer', 'return', 'if', 'else', 'for', 'range', 'switch', 'case', 'break', 'continue', 'package', 'import', 'fmt', 'error', 'string', 'int', 'bool', 'nil', 'make', 'append', 'len', 'cap'],
-    python: ['def', 'class', 'import', 'from', 'return', 'if', 'elif', 'else', 'for', 'in', 'while', 'try', 'except', 'finally', 'with', 'as', 'yield', 'lambda', 'True', 'False', 'None', 'and', 'or', 'not', 'is', 'print', 'self', 'pass', 'raise', 'del', 'global', 'nonlocal'],
-    js: ['function', 'var', 'let', 'const', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'new', 'this', 'true', 'false', 'null', 'undefined', 'typeof', 'instanceof'],
-    ts: ['function', 'var', 'let', 'const', 'return', 'if', 'else', 'for', 'while', 'class', 'import', 'export', 'from', 'async', 'await', 'new', 'this', 'true', 'false', 'null', 'undefined', 'typeof', 'interface', 'type', 'enum', 'extends', 'implements']
-  }
-
-  const kw = keywords[lang as keyof typeof keywords] || keywords.go || []
-  
-  // 字符串
-  escaped = escaped.replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)/g, '<span class="hl-string">$1</span>')
-  
-  // 注释
-  escaped = escaped.replace(/(\/\/.*$)/gm, '<span class="hl-comment">$1</span>')
-  escaped = escaped.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="hl-comment">$1</span>')
-  escaped = escaped.replace(/(#.*$)/gm, '<span class="hl-comment">$1</span>')
-  
-  // 数字
-  escaped = escaped.replace(/\b(\d+\.?\d*)\b/g, '<span class="hl-number">$1</span>')
-  
-  // 关键字
-  kw.forEach(k => {
-    const re = new RegExp(`\\b(${k})\\b`, 'g')
-    escaped = escaped.replace(re, '<span class="hl-keyword">$1</span>')
-  })
-  
-  // 内置函数
-  escaped = escaped.replace(/\b(fmt\.Print\w+|console\.log|print\w*)\b/g, '<span class="hl-func">$1</span>')
-  
-  return escaped
-}
-
-function copyCode(code: string) {
-  navigator.clipboard.writeText(code).then(() => showToast('已复制')).catch(() => fallbackCopy(code))
-}
-
 function copyMessage(content: string) {
   navigator.clipboard.writeText(content).then(() => showToast('已复制')).catch(() => fallbackCopy(content))
 }
@@ -916,7 +666,6 @@ function fallbackCopy(text: string) {
   showToast('已复制')
 }
 
-// Toast 提示
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 const toastMessage = ref('')
 const toastVisible = ref(false)
@@ -929,214 +678,6 @@ function showToast(msg: string) {
 
 function quoteMessage(content: string, index: number) {
   emit('quote-message', `> ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`, index)
-}
-
-function getFullMessageContent(msg: any): string {
-  let content = ''
-  if (msg.summary) content += msg.summary + '\n\n'
-  if (msg.description) content += msg.description + '\n\n'
-  if (msg.content) content += msg.content + '\n\n'
-  if (msg.codeBlocks && msg.codeBlocks.length > 0) {
-    msg.codeBlocks.forEach((block: any) => { content += '```' + (block.language || '') + '\n' + block.code + '\n```\n\n' })
-  }
-  return content.trim()
-}
-
-function getExecContent(msg: any): string {
-  let text = ''
-  const execData = msg._execData
-  if (execData?.actions) {
-    execData.actions.forEach((step: any) => { text += `${step.status === 'done' ? '✅' : '❌'} ${step.label}\n` })
-  }
-  if (execData?.outputs) {
-    execData.outputs.forEach((out: any) => {
-      if (out.command) text += `$ ${out.command}\n`
-      text += out.output + '\n'
-    })
-  }
-  return text.trim()
-}
-
-function viewDetails(index: number) { emit('view-details', index) }
-function openInEditor(index: number) { emit('open-editor', index) }
-function modify(index: number) { emit('modify', index) }
-
-function toggleExpand(index: number) {
-  if (expandedMessages.value.has(index)) expandedMessages.value.delete(index)
-  else expandedMessages.value.add(index)
-  expandedMessages.value = new Set(expandedMessages.value)
-}
-
-function getRichMessage(msg: any): RichMessageType | null {
-  if (!msg || !window.__richMessages) return null
-  
-  const keys = Object.keys(window.__richMessages)
-  for (const k of keys) {
-    const rm = window.__richMessages[k]
-    if (rm && rm.role === msg.role && (rm.result?.text === msg.content || msg._richTaskId === k)) {
-      return rm
-    }
-  }
-  return null
-}
-
-function getMsgStatus(msg: any): { type: string, text: string } | null {
-  const c = msg.content || ''
-  if (c.includes('✅ 任务完成') || c.match(/✅\s*任务完成/)) return { type: 'success', text: '✅ 完成' }
-  if (c.includes('📊 任务进行中')) return { type: 'progress', text: '📊 进行中' }
-  if (c.includes('执行失败') || (c.includes('错误') && msg.role === 'se')) return { type: 'error', text: '❌ 失败' }
-  if (msg.role === 'pm' && (c.includes('审核通过') || c.includes('代码审核通过'))) return { type: 'success', text: '✅ 审核通过' }
-  if (msg.role === 'ap' && (c.includes('通过') || c.includes('✅') || c.includes('approved') || c.includes('"approval_result":"approve"'))) return { type: 'success', text: '✅ 审批通过' }
-  if (msg.role === 'ap' && (c.includes('不通过') || c.includes('❌') || c.includes('未通过') || c.includes('reject') || c.includes('"approval_result":"reject"'))) return { type: 'error', text: '❌ 未通过' }
-  if (c.includes('"review_result":"approve"')) return { type: 'success', text: '✅ PM审核通过' }
-  if (c.includes('"review_result":"reject"')) return { type: 'error', text: '❌ PM要求返工' }
-  if (c.includes('"task_status":"completed"')) return { type: 'success', text: '✅ SE完成' }
-  return null
-}
-
-function getSummary(msg: any): string | null {
-  const c = msg.content || ''
-  if (!c || c.length < 100) return null
-  const status = getMsgStatus(msg)
-  let summary = ''
-  if (status) summary += status.text + ' · '
-  const taskMatch = c.match(/(?:当前任务|任务)[：:]?\s*([^\n{]+)/)
-  if (taskMatch) summary += taskMatch[1].trim().substring(0, 50)
-  const noteMatch = c.match(/"reason":"([^"]+)"/)
-  if (noteMatch && !summary) summary = noteMatch[1].trim().substring(0, 60)
-  if (msg.role === 'ap' && c.includes('@USR')) {
-    const usrMatch = c.match(/@USR\s*([^\n{]+)/)
-    if (usrMatch) summary = usrMatch[1].trim().substring(0, 60)
-  }
-  return summary || null
-}
-
-function getPreviewText(msg: any): string {
-  const c = msg.content || ''
-  const lines = c.split('\n').filter(l => l.trim() && !l.trim().startsWith('{') && !l.trim().startsWith('📝') && !l.trim().startsWith('📋'))
-  return lines.slice(0, 2).join(' ').substring(0, 120) + (lines.length > 2 ? '...' : '')
-}
-
-function getSEActionCount(msg: any): number | null {
-  const match = (msg.content || '').match(/已执行操作[:\s]*(\d+)/)
-  return match ? parseInt(match[1]) : null
-}
-
-function getSEActions(msg: any): any[] | null {
-  try {
-    const execData = (msg as any)._execData
-    if (execData?.actions && Array.isArray(execData.actions) && execData.actions.length > 0) {
-      return execData.actions.map((a: any) => ({
-        type: a.type,
-        path: a.path || a.label || '',
-        command: a.command || '',
-        status: a.status || 'pending',
-        content: a.content,
-        output: a.output,
-        duration: a.duration,
-        size: a.content ? new Blob([a.content]).size : undefined
-      }))
-    }
-    const content = msg.content || ''
-    const jsonMatch = content.match(/\{[\s\S]*"actions"[\s]*:\s*\[[\s\S]*\][\s]*\}/)
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0])
-      if (parsed.actions && Array.isArray(parsed.actions) && parsed.actions.length > 0) {
-        return parsed.actions
-      }
-    }
-
-    const directMatch = content.match(/^\{[\s\S]*\}$/)
-    if (directMatch) {
-      const parsed = JSON.parse(directMatch[0])
-      if (parsed.actions && Array.isArray(parsed.actions)) {
-        return parsed.actions
-      }
-    }
-    
-    return null
-  } catch (e) {
-    return null
-  }
-}
-
-function getSEShellOutput(msg: any): string {
-  const execData = (msg as any)._execData
-  if (!execData?.outputs) return ''
-  return execData.outputs.map((o: any) => {
-    let line = ''
-    if (o.command) line += '$ ' + o.command + '\n'
-    if (o.output) line += o.output
-    return line
-  }).filter(Boolean).join('\n')
-}
-
-function onOpenFileInEditor(data: { path: string }) {
-  emit('open-file-in-editor', data)
-}
-
-function onRunInTerminal(data: { command: string }) {
-  emit('run-in-terminal', data)
-}
-
-function renderSEText(msg: any): string {
-  const c = msg.content || ''
-  if (!c) return ''
-  let text = c
-  text = text.replace(/\{[\s\S]*"actions"[\s]*:\s*\[[\s\S]*\][\s\S]*\}/g, '')
-  text = text.replace(/^\{[\s\S]*\}$/g, '')
-  text = text.replace(/```json[\s\S]*?```/g, '')
-  const lines = text.split('\n').filter(l => {
-    const t = l.trim()
-    if (!t) return false
-    if (t.match(/^\[.*\]$/) && t.includes(':')) return false
-    if (t.match(/^\{.*\}$/)) return false
-    if (t.match(/"task_status"|"review_result"|"approval_result"/)) return false
-    return true
-  })
-  return lines.map(l => `<div class="se-plain-line">${escapeHtml(l)}</div>`).join('')
-}
-
-function renderStructured(msg: any): string {
-  const c = msg.content || ''
-  if (!c) return ''
-  let html = ''
-  const parts = c.split(/\n(?=✅|📊|@PM|@USR|@SE|```|\{")/)
-  for (const part of parts) {
-    const trimmed = part.trim()
-    if (!trimmed) continue
-    
-    const codeMatch = trimmed.match(/^```(\w*)\n([\s\S]*?)```$/)
-    if (codeMatch) {
-      html += `<div class="msg-code-block"><pre class="code-content"><code v-pre>${highlightCode(codeMatch[2], codeMatch[1])}</code></pre></div>`
-      continue
-    }
-    
-    if (trimmed.startsWith('@PM') || trimmed.startsWith('@USR') || trimmed.startsWith('@SE')) {
-      html += `<div class="msg-main-text">${renderMarkdown(trimmed)}</div>`
-    } else if (trimmed.match(/^\{[\s\S]*\}$/) && (trimmed.includes('"review_result"') || trimmed.includes('"approval_result"') || trimmed.includes('"task_status"'))) {
-      html += `<div class="msg-json"><code class="inline-code">${escapeHtml(trimmed)}</code></div>`
-    } else if (trimmed.includes('执行失败的原因是') || trimmed.includes('错误分析') || trimmed.includes('修复方案')) {
-      html += `<div class="msg-section error-analysis"><div class="section-label">🔍 分析</div><div class="section-body">${renderMarkdown(trimmed)}</div></div>`
-    } else {
-      html += `<div class="msg-plain">${renderMarkdown(trimmed)}</div>`
-    }
-  }
-  return html
-}
-
-function renderMarkdown(text: string): string {
-  if (!text) return ''
-  let html = escapeHtml(text)
-  html = html.replace(/^>\s+/gm, '') 
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-  html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-  html = html.replace(/^[-*]\s+(.+)$/gm, '<li>$1</li>')
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, (m) => '<ul>' + m + '</ul>')
-  html = html.replace(/^(\d+)\.\s+(.+)$/gm, '<li>$2</li>')
-  html = html.replace(/\n/g, '<br>')
-  return html
 }
 
 function escapeHtml(text: string): string {
@@ -1260,9 +801,10 @@ function closeContextMenu() {
 
 function contextAction(action: string) {
   const { msg, index } = contextMenu.value
+  const content = msg.content || msg.raw || ''
   switch (action) {
-    case 'copy': copyMessage(getFullMessageContent(msg)); break
-    case 'quote': quoteMessage(getFullMessageContent(msg), index); break
+    case 'copy': copyMessage(content); break
+    case 'quote': quoteMessage(content, index); break
     case 'delete': break
     case 'deleteAbove': break
   }

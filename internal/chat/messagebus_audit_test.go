@@ -28,7 +28,7 @@ func TestAllPathsHaveCorrectTracking(t *testing.T) {
 
 	tests := []struct {
 		path        MessagePath
-		wantTrack  bool
+		wantTrack   bool
 		description string
 	}{
 		{PathPMToUser, true, "PM 回复 → 必须追踪、ACK 写 log"},
@@ -132,11 +132,12 @@ func TestAckDoesNotWriteLogForUntrackedPaths(t *testing.T) {
 // 已知可接受的直接 runtime.EventsEmit 调用（白名单）
 var knownEventsEmitAllowlist = map[string]map[int]string{
 	filepath.Join("internal", "chat", "message_bus.go"): {
-		211: "emitToFrontend — MessageBus 单一前向出口",
-		524: "backgroundChecker — 消息丢失告警（非用户内容）",
+		212: "emitToFrontend — MessageBus 单一前向出口",
+		526: "backgroundChecker — 消息丢失告警（非用户内容）",
 	},
 	filepath.Join("app.go"): {
-		974: "emitToFrontend fallback — msgBus=nil 时降级，初始化阶段使用",
+		983:  "emitToFrontend fallback — msgBus=nil 时降级，初始化阶段使用",
+		3909: "file-tree-dirty — 文件树脏标记（非消息通道）",
 	},
 }
 

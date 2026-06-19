@@ -107,10 +107,6 @@ type PMProcessor struct {
 	todoUpdater    func(string, string) // 更新待办状态
 	todoClearer    func()               // 清空待办（replace=true时）
 
-	shellEmitter     types.ShellEventEmitter // 三层模型 Shell 事件推送（可选）
-	currentTaskId    string                  // 当前 TaskList ID
-	currentTaskIndex int                     // 当前执行到的步骤索引
-
 	ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
 	ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
 }
@@ -152,10 +148,6 @@ func (p *PMProcessor) SetContext(ctx context.Context) {
 	p.ctx = ctx
 }
 
-func (p *PMProcessor) SetShellEmitter(emitter types.ShellEventEmitter) {
-	p.shellEmitter = emitter
-}
-
 func (p *PMProcessor) SetIDEMessageEmitter(emitter func(target, message, action string) bool) {
 	p.ideMessageEmitter = emitter
 }
@@ -167,11 +159,6 @@ func (p *PMProcessor) SetIDEList(ides []string) {
 	} else {
 		p.ideList = strings.Join(ides, ", ")
 	}
-}
-
-func (p *PMProcessor) SetTaskContext(taskId string, taskIndex int) {
-	p.currentTaskId = taskId
-	p.currentTaskIndex = taskIndex
 }
 
 // getCtx 获取上下文，nil 时返回 Background
@@ -238,6 +225,26 @@ func wantsIDEDelegation(request string) bool {
 		}
 	}
 	return false
+}
+
+// [FIX-v1.0.22] MergePMAndSETools 合并 PMTools + SETools（去重），供 pmDirectExecute 使用
+// 让 short-process/featherweight 路径也能使用 ide_send 等 PM 工具
+func MergePMAndSETools() []Tool {
+	seen := map[string]bool{}
+	merged := make([]Tool, 0, len(PMTools)+len(SETools))
+	for _, t := range PMTools {
+		if !seen[t.Function.Name] {
+			seen[t.Function.Name] = true
+			merged = append(merged, t)
+		}
+	}
+	for _, t := range SETools {
+		if !seen[t.Function.Name] {
+			seen[t.Function.Name] = true
+			merged = append(merged, t)
+		}
+	}
+	return merged
 }
 
 // PMTools PM可用的工具列表
@@ -577,6 +584,15 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	var ideNagCount int          // [v1.0.22] IDE委托提醒次数
 
 	for round := 0; round < maxToolRounds; round++ {
+		// [DEBUG] 打印 PM 工具列表，确认 ide_send 是否存在
+		if round == 0 {
+			names := make([]string, len(PMTools))
+			for i, t := range PMTools {
+				names[i] = t.Function.Name
+			}
+			fmt.Printf("[PM-DEBUG] Tools(%d): %v\n", len(PMTools), names)
+			fmt.Printf("[PM-DEBUG] SystemPrompt(ideList): %q\n", p.ideList)
+		}
 		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
 		resp, err := p.client.ChatWithTools(callCtx, p.getSystemPrompt(), aiHistory, userInput, PMTools, p.ReplyLanguage)
 		callCancel()
@@ -1093,18 +1109,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			Path string `json:"path"`
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
-		if p.shellEmitter != nil && p.currentTaskId != "" {
-			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "read_file", args.Path, nil)
-			startTime := time.Now()
-			content, err := os.ReadFile(filepath.Join(p.workDir, args.Path))
-			duration := time.Since(startTime).String()
-			if err != nil {
-				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, duration, "error")
-				return fmt.Sprintf("读取文件失败: %v", err)
-			}
-			p.shellEmitter.PushShellDone("pm", p.currentTaskId, 0, duration, "done")
-			return string(content)
-		}
 		content, err := os.ReadFile(filepath.Join(p.workDir, args.Path))
 		if err != nil {
 			return fmt.Sprintf("读取文件失败: %v", err)
@@ -1112,26 +1116,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 		return string(content)
 
 	case "list_files":
-		if p.shellEmitter != nil && p.currentTaskId != "" {
-			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "list_files", ".", nil)
-			startTime := time.Now()
-			entries, err := os.ReadDir(p.workDir)
-			duration := time.Since(startTime).String()
-			if err != nil {
-				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, duration, "error")
-				return fmt.Sprintf("列出文件失败: %v", err)
-			}
-			var result []string
-			for _, e := range entries {
-				name := e.Name()
-				if e.IsDir() {
-					name += "/"
-				}
-				result = append(result, name)
-			}
-			p.shellEmitter.PushShellDone("pm", p.currentTaskId, 0, duration, "done")
-			return strings.Join(result, "\n")
-		}
 		entries, err := os.ReadDir(p.workDir)
 		if err != nil {
 			return fmt.Sprintf("列出文件失败: %v", err)
@@ -1152,11 +1136,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
 
-		hasEmitter := p.shellEmitter != nil && p.currentTaskId != ""
-		if hasEmitter {
-			p.shellEmitter.PushShellStart("pm", p.currentTaskId, p.currentTaskIndex, "exec", args.Command, nil)
-		}
-
 		cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", args.Command)
 		cmd.Dir = p.workDir
 		cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -1173,9 +1152,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 
 		err := cmd.Start()
 		if err != nil {
-			if hasEmitter {
-				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, "", "error")
-			}
 			return fmt.Sprintf("命令执行失败(启动): %v", err)
 		}
 
@@ -1191,9 +1167,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			if p.terminalWriter != nil {
 				p.terminalWriter(result)
 			}
-			if hasEmitter {
-				p.shellEmitter.PushShellDone("pm", p.currentTaskId, -1, "30s", "error")
-			}
 			return result
 		case err = <-done:
 			output := stdout.String()
@@ -1203,18 +1176,6 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			exitCode := 0
 			if cmd.ProcessState != nil {
 				exitCode = cmd.ProcessState.ExitCode()
-			}
-			if hasEmitter {
-				p.shellEmitter.PushShellOutput(p.currentTaskId, output)
-				shellStart := p.shellEmitter.GetLastShellTimestamp()
-				if shellStart > 0 {
-					duration := types.FormatDuration(shellStart, time.Now().Unix())
-					if exitCode == 0 {
-						p.shellEmitter.PushShellDone("pm", p.currentTaskId, exitCode, duration, "done")
-					} else {
-						p.shellEmitter.PushShellDone("pm", p.currentTaskId, exitCode, duration, "error")
-					}
-				}
 			}
 			if err != nil {
 				result := fmt.Sprintf("命令执行失败(exit code %d):\n%s", exitCode, output)

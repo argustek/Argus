@@ -138,7 +138,7 @@ func (m *Manager) pushTokenStats() {
 		return
 	}
 	stats := m.contextWindow.TokenStats()
-	msgId := m.msgBusSend("system", "", "token_stats", PathSystem, "ContextBridge:pushTokenStats", stats)
+	msgId := m.msgBusSend("system", "", "token_stats", PathStatus, "ContextBridge:pushTokenStats", stats)
 	m.WriteDebugLog(fmt.Sprintf("[ContextBridge] ✅ token_stats 已推送 msgId=%s total_tokens=%v", msgId, stats["total_tokens"]))
 }
 
@@ -268,8 +268,7 @@ type Manager struct {
 	todoMaxSize int
 	todoMu      sync.RWMutex
 
-	richBuilder *RichMessageBuilder
-	msgBus      *MessageBus // [G63] MessageBus双向消息总线（前后一致性保障）
+	msgBus *MessageBus // [G63] MessageBus双向消息总线（前后一致性保障）
 
 	// [v0.7.1] MCP Manager（SE 工具桥接用）
 	mcpManager interface {
@@ -427,10 +426,6 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 		func(id, status string) { manager.UpdateTodoStatus(id, status) },
 		func() { manager.ClearTodoList() },
 	)
-
-	// 初始化三层模型 Builder（用于 PM/SE 可视化）
-	manager.richBuilder = NewRichMessageBuilder(manager.emitWailsEvent)
-	pmProcessor.SetShellEmitter(manager.richBuilder)
 
 	// [G63] 初始化MessageBus双向消息总线（前后一致性保障）
 	// 注意：ctx在SetContext时设置，这里先创建，ctx后续注入
@@ -1590,24 +1585,11 @@ func (m *Manager) handleToPM(content string) (err error) {
 	fmt.Printf("[PROBE-handleToPM] 🔍 审核场景检测: isReview=%v seReportedComplete=%v content_preview=%q (时间:%s)\n",
 		isReviewScenario, m.seReportedComplete, content[:min(60, len(content))], time.Now().Format("15:04:05.000"))
 
-	if isReviewScenario && m.richBuilder != nil {
+	if isReviewScenario {
 		fmt.Println("[handleToPM] 🔄 审核场景: 用ProcessReview(支持ChatWithTools工具调用验证)")
-		m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
-			{Text: "接收 SE 完成报告"},
-			{Text: "审核 SE 执行结果"},
-			{Text: "给出审核结论"},
-		})
-		pmTaskId := m.richBuilder.GetCurrentTaskID()
-		m.richBuilder.UpdateTask(pmTaskId, 0, "running")
-		defer func() {
-			if pmTaskId != "" && m.richBuilder != nil {
-				m.richBuilder.CompleteTaskList(pmTaskId, "completed", nil)
-				m.richBuilder.Reset()
-			}
-		}()
 	}
 
-	if m.richBuilder != nil && !isReviewScenario {
+	if !isReviewScenario {
 		taskPreview := content
 		if len(taskPreview) > 80 {
 			taskPreview = taskPreview[:80] + "..."
@@ -1616,15 +1598,8 @@ func (m *Manager) handleToPM(content string) (err error) {
 			!strings.Contains(content, "创建") && !strings.Contains(content, "执行") &&
 			!strings.Contains(content, "编写") && !strings.Contains(content, "实现") &&
 			!strings.Contains(content, "修改") && !strings.Contains(content, "修复"))
-		if !isLikelyChat {
-			m.richBuilder.StartTaskList("pm", "PM 分配任务", []types.TaskItemDef{
-				{Text: "分析用户需求"},
-				{Text: "分配 SE 任务"},
-				{Text: "审核 SE 结果"},
-			})
-			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running", taskPreview)
-		} else {
-			fmt.Printf("[handleToPM] 💬 检测到闲聊模式(短消息/无任务关键词)，跳过RichMessage\n")
+		if isLikelyChat {
+			fmt.Printf("[handleToPM] 💬 检测到闲聊模式(短消息/无任务关键词)\n")
 		}
 	}
 
@@ -1721,14 +1696,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 			filteredErr := filterDuplicateMentions(errContent)
 			m.sendToDingTalk(fmt.Sprintf("[PM] %s", filteredErr))
 		}()
-
-		if m.richBuilder != nil {
-			pmTaskId := m.richBuilder.GetCurrentTaskID()
-			if pmTaskId != "" {
-				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
-				m.richBuilder.Reset()
-			}
-		}
 
 		return fmt.Errorf("PM process failed: %v", err)
 	}
@@ -1847,15 +1814,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 
 		m.addPMToSEMsg(finalTask)
 
-		pmTaskId := ""
-		if m.richBuilder != nil {
-			pmTaskId = m.richBuilder.GetCurrentTaskID()
-			if pmTaskId != "" {
-				m.richBuilder.UpdateTask(pmTaskId, 0, "done")
-				m.richBuilder.UpdateTask(pmTaskId, 1, "running")
-			}
-		}
-
 		taskPreview := finalTask
 		if len(taskPreview) > 80 {
 			taskPreview = taskPreview[:80] + "..."
@@ -1874,15 +1832,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 		err := m.startSETaskWithFrom(finalTask, "pm")
 		fmt.Printf("[SE-DEBUG] ✅ [方案1] startSETaskWithFrom 返回: err=%v (时间:%s)\n",
 			err, time.Now().Format("15:04:05.000"))
-
-		if pmTaskId != "" && m.richBuilder != nil {
-			if err != nil {
-				m.richBuilder.UpdateTask(pmTaskId, 1, "error")
-				m.richBuilder.CompleteTaskList(pmTaskId, "error", nil)
-			} else {
-				m.richBuilder.UpdateTask(pmTaskId, 2, "running")
-			}
-		}
 
 		return err
 	}
@@ -2071,19 +2020,6 @@ func (m *Manager) handleToPM(content string) (err error) {
 		parsedMsg.To, resp.HasTasks, resp.Content[:min(100, len(resp.Content))])
 
 	m.addPMToUserMsg(resp.Content)
-
-	if m.richBuilder != nil {
-		pmTaskId := m.richBuilder.GetCurrentTaskID()
-		if pmTaskId != "" {
-			m.richBuilder.UpdateTask(pmTaskId, 0, "done")
-			m.richBuilder.UpdateTask(pmTaskId, 1, "done")
-			m.richBuilder.UpdateTask(pmTaskId, 2, "done")
-			m.richBuilder.CompleteTaskList(pmTaskId, "done", &types.ResultBlock{
-				Text: resp.Content,
-			})
-			m.richBuilder.Reset()
-		}
-	}
 
 	m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 	m.syncBackendStatus("pm_chat", "PM闲聊回复")
@@ -2721,13 +2657,6 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 		m.writeRouteLog(fmt.Sprintf("[SE-API-START] from=%s attempt=%d/%d ctx_err=%v time=%s",
 			from, attempt, maxRetries, seCtx.Err(), time.Now().Format("15:04:05")))
 
-		if m.richBuilder != nil && attempt == 0 {
-			m.richBuilder.StartTaskList("se", "SE 执行: "+taskDesc[:min(30, len(taskDesc))], []types.TaskItemDef{
-				{Text: "⏳ 规划操作..."},
-			})
-			m.richBuilder.UpdateTask(m.richBuilder.GetCurrentTaskID(), 0, "running")
-		}
-
 		if attempt == 0 && m.aiClient != nil {
 			m.aiClient.CloseIdleConnections()
 			fmt.Println("[SE] 🔧 关闭空闲连接，避免复用PM用过的死连接")
@@ -2971,7 +2900,7 @@ func (m *Manager) startSETaskWithFrom(taskDesc string, from string) error {
 			if from != "pm" {
 				m.addSEToUserMsg(summary)
 			}
-			m.msgBusSend("se", summary, "exec_completed", PathSEExec, "startSETaskWithFrom:empty-action-force", map[string]interface{}{
+			m.PushSSEEvent("exec_completed", map[string]interface{}{
 				"executor":  "se",
 				"result":    "completed",
 				"status":    "completed",
@@ -3189,7 +3118,7 @@ Generate corrected actions JSON (use ONLY relative filenames):
 			fmt.Printf("[System] → 智能CC: from=%s, 额外通知来源角色\n", from)
 		}
 
-		m.msgBusSend("se", summary, "exec_completed", PathSEExec, "startSETaskWithFrom:completed", map[string]interface{}{
+		m.PushSSEEvent("exec_completed", map[string]interface{}{
 			"executor":  "se",
 			"result":    "",
 			"changelog": "",
@@ -3431,7 +3360,7 @@ continueProcess:
 
 		// [G53] 在最终完成路径发送exec_completed（只发一次！）
 		if m.ctx != nil {
-			m.msgBusSend("se", "completed", "exec_completed", PathSEExec, "executeSEActions:TAG-C1", map[string]interface{}{
+			m.PushSSEEvent("exec_completed", map[string]interface{}{
 				"executor":  "se",
 				"result":    "completed",
 				"status":    "completed",
@@ -3488,8 +3417,11 @@ continueProcess:
 
 // [v0.7.2] emitWailsEvent 改为走 MessageBus（不再走破路 runtime.EventsEmit）
 func (m *Manager) emitWailsEvent(eventName string, data interface{}) {
-	m.msgBusSend("se", "", eventName, PathSEExec, "emitWailsEvent:"+eventName, data)
-	m.PushSSEEvent(eventName, data)
+	// exec_* 事件仅用于外部 IDE SSE 订阅者，前端不再需要（EventsOn 已移除）
+	// 跳过 MessageBus 避免 pendingQueue 堆积导致误报"消息丢失"
+	if data != nil {
+		m.PushSSEEvent(eventName, data)
+	}
 }
 
 // [G63] msgBusSend 通过MessageBus发送消息（强制送水+校验）
@@ -3509,33 +3441,10 @@ func (m *Manager) msgBusSend(role, content, eventName string, path MessagePath, 
 		}
 	}
 
-	emitCtx := m.ctx
-	if m.msgBus != nil && m.msgBus.ctx != nil {
-		emitCtx = m.msgBus.ctx
+	// PushSSEEvent 保留给外部 IDE 的 SSE 订阅者
+	if data != nil {
+		m.PushSSEEvent(eventName, data)
 	}
-
-	if emitCtx != nil {
-		enrichedData := map[string]interface{}{
-			"_msgId": msgId,
-			"_role":  role,
-			"_path":  string(path),
-		}
-		if d, ok := data.(map[string]interface{}); ok {
-			for k, v := range d {
-				enrichedData[k] = v
-			}
-		} else if d, ok := data.(map[string]string); ok {
-			for k, v := range d {
-				enrichedData[k] = v
-			}
-		} else if data != nil {
-			enrichedData["data"] = data
-		}
-		runtime.EventsEmit(emitCtx, eventName, enrichedData)
-		fmt.Printf("[💧MSG-EMIT] event=%s role=%s ctx_ok=%v keys=%v\n", eventName, role, emitCtx != nil, getMapKeys(enrichedData))
-	}
-
-	m.PushSSEEvent(eventName, data)
 	return msgId
 }
 
@@ -3549,7 +3458,7 @@ func isReadOnlyAction(actionType string) bool {
 }
 
 // executeReadOnlyBatch 并行执行一批只读操作（read_file / search_files）
-func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActions int, seTaskId string) error {
+func (m *Manager) executeReadOnlyBatch(batch []ai.SEAction, startIdx, totalActions int) error {
 	type batchResult struct {
 		idx     int
 		content string
@@ -3671,67 +3580,6 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 	}()
 
 	totalActions := len(actions)
-	seTaskId := ""
-	if m.richBuilder != nil {
-		seTaskId = m.richBuilder.GetCurrentTaskID()
-		if seTaskId != "" && totalActions > 0 {
-			taskDefs := make([]types.TaskItemDef, totalActions)
-			for i, a := range actions {
-				label := ""
-				switch a.Type {
-				case "write_file":
-					label = "创建 " + a.Path
-				case "edit_file":
-					label = "修改 " + a.Path
-				case "exec":
-					label = "执行 " + a.Command
-				case "read_file":
-					label = "读取 " + a.Path
-				case "search_files":
-					label = "搜索 " + a.Pattern
-				case "git_operation":
-					if a.GitAction != "" {
-						label = "Git " + a.GitAction
-					} else {
-						label = "Git 操作"
-					}
-				case "run_tests":
-					label = "运行测试"
-				case "undo_file":
-					label = "撤销 " + a.Path
-				case "list_changes":
-					label = "列出变更记录"
-				case "go_to_definition":
-					label = "跳转定义: " + filepath.Base(a.Path)
-				case "find_references":
-					label = "查找引用: " + filepath.Base(a.Path)
-				case "hover_info":
-					label = "悬停信息: " + filepath.Base(a.Path)
-				case "diagnostics":
-					label = "诊断: " + filepath.Base(a.Path)
-				case "rename_symbol":
-					label = "重命名: " + a.Command
-				case "analyze_code":
-					label = "分析代码: " + a.Path
-				case "auto_debug":
-					label = "自动调试"
-				case "search_snippet":
-					label = "搜索片段"
-				case "add_snippet":
-					label = "添加片段"
-				case "list_snippets":
-					label = "列出片段"
-				case "delete_snippet":
-					label = "删除片段"
-				default:
-					label = a.Type
-				}
-				taskDefs[i] = types.TaskItemDef{Text: label}
-			}
-			m.richBuilder.ReplaceTaskList(seTaskId, taskDefs)
-			m.richBuilder.UpdateTask(seTaskId, 0, "running")
-		}
-	}
 
 	fmt.Printf("[PROBE-executeSEActions] 🔄 开始action循环: total=%d (时间:%s)\n",
 		totalActions, time.Now().Format("15:04:05.000"))
@@ -3804,7 +3652,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			if batchSize > 1 {
 				fmt.Printf("[PARALLEL] 🚀 批处理 %d 个只读操作: idx %d-%d\n", batchSize, i, i+batchSize-1)
 				batch := actions[i : i+batchSize]
-				if err := m.executeReadOnlyBatch(batch, i, totalActions, seTaskId); err != nil {
+				if err := m.executeReadOnlyBatch(batch, i, totalActions); err != nil {
 					fmt.Printf("[PARALLEL] ❌ 批处理失败: %v\n", err)
 					return err
 				}
@@ -4404,13 +4252,7 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 				action.Command = fixedCommand
 			}
 
-			if seTaskId != "" && m.richBuilder != nil {
-				m.richBuilder.PushShellStart("se", seTaskId, 1, "exec", action.Command, nil)
-			}
 			output, err := m.seExecutor.Exec(action.Command, 30*time.Second)
-			if seTaskId != "" && m.richBuilder != nil {
-				m.richBuilder.PushShellOutput(seTaskId, output)
-			}
 			if err != nil {
 				errMsg := fmt.Sprintf("执行失败: %v", err)
 
@@ -4478,9 +4320,6 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			})
 			if currentTask != nil {
 				m.taskManager.UpdateStatus(currentTask.ID, "done")
-			}
-			if seTaskId != "" && m.richBuilder != nil {
-				m.richBuilder.PushShellDone("se", seTaskId, 0, "", "done")
 			}
 			m.emitWailsEvent("exec_output", map[string]interface{}{
 				"executor":  "se",
@@ -5148,11 +4987,6 @@ func (m *Manager) executeSEActions(actions []ai.SEAction) error {
 			}
 		}()
 	}
-	if seTaskId != "" && m.richBuilder != nil {
-		m.richBuilder.UpdateTask(seTaskId, 2, "done")
-		m.richBuilder.CompleteTaskList(seTaskId, "done", nil)
-	}
-
 	if m.ctx != nil {
 		// [G53] 移除executeSEActions中的exec_completed！
 		// 原因：此函数可能被多次调用（如continueSETask场景），每次都发会导致前端过早重置_streaming
@@ -6283,37 +6117,19 @@ func (m *Manager) handlePMReview(reviewMsg string) error {
 
 	m.currentRole = "pm"
 
-	// === 三层模型：启动 PM 审核 TaskList ===
-	pmTaskId := m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
-		{Text: "接收 SE 完成报告"},
-		{Text: "自动检测代码变更 (git status / list_files)"},
-		{Text: "审阅变更详情 (read_file / git diff)"},
-		{Text: "运行验证测试 (exec)"},
-		{Text: "给出审核结论"},
-	})
 	var pmReviewResult string
 	defer func() {
 		status := "done"
 		if pmReviewResult == "" {
 			pmReviewResult = i18n.T("msg.task_complete")
 		}
-		m.richBuilder.CompleteTaskList(pmTaskId, status, &types.ResultBlock{
-			Text: pmReviewResult,
-		})
-		m.richBuilder.Reset()
 		if m.ctx != nil {
 			m.msgBusSend("pm", pmReviewResult, "pm_review_completed", PathPMToUser, "handlePMReviewWithRich:done", map[string]interface{}{
-				"taskId": pmTaskId,
 				"status": status,
 				"result": pmReviewResult,
 			})
 		}
 	}()
-
-	m.richBuilder.UpdateTask(pmTaskId, 0, "running")
-	m.richBuilder.UpdateTask(pmTaskId, 0, "done")
-
-	m.pmProcessor.SetTaskContext(pmTaskId, 1)
 
 	// 转换历史
 	history := m.GetHistory()
@@ -6480,30 +6296,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 		m.taskManager.CreateTask("审核：验证SE执行结果", "PM")
 	}
 
-	pmTaskId := m.richBuilder.StartTaskList("pm", "PM 代码审核", []types.TaskItemDef{
-		{Text: "接收 SE 完成报告"},
-		{Text: "自动检测代码变更 (git status / list_files)"},
-		{Text: "审阅变更详情 (read_file / git diff)"},
-		{Text: "运行验证测试 (exec)"},
-		{Text: "给出审核结论"},
-	})
-	var pmReviewResult string
-	defer func() {
-		status := "completed"
-		if pmReviewResult == "" {
-			status = "error"
-			pmReviewResult = i18n.T("err.pm_review_failed", fmt.Errorf("no response"))
-		}
-		m.richBuilder.CompleteTaskList(pmTaskId, status, &types.ResultBlock{
-			Text: pmReviewResult,
-		})
-		m.richBuilder.Reset()
-	}()
-
-	m.richBuilder.UpdateTask(pmTaskId, 0, "running")
-	m.richBuilder.UpdateTask(pmTaskId, 0, "done")
-	m.pmProcessor.SetTaskContext(pmTaskId, 1)
-
 	m.cMonitor.UpdateProjectState(types.ProjectStateRunning)
 	m.cMonitor.UpdatePmStatus(types.RoleStatusBusy)
 
@@ -6530,7 +6322,6 @@ func (m *Manager) handlePMReviewWithRich(content string, pmCtx context.Context) 
 		return fmt.Errorf("PM review failed: %w", err)
 	}
 
-	pmReviewResult = resp.Content
 	cleanContent := strings.TrimSpace(resp.Content)
 	if cleanContent == "" || cleanContent == "@USR" || cleanContent == "@USR " {
 		fmt.Printf("[RichPM] ⚠️ PM审核回复为空，强制转AP审批 (G37修复)\n")
@@ -7629,10 +7420,88 @@ type IDEMessageAck struct {
 }
 
 var (
-	idePendingAcks   = make(map[string]*IDEMessageAck)
-	ideAckMu         sync.Mutex
-	ideMsgCounter    int64
+	idePendingAcks = make(map[string]*IDEMessageAck)
+	ideAckMu       sync.Mutex
+	ideMsgCounter  int64
 )
+
+// [FIX-v1.0.22] SetupIDEMessageEmitterFor 为外部 PMProcessor 实例绑定 IDE 消息推送回调
+// Bridge 独立创建的 PMProcessor 需要通过此方法绑定，否则 ide_send 工具不可用
+func (m *Manager) SetupIDEMessageEmitterFor(pmProc *ai.PMProcessor) {
+	if pmProc == nil || m.sseBridge == nil {
+		return
+	}
+	pmProc.SetIDEMessageEmitter(func(target, message, action string) bool {
+		infos := m.sseBridge.GetSubscriberInfos()
+		hasTarget := false
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name != "" && info.Name != "debug" {
+					hasTarget = true
+					break
+				}
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					hasTarget = true
+					break
+				}
+			}
+		}
+		if !hasTarget {
+			return false
+		}
+		ideAckMu.Lock()
+		ideMsgCounter++
+		counter := ideMsgCounter
+		ideAckMu.Unlock()
+		msgID := fmt.Sprintf("ide_msg_%d_%d", time.Now().Unix(), counter)
+		ackEntry := &IDEMessageAck{
+			MessageID: msgID,
+			Target:    target,
+			Message:   message,
+			Action:    action,
+			SentAt:    time.Now(),
+		}
+		ideAckMu.Lock()
+		idePendingAcks[msgID] = ackEntry
+		ideAckMu.Unlock()
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name == "" || info.Name == "debug" {
+					continue
+				}
+				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+					Type: "ide_message",
+					Data: map[string]interface{}{
+						"from":       "PM",
+						"message":    message,
+						"action":     action,
+						"message_id": msgID,
+					},
+				})
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+						Type: "ide_message",
+						Data: map[string]interface{}{
+							"from":       "PM",
+							"message":    message,
+							"action":     action,
+							"message_id": msgID,
+						},
+					})
+					break
+				}
+			}
+		}
+		return true
+	})
+	fmt.Printf("[Manager] ✅ IDE消息推送回调已绑定到Bridge的PMProcessor\n")
+}
 
 // setupIDEMessageEmitter 设置 PM 的 IDE 消息推送回调
 func (m *Manager) setupIDEMessageEmitter() {

@@ -76,16 +76,16 @@ type MessageBus struct {
 	receivedMap   map[string]*ReceivedMessage // msgId → 已确认消息
 	lostMessages  []*PendingMessage           // 丢失消息记录
 	mu            sync.RWMutex
-	seqNum        int64                   // 全局序列号生成器
-	lastMsgId     string                  // 最后发送的消息ID
-	frontendReady bool                    // 前端是否就绪（OnDomReady之前不追踪）
-	checkInterval time.Duration           // 检查间隔
-	timeout       time.Duration           // 确认超时（普通消息）
-	streamTimeout time.Duration           // 流式消息超时（更短，防pendingQueue膨胀）
-	enabled       bool                    // 是否启用
-	state         RoleState               // 当前角色状态（后面板控件）
-	onStateChange func(RoleState)         // 状态变更回调
-	writeDebugLog func(content string)    // [v0.7.2] 写入 conversation.log（与Bridge一致）
+	seqNum        int64                // 全局序列号生成器
+	lastMsgId     string               // 最后发送的消息ID
+	frontendReady bool                 // 前端是否就绪（OnDomReady之前不追踪）
+	checkInterval time.Duration        // 检查间隔
+	timeout       time.Duration        // 确认超时（普通消息）
+	streamTimeout time.Duration        // 流式消息超时（更短，防pendingQueue膨胀）
+	enabled       bool                 // 是否启用
+	state         RoleState            // 当前角色状态（后面板控件）
+	onStateChange func(RoleState)      // 状态变更回调
+	writeDebugLog func(content string) // [v0.7.2] 写入 conversation.log（与Bridge一致）
 }
 
 // NewMessageBus 创建消息总线
@@ -98,7 +98,7 @@ func NewMessageBus(ctx context.Context) *MessageBus {
 		checkInterval: 2 * time.Second, // 每2秒检查一次
 		timeout:       2 * time.Second, // 2秒超时（普通消息）
 		streamTimeout: 5 * time.Second, // 5秒超时（流式消息，快速释放防膨胀）
-		enabled: true,
+		enabled:       true,
 	}
 
 	go mb.backgroundChecker()
@@ -223,9 +223,10 @@ func (mb *MessageBus) GetLastMsgId() string {
 // 🎯 核心原则：后端→前端的跨进程通讯必须追踪，确保可靠投递
 // ⚠️ OnDomReady之前前端未就绪，暂不追踪（等前端就绪后再追踪）
 // 分类策略：
-//   ✅ MUST_TRACK: PathSystem, PathUserInput, PathPM/SE/APToUser, PathSEExec
-//   ❌ NO_TRACK: PathCoreOutput (高频内部通道), PathStatus (状态同步)
-//   📊 SAMPLE: PathPMStream, PathSEStream (流式消息采样追踪)
+//
+//	✅ MUST_TRACK: PathSystem, PathUserInput, PathPM/SE/APToUser, PathSEExec
+//	❌ NO_TRACK: PathCoreOutput (高频内部通道), PathStatus (状态同步)
+//	📊 SAMPLE: PathPMStream, PathSEStream (流式消息采样追踪)
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	mb.mu.RLock()
 	ready := mb.frontendReady

@@ -318,7 +318,6 @@ const thoughtEvents = ref<Array<{
 
 const seenMsgIds = new Set<number>()
 const streamingRole = ref('')
-const receivedMessageIds = new Set<string>() // [G49] 已收到的消息ID（防止重复）
 
 // [G60] 前端收水记录（用于前后端一致性校验）
 let recordReceiveCounter = 0
@@ -378,27 +377,7 @@ watch(messages, (newVal, oldVal) => {
 
 // 加载配置和消息
 onMounted(async () => {
-  // [DEBUG-20260529] 测试消息：验证前端渲染是否工作
-  messages.value.push({
-    id: Date.now(),
-    role: 'system',
-    content: '🧪 **前端渲染测试** - 如果您看到此消息，说明Vue渲染系统正常工作！\n\n时间: ' + new Date().toLocaleString(),
-    timestamp: Math.floor(Date.now() / 1000)
-  })
-  console.log('[DEBUG] Test message added to messages array, count:', messages.value.length)
-
-  // [v0.7.3] Context Management: global ACK for token/context/compress events (must be inside onMounted)
-  EventsOn('token_stats', (data: any) => {
-    console.log('[App.vue] token_stats received, msgId=', data?._msgId)
-    if (data?._msgId) ackMessage(data._msgId)
-  })
-  EventsOn('context_built', (data: any) => {
-    console.log('[App.vue] context_built received, msgId=', data?._msgId)
-    if (data?._msgId) ackMessage(data._msgId)
-  })
-  EventsOn('compress_done', (data: any) => {
-    if (data?._msgId) ackMessage(data._msgId)
-  })
+  // [v0.7.3] Context events handled by TokenMonitor child component
 
   // 监听项目状态变更事件（后端产生 → 必须ACK）
   EventsOn('project-state-changed', (data: { state?: string; _msgId?: string; data?: any }) => {
@@ -538,84 +517,7 @@ onMounted(async () => {
     recordReceive(msg.role, (msg.id || 'newmsg_') + '_' + Date.now(), msg.content, 'new-message')
   })
 
-  // [G57] 监听AI流式输出事件
-  // ⚠️ 统一方案：PM/AP不再使用ai-stream-chunk（各自有专用通道）
-  // - PM → pm_message (单一通道，像AP一样)
-  // - SE → ai-stream-chunk + exec_start/exec_completed (无专用通道)
-  // - AP → ap_message (单一通道)
-  EventsOff('ai-stream-chunk')
-  EventsOn('ai-stream-chunk', (data: { role: string; delta: string; messageId?: string; _msgId?: string }) => {
-    const msgId = data._msgId || data.messageId || data.role + '_unknown'
-    
-    // [G63] 自动ACK
-    ackMessage(data._msgId || '')
-    
-    // [G57+G63] PM/AP/SE忽略ai-stream-chunk
-    // PM → pm_message专用通道
-    // AP → ap_message专用通道  
-    // SE → exec_start/exec_done/exec_completed卡片机制（流式JSON是噪音，不应显示）
-    if (data.role === 'pm' || data.role === 'ap' || data.role === 'se') {
-      return
-    }
-    
-    if (!receivedMessageIds.has(msgId)) {
-      receivedMessageIds.add(msgId)
-      streamingRole.value = data.role
-      messages.value.push({
-        role: data.role,
-        content: data.delta,
-        _streaming: true,
-        _messageId: msgId
-      } as any)
-      // [G60] 记录收水
-      recordReceive(data.role, msgId, data.delta, 'ai-stream-chunk')
-    } else {
-      const lastMsg = [...messages.value].reverse().find(m => (m as any)._messageId === msgId)
-      if (lastMsg) {
-        lastMsg.content += data.delta
-      }
-    }
-  })
-
-  // PM 通过 pm_message 事件流式推送，前端累加（不新建消息，避免多个气泡）
-  EventsOff('pm_message')
-  EventsOn('pm_message', (data: { delta: string; _msgId?: string }) => {
-    if (!data.delta) return
-    ackMessage(data._msgId || '')
-    // 累加到上一条 PM 消息
-    const lastPm = [...messages.value].reverse().find(m => m.role === 'pm')
-    if (lastPm) {
-      lastPm.content += data.delta
-    } else {
-      messages.value.push({
-        role: 'pm',
-        content: data.delta,
-        timestamp: Date.now()
-      } as any)
-    }
-    recordReceive('pm', data._msgId || 'pm_' + Date.now(), data.delta, 'pm_message')
-  })
-
-  // 监听AP消息事件（AP审批结果）
-  EventsOff('ap_message')
-  EventsOn('ap_message', (data: { delta: string; _msgId?: string }) => {
-    if (!data.delta) return
-    // [G64] AP消息去重：检查是否已存在相同内容的AP消息
-    const lastApMsg = [...messages.value].reverse().find(m => m.role === 'ap')
-    if (lastApMsg && (lastApMsg.content || '').trim() === (data.delta || '').trim()) {
-      console.log('[G64] AP消息去重: 跳过重复内容')
-      return
-    }
-    // [G63] 自动ACK
-    ackMessage(data._msgId || '')
-    messages.value.push({
-      role: 'ap',
-      content: data.delta,
-      timestamp: Date.now()
-    } as any)
-    // [G60] 记录收水
-    recordReceive('ap', data._msgId || 'ap_' + Date.now(), data.delta, 'ap_message')
-  })
+  // PM/AP/SE messages all arrive via new-message event — no separate handlers needed
 
   // 监听消息清空事件（来自后端ClearMessages/ResetRoleStatus）- 后端产生 → 必须ACK
   EventsOn('messages-cleared', (data?: { _msgId?: string }) => {
@@ -644,95 +546,7 @@ onMounted(async () => {
     }
   })
 
-  // 监听SE执行事件（Trae风格：步骤列表+终端输出）
-  let currentExecMsg: any = null
-  interface ExecActionStep {
-    index: number
-    type: string
-    label: string
-    status: 'running' | 'done' | 'error' | 'blocked'
-    error?: string
-  }
-
-  EventsOn('exec_start', (data: { executor: string; index: number; total: number; type: string; label: string; _msgId?: string }) => {
-    // [G63] 自动ACK
-    ackMessage(data._msgId || '')
-    if (!currentExecMsg) {
-      currentExecMsg = {
-        role: data.executor === 'pm' ? 'pm' : 'se',
-        content: '',  // 初始为空，后续填充
-        timestamp: Date.now(),
-        _streaming: true,
-        _execData: {
-          executor: data.executor,
-          totalActions: data.total,
-          actions: [] as ExecActionStep[],
-          outputs: [] as { command: string; output: string; exitCode: number }[],
-        },
-      }
-      messages.value.push(currentExecMsg)
-    }
-    currentExecMsg._execData.actions.push({
-      index: data.index,
-      type: data.type,
-      label: data.label,
-      status: 'running',
-    })
-  })
-
-  EventsOn('exec_done', (data: { executor: string; index: number; type: string; label: string; status: string; error?: string; _msgId?: string }) => {
-    // [G63] 自动ACK
-    ackMessage(data._msgId || '')
-    if (!currentExecMsg) return
-    const step = currentExecMsg._execData.actions.find((a: ExecActionStep) => a.index === data.index)
-    if (step) {
-      step.status = data.status as ExecActionStep['status']
-      if (data.error) step.error = data.error
-    }
-  })
-
-  EventsOn('exec_output', (data: { executor: string; command: string; output: string; exit_code: number; blocked?: boolean; _msgId?: string }) => {
-    // [G63] 自动ACK
-    ackMessage(data._msgId || '')
-    if (currentExecMsg) {
-      currentExecMsg._execData.outputs.push({
-        command: data.command || '',
-        output: data.output,
-        exitCode: data.exit_code,
-      })
-    }
-  })
-
-  EventsOn('exec_completed', (data: { _msgId?: string }) => {
-    // [G63] 自动ACK
-    ackMessage((data as any)._msgId || '')
-    if (currentExecMsg) {
-      currentExecMsg._streaming = false
-      currentExecMsg = null
-    }
-    const seMsgs = messages.value.filter(m => m.role === 'se')
-    for (const msg of seMsgs) {
-      if ((msg as any)._streaming) {
-        ;(msg as any)._streaming = false
-      }
-    }
-  })
-
-  EventsOn('pm_review_completed', (data: { taskId: string; status: string; result: string; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const pmMsgs = messages.value.filter(m => m.role === 'pm')
-    for (const msg of pmMsgs) {
-      if ((msg as any)._streaming) {
-        ;(msg as any)._streaming = false
-      }
-    }
-    streamingRole.value = ''
-    aiThinking.value = false
-    // [G60] 任务阶段完成，输出一致性报告
-    try {
-      ;(window as any).go.main.App.GetConsistencyReport()
-    } catch(e) { /* 静默 */ }
-  })
+  // Execution events (exec_start/done/output/completed) removed — no longer needed
 
   const seenLostMsgIds = new Set<string>()
 
@@ -819,24 +633,7 @@ onMounted(async () => {
     }
   })
 
-  // [Legacy] 兼容旧版字符串状态（逐步废弃）
-  EventsOn('role-status', (data: { _msgId?: string; [key: string]: any }) => {
-    ackMessage(data._msgId || '')
-    const statusStr = typeof data === 'string' ? data : (data.delta || data.content || '')
-
-    if (typeof statusStr === 'string' && statusStr.includes('role:')) {
-      const roleMatch = statusStr.match(/role:(\w+)/)
-      const statusMatch = statusStr.match(/status:(\w+)/)
-      if (roleMatch && statusMatch) {
-        const role = roleMatch[1]
-        const status = statusMatch[1]
-        if (role === 'pm') aiStatus.pmStatus = status === 'busy' ? 'busy' : 'idle'
-        else if (role === 'se') aiStatus.seStatus = status === 'busy' ? 'busy' : 'idle'
-        else if (role === 'ap') aiStatus.apStatus = status === 'busy' ? 'busy' : 'idle'
-        else if (role === 'none' || status === 'error') { aiStatus.pmStatus = 'idle'; aiStatus.seStatus = 'idle'; aiStatus.apStatus = 'idle' }
-      }
-    }
-  })
+  // role-status deprecated (role-state covers it)
 
   EventsOn('error', (data: { error?: string; stage?: string; _msgId?: string }) => {
     ackMessage(data._msgId || '')
@@ -850,23 +647,7 @@ onMounted(async () => {
     })
   })
 
-  EventsOn('pm_streaming_done', (data: { content?: string; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-
-    const pmMsgs = messages.value.filter(m => m.role === 'pm')
-    for (const msg of pmMsgs) {
-      if ((msg as any)._streaming) {
-        ;(msg as any)._streaming = false
-        
-        // [G49] 清理已完成的messageId
-        const msgId = (msg as any)._messageId
-        if (msgId && receivedMessageIds.has(msgId)) {
-          receivedMessageIds.delete(msgId)
-        }
-      }
-    }
-    streamingRole.value = ''
-  })
+  // pm_streaming_done removed — covered by new-message handler
 
   EventsOn('ai-thinking', (data: boolean | { _msgId?: string }) => {
     const msgId = (data as any)?._msgId
@@ -949,96 +730,6 @@ onMounted(async () => {
     }
   })
 
-  // === 三层模型事件监听 ===
-  EventsOn('tasklist_start', (data: { roleId: string; taskId: string; title: string; tasks: Array<{id:string;text:string;status:string}>; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    console.log('[RichMessage] tasklist_start:', data)
-    window.__richMessages = window.__richMessages || {}
-    window.__richMessages[data.taskId] = {
-      id: data.taskId,
-      role: data.roleId,
-      title: data.title,
-      taskList: { id: data.taskId, role: data.roleId, title: data.title, tasks: data.tasks, status: 'running', startedAt: Date.now() },
-      shells: [],
-      result: undefined
-    }
-    EventsEmit('rich-message-update', data.taskId)
-  })
-  
-  EventsOn('tasklist_update', (data: { taskId: string; taskIndex: number; status: string; error?: string; detail?: string; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const rm = window.__richMessages?.[data.taskId]
-    if (rm?.taskList) {
-      const t = rm.taskList.tasks[data.taskIndex]
-      if (t) {
-        t.status = data.status
-        if (data.error) t.error = data.error
-        if (data.detail) t.detail = data.detail
-        if (data.status === 'running') t.startedAt = Date.now()
-        if (data.status === 'done' || data.status === 'error') t.completedAt = Date.now()
-      }
-      EventsEmit('rich-message-update', data.taskId)
-    }
-  })
-
-  EventsOn('tasklist_replace', (data: { taskId: string; tasks: Array<{id:string;text:string;status:string}>; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const rm = window.__richMessages?.[data.taskId]
-    if (rm?.taskList) {
-      rm.taskList.tasks = data.tasks.map(t => ({ ...t }))
-      EventsEmit('rich-message-update', data.taskId)
-    }
-  })
-
-  EventsOn('tasklist_complete', (data: { taskId: string; status: string; result?: { text?: string }; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const rm = window.__richMessages?.[data.taskId]
-    if (rm) {
-      rm.taskList.status = data.status
-      rm.taskList.endedAt = Date.now()
-      if (data.result) rm.result = data.result
-      const lastRoleMsg = [...messages.value].reverse().find(m => m.role === rm.role && !(m as any)._richTaskId)
-      if (lastRoleMsg) (lastRoleMsg as any)._richTaskId = data.taskId
-      EventsEmit('rich-message-complete', data.taskId)
-    }
-  })
-
-  EventsOn('shell_start', (data: { roleId: string; taskId: string; taskIndex: number; type: string; command: string; extra?: Record<string,string>; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const rm = window.__richMessages?.[data.taskId]
-    if (rm) {
-      rm.shells.push({
-        taskId: data.taskId, type: data.type as any, command: data.command,
-        output: '', exitCode: 0, duration: '', status: 'running',
-        timestamp: Date.now(), extra: data.extra
-      })
-      EventsEmit('rich-message-update', data.taskId)
-    }
-  })
-
-  EventsOn('shell_output', (data: { taskId: string; output: string; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    const rm = window.__richMessages?.[data.taskId]
-    if (rm && rm.shells.length > 0) {
-      const lastShell = rm.shells[rm.shells.length - 1]
-      lastShell.output += data.output
-      EventsEmit('rich-message-update', data.taskId)
-    }
-  })
-
-  EventsOn('shell_done', (data: { roleId: string; taskId: string; exitCode: number; duration: string; status: string; _msgId?: string }) => {
-    ackMessage(data._msgId || '')
-    console.log('[shell_done] 收到事件:', JSON.stringify(data))
-    const rm = window.__richMessages?.[data.taskId]
-    console.log('[shell_done] rm存在:', !!rm, 'shells数量:', rm?.shells?.length)
-    if (rm && rm.shells.length > 0) {
-      const lastShell = rm.shells[rm.shells.length - 1]
-      lastShell.exitCode = data.exitCode
-      lastShell.duration = data.duration
-      lastShell.status = data.status as any
-      EventsEmit('rich-message-update', data.taskId)
-    }
-  })
   
   try {
     const loadedConfig = await GetConfig()
@@ -1349,7 +1040,7 @@ function openFileInEditor(filePath: string) {
 // 全局任务追踪器
 const globalTasks = ref<GlobalTask[]>([])
 
-// 处理来自 SERichMessage 的文件打开请求（事件通信机制）
+// 打开文件到编辑器
 async function handleOpenFileInEditor(data: { path: string }) {
   console.log('[App] 打开文件到编辑器:', data.path)
   
@@ -1367,7 +1058,7 @@ async function handleOpenFileInEditor(data: { path: string }) {
   }
 }
 
-// 处理来自 SERichMessage 的命令执行请求（事件通信机制）
+// 在终端执行命令
 function handleRunInTerminal(data: { command: string }) {
   console.log('[App] 在终端执行:', data.command)
   

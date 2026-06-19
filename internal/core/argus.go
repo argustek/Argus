@@ -542,7 +542,9 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 		// PM 已在 ProcessStream 中执行了工具调用（write_file/exec 等）
 		// 任务已完成，直接汇报结果，不再调用 pmDirectExecute 重复执行
 		result.Level = "short-process"
-		c.prevTaskLevel = "short-process"
+		// [FIX-v1.0.22] 不再无条件设置 prevTaskLevel=short-process
+		// ide_send 等纯消息工具不应触发追问继承走 SE 路径
+		// 只有 PM 明确标记 level:"short"/"featherweight" 才继承
 		result.Success = true
 		pmText := strings.ReplaceAll(pmResponse, "[HAS_TOOL_CALLS]", "")
 		pmText = strings.TrimSpace(pmText)
@@ -1867,7 +1869,12 @@ func (c *ArgusCore) pmDirectExecute(userMsg string, pmResponse string, result *P
 
 	start := time.Now()
 
-	// Step 1: 调用 LLM（PM自己工位 + SE工具，不换工位）
+	// [FIX-v1.0.22] 合并 PMTools + SETools，让 short-process 也能用 ide_send 等 PM 工具
+	featherTools := ai.MergePMAndSETools()
+	fmt.Printf("[Core:Feather] ⚡ 合并工具集: PM=%d + SE=%d = 总%d\n",
+		len(ai.PMTools), len(ai.SETools), len(featherTools))
+
+	// Step 1: 调用 LLM（PM自己工位 + 全部工具，不换工位）
 	systemPrompt := c.prompts.Get(RolePM)
 	execPrompt := fmt.Sprintf(`Execute the task directly. No analysis.
 
@@ -1891,7 +1898,7 @@ Requirements:
 	// 第一次 LLM 调用
 	callCtx, callCancel := context.WithTimeout(c.ctx, c.timeout)
 	var resp *ai.ChatResponse
-	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, memHistory, execPrompt, ai.SETools, c.language)
+	resp, callErr = c.client.ChatWithTools(callCtx, systemPrompt, memHistory, execPrompt, featherTools, c.language)
 	callCancel()
 
 	if callErr != nil {
@@ -1959,7 +1966,7 @@ Requirements:
 
 		forceCtx, forceCancel := context.WithTimeout(c.ctx, c.timeout)
 		var resp2 *ai.ChatResponse
-		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, memHistory, forcePrompt, ai.SETools, c.language)
+		resp2, callErr = c.client.ChatWithTools(forceCtx, systemPrompt, memHistory, forcePrompt, featherTools, c.language)
 		forceCancel()
 
 		if callErr != nil || len(resp2.Choices) == 0 {
@@ -2063,7 +2070,7 @@ Requirements:
 			prompt := "[工具已执行，请继续分析。若需进一步操作（如删除空目录）请继续调用工具；若已完成请回复用户。]"
 			followHistory = append(followHistory, ai.Message{Role: "user", Content: prompt})
 			fCtx, fCancel := context.WithTimeout(c.ctx, c.timeout)
-			fResp, fErr := c.client.ChatWithTools(fCtx, systemPrompt, followHistory, prompt, ai.SETools, c.language)
+			fResp, fErr := c.client.ChatWithTools(fCtx, systemPrompt, followHistory, prompt, featherTools, c.language)
 			fCancel()
 			if fErr != nil || len(fResp.Choices) == 0 {
 				break
@@ -2149,7 +2156,7 @@ Requirements:
 4. 最多重试 3 次，仍不行就 @USR 汇报`,
 			feedbackErr, actions, execResults, userMsg)
 		callCtx2, cancel2 := context.WithTimeout(c.ctx, c.timeout)
-		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, ai.SETools, c.language)
+		resp2, err2 := c.client.ChatWithTools(callCtx2, systemPrompt, memHistory, fixPrompt, featherTools, c.language)
 		cancel2()
 		if err2 != nil {
 			fmt.Printf("[Core:Feather] ⚠️ 重试LLM调用失败: %v\n", err2)

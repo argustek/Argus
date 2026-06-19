@@ -35,6 +35,8 @@ type Bridge struct {
 	writeDebugLog func(content string)
 
 	pushSSEEvent func(eventType string, data interface{}) // SSE 事件推送
+
+	pmProcessor *ai.PMProcessor // [FIX-v1.0.22] 持有PM处理器引用，供外部绑定回调
 }
 
 func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Bridge {
@@ -58,6 +60,7 @@ func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Br
 	pmProc := ai.NewPMProcessor(aiClient, workDir, func(state int) {
 		fmt.Printf("[Bridge-PM] 项目状态更新: %d\n", state)
 	})
+	b.pmProcessor = pmProc // [FIX-v1.0.22] 保存引用
 	b.argus.SetPMProcessor(pmProc)
 
 	return b
@@ -80,19 +83,10 @@ func (b *Bridge) SetMessageBus(bus *MessageBus) {
 		}
 	})
 
-	// Action events (exec_start/done/output/completed) → MessageBus
+	// Action events (exec_start/done/output/completed) → SSE only (前端 EventsOn 已移除)
 	b.argus.SetOnActionEvent(func(eventName string, data interface{}) {
-		if bus != nil && b.ctx != nil {
-			// [v0.8] 从 data 中动态获取 executor（PM直执时为 "pm"，否则默认 "se"）
-			executor := "se"
-			if m, ok := data.(map[string]interface{}); ok {
-				if e, exists := m["executor"]; exists {
-					if s, ok := e.(string); ok && s != "" {
-						executor = s
-					}
-				}
-			}
-			bus.Send(executor, eventName, eventName, PathSEExec, "Bridge:action:"+eventName, data)
+		if b.pushSSEEvent != nil && b.ctx != nil {
+			b.pushSSEEvent(eventName, data)
 		}
 	})
 }
@@ -126,6 +120,13 @@ func (b *Bridge) SetPushSSEEvent(fn func(eventType string, data interface{})) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pushSSEEvent = fn
+}
+
+// [FIX-v1.0.22] GetPMProcessor 返回 PM 处理器引用，供外部绑定 ideMessageEmitter 等
+func (b *Bridge) GetPMProcessor() *ai.PMProcessor {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.pmProcessor
 }
 
 // [v0.7.2] SetContextWindow 注入 Token 监控窗口
@@ -164,7 +165,7 @@ func (b *Bridge) pushTokenStats() {
 		return
 	}
 	stats := b.contextWindow.TokenStats()
-	msgId := b.msgBus.Send("system", "", "token_stats", PathSystem, "Bridge:pushTokenStats", stats)
+	msgId := b.msgBus.Send("system", "", "token_stats", PathStatus, "Bridge:pushTokenStats", stats)
 	if b.writeDebugLog != nil {
 		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ token_stats 已推送 msgId=%s total_tokens=%v", msgId, stats["total_tokens"]))
 	}
@@ -180,7 +181,7 @@ func (b *Bridge) pushContextBuilt(taskID string, contextStr string) {
 		"context":   contextStr,
 		"timestamp": time.Now().Unix(),
 	}
-	msgId := b.msgBus.Send("system", "", "context_built", PathSystem, "Bridge:pushContextBuilt", data)
+	msgId := b.msgBus.Send("system", "", "context_built", PathStatus, "Bridge:pushContextBuilt", data)
 	if b.writeDebugLog != nil {
 		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ context_built 已推送 msgId=%s taskID=%s len=%d", msgId, taskID, len(contextStr)))
 	}
@@ -196,7 +197,7 @@ func (b *Bridge) pushCompressDone(taskID string, compressedCount int) {
 		"compressed_count": compressedCount,
 		"timestamp":        time.Now().Unix(),
 	}
-	msgId := b.msgBus.Send("system", "", "compress_done", PathSystem, "Bridge:pushCompressDone", data)
+	msgId := b.msgBus.Send("system", "", "compress_done", PathStatus, "Bridge:pushCompressDone", data)
 	if b.writeDebugLog != nil {
 		b.writeDebugLog(fmt.Sprintf("[Bridge-CTX] ✅ compress_done 已推送 msgId=%s taskID=%s compressed=%d", msgId, taskID, compressedCount))
 	}
@@ -235,32 +236,14 @@ func (b *Bridge) onCoreMessage(source, content string) {
 		b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] source=%s content=%s msgBus=%v ctx=%v", source, content, b.msgBus != nil, b.ctx != nil))
 	}
 
-	// pm_to_user 走 MessageBus（conversation.log 由 Ack 统一写）+ SSE 推送
-	// [v0.9.6] 不再 return，继续走到 b.onMessage → app.go → EventsEmit('new-message') 更新对话框
+	// pm_to_user 走 b.onMessage → app.go → emitToFrontend → MessageBus（不再重复 msgBus.Send）
+	// conversation.log 由 Ack 统一写
 	msgContent := content
-	if source == "pm_to_user" && b.msgBus != nil && b.ctx != nil {
+	if source == "pm_to_user" {
 		msgContent = strings.ReplaceAll(content, "⚡", "")
-		msgId := b.msgBus.Send("pm", msgContent, "pm_message", PathPMToUser, "Bridge:pm_to_user", map[string]interface{}{"delta": msgContent})
-		if b.pushSSEEvent != nil {
-			b.pushSSEEvent("pm_message", map[string]interface{}{"delta": msgContent})
-		}
-		if b.writeDebugLog != nil {
-			b.writeDebugLog(fmt.Sprintf("[Bridge-onCoreMessage] msgBus.Send returned msgId=%s displayContent=%q", msgId, msgContent))
-		}
 	}
 
-	// 关键对话事件推送到 SSE（pm_to_user 已在上面推送）
-	if b.pushSSEEvent != nil && !strings.HasPrefix(source, "status") {
-		sseSources := map[string]string{
-			"se_to_pm":  "se_message",
-			"pm_review": "review_result",
-			"ap_result": "ap_result",
-			"error":     "error",
-		}
-		if sseType, ok := sseSources[source]; ok {
-			b.pushSSEEvent(sseType, map[string]interface{}{"delta": content})
-		}
-	}
+	// 所有事件只走 MessageBus，不再推 SSE
 
 	if b.onMessage != nil {
 		parts := strings.Split(source, "_to_")
@@ -500,5 +483,6 @@ func (b *Bridge) UpdateClient(newClient *ai.Client, workDir string) {
 	pmProc := ai.NewPMProcessor(newClient, workDir, func(state int) {
 		fmt.Printf("[Bridge-PM] 项目状态更新: %d\n", state)
 	})
+	b.pmProcessor = pmProc // [FIX-v1.0.22] 更新引用
 	b.argus.SetPMProcessor(pmProc)
 }
