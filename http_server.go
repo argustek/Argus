@@ -140,6 +140,8 @@ func (a *App) registerAdminRoutes(mux *http.ServeMux) {
 
 func (a *App) registerHealthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health/ping", a.handlePing)
+	// 根路径：返回连接指南，让外部 IDE/工具知道如何接入
+	mux.HandleFunc("GET /", a.handleWelcome)
 }
 
 func (a *App) authMiddleware(next http.Handler) http.Handler {
@@ -514,6 +516,41 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"apiConfigs": len(a.config.APIConfigs),
 	}
 	writeJSON(w, http.StatusOK, cfg)
+}
+
+// handleWelcome GET / — 连接指南，外部 IDE/工具访问根路径时返回
+func (a *App) handleWelcome(w http.ResponseWriter, r *http.Request) {
+	ides := []string{}
+	if a.chatManager != nil {
+		if bridge := a.chatManager.GetSSEBridge(); bridge != nil {
+			for _, info := range bridge.GetSubscriberInfos() {
+				if info.Name != "" && info.Name != "debug" {
+					ides = append(ides, info.Name)
+				}
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"name":    "Argus · 驭码",
+		"version": "1.0.21",
+		"welcome": "欢迎接入 Argus IDE 协作平台",
+		"how_to_connect": map[string]string{
+			"step1_subscribe": "POST /api/v1/sse/subscribe  Body: {\"source\": \"你的IDE名字\"}",
+			"step2_send":      "POST /api/v1/sse/ide-input    Body: {\"session_id\": \"返回的ID\", \"message\": \"消息内容\"}",
+			"step3_ack":        "POST /api/v1/sse/ack         Body: {\"msg_id\": \"消息ID\"}",
+			"note":             "subscribe 返回 SSE 事件流（text/event-stream），保持长连接接收实时推送",
+		},
+		"endpoints": map[string]string{
+			"sse_subscribe": "POST /api/v1/sse/subscribe   — 建立SSE长连接",
+			"ide_input":     "POST /api/v1/sse/ide-input     — IDE发送消息",
+			"ide_ack":       "POST /api/v1/sse/ack           — 确认收到消息",
+			"chat_send":     "POST /api/v1/chat/send         — 直接发消息(无需订阅)",
+			"chat_history":  "GET  /api/v1/chat/history      — 获取对话历史",
+		},
+		"current_ides": ides,
+	})
 }
 
 func (a *App) handlePing(w http.ResponseWriter, r *http.Request) {

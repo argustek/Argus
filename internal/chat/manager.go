@@ -436,7 +436,7 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 	// 注意：ctx在SetContext时设置，这里先创建，ctx后续注入
 	manager.msgBus = NewMessageBus(nil)
 
-	// IDE连接状态变化 → 通过MessageBus推送ide_status事件到前端（动态IDE列表）
+	// IDE连接状态变化 → 通过MessageBus推送ide_status事件到前端（动态IDE列表）+ 同步到PM
 	manager.sseBridge.SetOnChange(func() {
 		infos := manager.sseBridge.GetSubscriberInfos()
 		ides := []string{}
@@ -446,6 +446,10 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 				ides = append(ides, info.Name)
 				seen[info.Name] = true
 			}
+		}
+		// 同步在线IDE列表到PM，让PM知道可以给哪些IDE发消息
+		if manager.pmProcessor != nil {
+			manager.pmProcessor.SetIDEList(ides)
 		}
 		manager.msgBus.Send("system", "", "ide_status", PathIDEEvent, "setupIDEEmitter", map[string]interface{}{
 			"ides": ides,

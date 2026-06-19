@@ -64,6 +64,7 @@
         :ai-thinking="aiThinking"
         :supports-multimodal="supportsMultimodal"
         :thought-events="thoughtEvents"
+        :ide-connected="ideConnected"
         @send-message="handleSendMessage"
         @expand-thinking="toggleThinking"
         @upload-file="handleUploadFile"

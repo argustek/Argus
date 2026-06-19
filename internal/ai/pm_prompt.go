@@ -38,6 +38,10 @@ User message
   ├─ user says "让|叫|找 IDE-X 做..."/"ask IDE-X to..." → USE ide_send TOOL to delegate to that IDE.
   │     Do NOT execute the task yourself. You are the coordinator, not the doer.
   │
+  ├─ user says "给|通知|告诉|转发|发给|传话给 IDE-X ..."/"send to IDE-X"/"forward to IDE-X" → USE ide_send TOOL.
+  │     This means: send a message to that IDE / let the IDE handle it. Do NOT do the task yourself.
+  │     Example: "给 trae-ide 发消息 写个 hello" → ide_send(target="trae-ide", action="instruct")
+  │
   ├─ unclear/ambiguous → use tools to investigate (list_files/grep/search),
   │     then @USR <question with options> if still unclear
   │
@@ -48,7 +52,7 @@ User message
   │   • system operations (disk, process, network checks) → exec
   │   • search information → grep / web_search / read_file
   │   • document conversion / processing → appropriate tool
-  │   Result format: ✅ tool_name args (summary), no extra commentary
+  │   Result format: natural language, e.g. "Created hello.go and ran it — output: Hello World"
   │
   └─ complex task (multi-step, needs analysis) → @SE <task breakdown>
        After SE completes → verify with tools → @AP for final approval
@@ -67,8 +71,9 @@ User message
 One @ per message maximum.
 
 === IDE COORDINATION (MANDATORY) ===
-Messages with [IDE:xxx] prefix come from external IDEs. You MUST use ide_send tool — do NOT use exec/write_file/read_file or any other tool.
-1. ide_send(target="IDE-A"|"IDE-B"|"all", message="你的回复", action="discuss")
+Messages with [xxx] prefix come from external IDEs. You MUST use ide_send tool — do NOT use exec/write_file/read_file or any other tool.
+1. ide_send(target="IDE名称"|"all", message="你的回复", action="discuss")
+   - target 从「当前在线 IDE」列表中选择，或用 "all" 广播给所有在线IDE
 2. When the goal is met: action="terminate" to end discussion
 3. You may analyze and contribute your own perspective
 4. Before terminate, output the final conclusion
@@ -77,11 +82,14 @@ Messages with [IDE:xxx] prefix come from external IDEs. You MUST use ide_send to
 - If SE completes a task, do not re-assign the same task to SE
 - If a tool errors twice on the same input, try a different approach, not a retry
 - If you can't make progress after 3 attempts, @USR <what happened + what you tried>
+- If a command (exec) already succeeded on the same code, do NOT run it again. One successful verification is enough.
 
 === OUTPUT RULES (strict) ===
-- Respond in 3 sentences max. Direct answer only — no explanations, no suggestions, no politeness.
+- Respond in natural language, like a human developer reporting to a teammate. No tool names, no args dumps.
+- 3 sentences max. Direct answer — no explanations, no suggestions, no politeness.
 - One @ mention per message. No greetings, no sign-offs.
-- Tool result: ✅ tool_name args (summary)
+- Bad: "✅ write_file foo.go (71 bytes)\n✅ exec 'go run foo.go'\nHello World"
+- Good: "Created foo.go and ran it — output: Hello World"
 `
 
 // PMProcessor PM处理器
@@ -104,6 +112,7 @@ type PMProcessor struct {
 	currentTaskIndex int                     // 当前执行到的步骤索引
 
 	ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
+	ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
 }
 
 // NewPMProcessor 创建PM处理器
@@ -151,6 +160,15 @@ func (p *PMProcessor) SetIDEMessageEmitter(emitter func(target, message, action 
 	p.ideMessageEmitter = emitter
 }
 
+// SetIDEList 动态设置当前在线 IDE 列表，PM 会据此知道可以给哪些 IDE 发消息
+func (p *PMProcessor) SetIDEList(ides []string) {
+	if len(ides) == 0 {
+		p.ideList = "（无在线 IDE）"
+	} else {
+		p.ideList = strings.Join(ides, ", ")
+	}
+}
+
 func (p *PMProcessor) SetTaskContext(taskId string, taskIndex int) {
 	p.currentTaskId = taskId
 	p.currentTaskIndex = taskIndex
@@ -164,9 +182,12 @@ func (p *PMProcessor) getCtx() context.Context {
 	return p.ctx
 }
 
-// getSystemPrompt 获取完整的System Prompt（核心 + 执行规则 + 时间上下文）
+// getSystemPrompt 获取完整的System Prompt（核心 + 执行规则 + 时间上下文 + IDE列表）
 func (p *PMProcessor) getSystemPrompt() string {
 	base := p.systemPrompt + "\n\n" + PMRules
+	if p.ideList != "" {
+		base += fmt.Sprintf("\n\n=== 当前在线 IDE ===\n%s", p.ideList)
+	}
 	if p.timeContext != "" {
 		return base + "\n\n" + p.timeContext
 	}
@@ -190,6 +211,30 @@ func needsExecution(request string) bool {
 	for _, kw := range keywords {
 		if strings.Contains(lower, kw) {
 			return true
+		}
+	}
+	return false
+}
+
+// wantsIDEDelegation 检查用户请求是否要求将消息发送/委托给 IDE
+func wantsIDEDelegation(request string) bool {
+	keywords := []string{"给", "通知", "告诉", "转发给", "发给", "传话给", "发送给", "发消息给", "说给"}
+	lower := strings.ToLower(request)
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	// 也匹配 ask/tell/forward/send + IDE/keyword
+	ideKeywords := []string{"ide", "trae", "cursor", "vscode", "windsurf"}
+	actionWords := []string{"ask", "tell", "forward", "send", "let", "让", "叫", "找"}
+	for _, act := range actionWords {
+		if strings.Contains(lower, act) {
+			for _, ide := range ideKeywords {
+				if strings.Contains(lower, ide) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -442,14 +487,13 @@ var PMTools = []Tool{
 		Type: "function",
 		Function: ToolFunction{
 			Name:        "ide_send",
-			Description: "向外部 IDE 发送自然语言消息。PM 作为协调人主持 IDE-A 和 IDE-B 之间的讨论。使用 discuss 征求意见，instruct 发指令，terminate 结束对话。",
+			Description: "向外部 IDE 发送自然语言消息。PM 作为协调人主持 IDE 之间的讨论。使用 discuss 征求意见，instruct 发指令执行任务，terminate 结束对话。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target": map[string]interface{}{
 						"type":        "string",
-						"description": "目标 IDE：IDE-A, IDE-B, 或 all（全部）",
-						"enum":        []string{"IDE-A", "IDE-B", "all"},
+						"description": "目标 IDE 名称（从「当前在线 IDE」列表中选择），或 \"all\" 表示全部在线 IDE",
 					},
 					"message": map[string]interface{}{
 						"type":        "string",
@@ -509,7 +553,7 @@ func (p *PMProcessor) Process(userInput string, history []ChatMessage) (*PMRespo
 
 // ProcessStream 流式处理用户输入，每收到文本片段调用 onChunk
 func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onChunk func(delta string)) (*PMResponse, error) {
-	fmt.Printf("[PM Stream] Processing input: %s, history count: %d\n", userInput, len(history))
+	os.WriteFile("F:\\ArgusTek\\Argus\\debug_process_stream.txt", []byte(fmt.Sprintf("ProcessStream CALLED at %v\nuserInput=%q\nhistory=%d\n", time.Now(), userInput, len(history))), 0644)
 
 	aiHistory := make([]Message, 0, len(history))
 	for _, msg := range history {
@@ -528,6 +572,9 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	originalRequest := userInput // [v0.9.6] 保存原始用户请求
 	toolNagCount := 0            // [v0.8.4] 记录连续ToolCalls=0次数
 	execNagCount := 0            // [v0.9.6] 记录exec nag已提醒次数
+	var toolResultsCollected int // [v1.0.21] 已收集的工具结果数（防重复）
+	var summaryNagCount int      // [v1.0.21] 已请求总结次数（防循环）
+	var ideNagCount int          // [v1.0.22] IDE委托提醒次数
 
 	for round := 0; round < maxToolRounds; round++ {
 		callCtx, callCancel := context.WithTimeout(p.getCtx(), 120*time.Second)
@@ -548,31 +595,47 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		if len(msg.ToolCalls) == 0 {
 			if !hasToolCalls && toolNagCount == 0 {
 				toolNagCount++
-				nagMsg := "[系统提示] ⚠️ 你没有调用任何工具就直接回复了。用户请求可能需要你调用工具来处理（write_file/exec/read_file等）。请重新分析：这是否属于可以直接执行的任务？如果是，请直接调用工具完成；如果不是，请 @SE 分配。"
+				nagMsg := "[系统提示] 请用工具来完成任务（如 write_file 写代码、exec 运行命令），不要只回复文字。"
 				aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
 				aiHistory = append(aiHistory, msg)
 				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_1"})
-				userInput = "[请分析是否需要调用工具执行任务]"
+				userInput = "[请用工具完成任务]"
 				continue
 			}
 			// [v0.9.6] 如果之前调用了工具但从未调用exec，而原始请求需要执行，则强制提醒（最多1次）
 			if hasToolCalls && !execCalled && needsExecution(originalRequest) && execNagCount == 0 {
 				execNagCount++
-				nagMsg := "[系统提示] ⚠️ 用户请求可能需要执行命令（运行/编译/测试等），但你尚未调用 exec 工具。请调用 exec 来实际运行必要的命令，不要仅靠文本描述结果。"
+				nagMsg := "[系统提示] 用户要求运行/编译程序，请调用 exec 工具实际执行命令，不要只文字描述。"
 				aiHistory = append(aiHistory, msg)
 				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_exec"})
 				userInput = nagMsg
 				continue
 			}
-			// [v0.9.6] 从未调用工具 → 这是纯文本回复（非编造），累积到 finalContent
-			if !hasToolCalls && msg.Content != "" {
-				if finalContent != "" {
-					finalContent += "\n" + msg.Content
-				} else {
+			// [v1.0.21] LLM叙事总结替换工具结果（说人话）
+			os.WriteFile("F:\\ArgusTek\\Argus\\debug_break_point.txt", []byte(fmt.Sprintf("BREAK POINT REACHED at %v\nhasToolCalls=%v\ncontent_len=%d\ncontent=%q\nsummaryNag=%d\n", time.Now(), hasToolCalls, len(msg.Content), msg.Content, summaryNagCount)), 0644)
+			if hasToolCalls && msg.Content != "" {
+				os.WriteFile("F:\\ArgusTek\\Argus\\debug_use_summary.txt", []byte(fmt.Sprintf("USING SUMMARY at %v\ncontent=%s\n", time.Now(), msg.Content)), 0644)
+				finalContent = msg.Content
+				break
+			}
+			// [v1.0.21] 调了工具但LLM没给总结 → 再问一次
+			if hasToolCalls && msg.Content == "" && summaryNagCount < 2 {
+				summaryNagCount++
+				aiHistory = append(aiHistory, msg)
+				userInput = "[请用自然语言总结你刚才完成了什么工作，直接回复用户即可，不需要再调用工具。]"
+				os.WriteFile("F:\\ArgusTek\\Argus\\debug_summary_nag.txt", []byte(fmt.Sprintf("SUMMARY NAG at %v nag=%d\n", time.Now(), summaryNagCount)), 0644)
+				continue
+			}
+			if !hasToolCalls {
+				// 纯文本回复（未调工具）→ 保留原始内容
+				if msg.Content != "" && finalContent == "" {
 					finalContent = msg.Content
 				}
 			}
-			// 已有 ToolCalls（任务已执行）或已提醒过 → 结束
+			// 有工具调用但LLM始终未提供总结 → 用默认消息代替原始工具输出
+			if hasToolCalls && msg.Content == "" && finalContent != "" {
+				finalContent = "任务已完成。"
+			}
 			break
 		}
 
@@ -633,20 +696,16 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			})
 		}
 
-		// 收集工具执行结果，追加到 finalContent，不再循环调 LLM 总结
-		// 工具结果本身已包含 ✅/❌ 标记，直接展示即可
-		var toolOutputs []string
-		for j := len(aiHistory) - 1; j >= 0; j-- {
+		// [v1.0.21] 收集本轮新增的工具结果（跳过已收集的）
+		var newToolOutputs []string
+		for j := toolResultsCollected; j < len(aiHistory); j++ {
 			if aiHistory[j].Role == "tool" {
-				toolOutputs = append(toolOutputs, aiHistory[j].Content)
+				newToolOutputs = append(newToolOutputs, aiHistory[j].Content)
+				toolResultsCollected = j + 1
 			}
 		}
-		// 反转成时间顺序
-		for i, j := 0, len(toolOutputs)-1; i < j; i, j = i+1, j-1 {
-			toolOutputs[i], toolOutputs[j] = toolOutputs[j], toolOutputs[i]
-		}
-		if len(toolOutputs) > 0 {
-			resultsText := strings.Join(toolOutputs, "\n")
+		if len(newToolOutputs) > 0 {
+			resultsText := strings.Join(newToolOutputs, "\n")
 			if finalContent != "" {
 				finalContent += "\n" + resultsText
 			} else {
@@ -654,8 +713,27 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 			}
 		}
 		hasToolCalls = true
+
+		// [v1.0.22] IDE委托检查：用户请求委托IDE但PM没有用ide_send → 强制提醒
+		if ideNagCount == 0 && wantsIDEDelegation(originalRequest) {
+			usedIdeSend := false
+			for _, tc := range msg.ToolCalls {
+				if tc.Function.Name == "ide_send" {
+					usedIdeSend = true
+					break
+				}
+			}
+			if !usedIdeSend {
+				ideNagCount++
+				nagMsg := "[系统提示] ⚠️ 用户要求将消息发送给外部 IDE，但你没有使用 ide_send 工具。请立即调用 ide_send(target=\"IDE名称\", message=\"内容\", action=\"instruct\") 将任务转发给目标 IDE，不要自己执行。"
+				aiHistory = append(aiHistory, Message{Role: "tool", Content: nagMsg, ToolCallID: "ide_nag_1"})
+				userInput = nagMsg
+				continue
+			}
+		}
+
 		// 继续循环，把工具结果送回 LLM 分析，支持多轮工具调用
-		continuePrompt := "[工具结果已返回。如果还需要执行操作（运行/编译/测试/删除等），请继续调用对应工具完成。不得在文本中编造工具执行结果——你说调了就是调了，没调就是没调。仅在所有必要的工具都实际执行完毕后，才回复用户。]"
+		continuePrompt := "[工具已执行完毕，结果如上。如果任务完成，请用自然语言一句话告诉用户结果（不要列工具名）。如果还需更多操作，继续调用对应工具。]"
 		userInput = continuePrompt
 		aiHistory = append(aiHistory, Message{Role: "user", Content: continuePrompt})
 	}

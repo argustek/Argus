@@ -2,6 +2,7 @@ package ai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -133,6 +134,45 @@ func TestCompleteFilesFromAction(t *testing.T) {
 	assert.Equal(t, "main.go", files[0])
 	assert.Equal(t, "utils.go", files[1])
 	assert.Equal(t, "test.go", files[2])
+}
+
+func TestSEPrompt_NaturalLanguageOutput(t *testing.T) {
+	prompt := SEPrompt
+
+	// 旧格式应已移除（不要求输出工具名/参数）
+	if strings.Contains(prompt, "✅ 工具名 参数") {
+		t.Error("❌ SE prompt 仍包含旧格式要求: '✅ 工具名 参数'")
+	}
+
+	// 新自然语言格式应存在
+	if !strings.Contains(prompt, "natural language") {
+		t.Error("❌ SE prompt 缺少自然语言指令: 'natural language'")
+	}
+	if !strings.Contains(prompt, "No tool names") {
+		t.Error("❌ SE prompt 缺少禁止工具名指令: 'No tool names'")
+	}
+
+	// Bad/good 示例应存在
+	if !strings.Contains(prompt, "Bad:") {
+		t.Error("❌ SE prompt 缺少反面示例 'Bad:'")
+	}
+	if !strings.Contains(prompt, "Good:") {
+		t.Error("❌ SE prompt 缺少正面示例 'Good:'")
+	}
+}
+
+func TestSEPrompt_NoVerbosePatterns(t *testing.T) {
+	prompt := SEPrompt
+
+	// 确认 prompt 不存在诱导冗余的旧指令
+	oldPatterns := []string{
+		"工具结果格式", "✅ 工具名",
+	}
+	for _, p := range oldPatterns {
+		if strings.Contains(prompt, p) {
+			t.Errorf("❌ SE prompt 仍包含冗余指令: %q", p)
+		}
+	}
 }
 
 func TestMerge(t *testing.T) {

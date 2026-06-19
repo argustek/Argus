@@ -434,6 +434,7 @@ func (c *ArgusCore) callSEWithTools(taskDesc, memoryContext string) (string, err
 }
 
 func (c *ArgusCore) Process(userMsg string) *ProcessResult {
+	os.WriteFile("F:\\ArgusTek\\Argus\\debug_argus_process.txt", []byte(fmt.Sprintf("ArgusCore.Process CALLED at %v\nuserMsg=%q\npmProcessor=%v\n", time.Now(), userMsg, c.pmProcessor != nil)), 0644)
 	totalStart := time.Now()
 	result := &ProcessResult{
 		Phases: make([]PhaseResult, 0, 3),
@@ -2185,6 +2186,7 @@ Requirements:
 	}
 
 	// Step 4: 汇报结果（emit到前端 + 存memory供上下文）
+	os.WriteFile("F:\\ArgusTek\\Argus\\debug_step4.txt", []byte(fmt.Sprintf("pmDirectExecute Step4 REACHED at %v\ndisplayContent=%q\nexecResults=%v\nlen(execResults)=%d\n", time.Now(), displayContent, execResults, len(execResults))), 0644)
 	if result.Error != nil {
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", result.Error))
 		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", result.Error))
@@ -2192,21 +2194,16 @@ Requirements:
 		c.emit("pm_to_user", fmt.Sprintf("@USR ❌ %v", execErr))
 		c.memory.Add(RolePM, fmt.Sprintf("❌ %v", execErr))
 	} else if len(execResults) > 0 {
-		// [v0.9.6] 优先使用实际执行结果而非LLM编造文本
 		execText := strings.Join(execResults, "\n")
 		hasExecResult := strings.Contains(execText, "✅ exec") || strings.Contains(execText, "❌ exec")
-		if hasExecResult {
+		// [v1.0.21] 优先使用LLM叙事总结（说人话），降级到原始工具结果
+		cleanSummary := c.extractCleanSummary(displayContent)
+		if cleanSummary != "" && len(cleanSummary) > 10 {
+			c.memory.Add(RolePM, cleanSummary)
+			c.emit("pm_to_user", "@USR "+cleanSummary)
+		} else if hasExecResult {
 			c.memory.Add(RolePM, execText)
 			c.emit("pm_to_user", "@USR "+execText)
-		} else if !originalHasExec && !hasExecResult {
-			cleanSummary := c.extractCleanSummary(displayContent)
-			if cleanSummary != "" {
-				c.memory.Add(RolePM, cleanSummary+"\n"+execText)
-				c.emit("pm_to_user", "@USR "+cleanSummary)
-			} else {
-				c.memory.Add(RolePM, execText)
-				c.emit("pm_to_user", "@USR "+execText)
-			}
 		} else {
 			c.memory.Add(RolePM, execText)
 			c.emit("pm_to_user", "@USR "+execText)

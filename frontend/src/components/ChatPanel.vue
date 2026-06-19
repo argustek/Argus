@@ -43,6 +43,12 @@
         </div>
       </div>
 
+      <!-- IDE连接状态指示器 -->
+      <div v-if="ideConnected && Object.keys(ideConnected).length > 0" class="ide-connected-bar">
+        <span class="ide-bar-label">🔗 IDE</span>
+        <span v-for="(_, name) in ideConnected" :key="name" class="ide-dot" :title="name">{{ name.slice(-1) }}</span>
+      </div>
+
       <div 
         v-for="(msg, index) in filteredMessages" 
         :key="'msg-' + index"
@@ -381,6 +387,7 @@ const props = defineProps<{
     timestamp: number
     meta?: Record<string, any>
   }>
+  ideConnected?: Record<string, boolean>
 }>()
 
 const emit = defineEmits(['send-message', 'expand-thinking', 'upload-file', 'view-details', 'open-editor', 'modify', 'quote-message', 'open-file-in-editor', 'run-in-terminal'])
@@ -2096,6 +2103,39 @@ function appendToInput(text: string) {
 .global-task-bar-wrapper {
   border-top: 1px solid rgba(128,128,128,0.1);
   background: transparent;
+}
+
+/* IDE连接状态指示器 */
+.ide-connected-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  margin: 0 12px 6px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.ide-bar-label {
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-right: 2px;
+}
+
+.ide-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #22c55e;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
 }
 
 </style>
