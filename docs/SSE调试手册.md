@@ -591,3 +591,119 @@ go test ./internal/chat/ -run TestSSE -v
 | 5 | 心跳数据硬编码 | pm_status/se_status 固定 idle | 低优先级 |
 | 6 | 无断线重连 | 客户端断开后状态丢失 | P2 |
 | 7 | IDE ACK 无自动重试 | 未收到 ACK 不自动重推 | 待增强 |
+
+---
+
+## 九、多 Argus 实例协作（v1.0.23+）
+
+> **架构转向说明：** 详见 [IDE-MEDIATION-DESIGN.md](./IDE-MEDIATION-DESIGN.md) 第八章。
+
+### 9.1 概念
+
+多个 Argus 实例通过 SSE 互连，形成 AI 工作群。每个实例既是服务端（接收连接）也是客户端（连接其他实例）。
+
+```
+┌─────────────┐         ┌──────────────┐
+│  Argus-A    │◄─SSE──►│   Argus-B    │
+│  (主机PM)   │         │  (从机PM)    │
+│  port 8080  │         │              │
+└──────┬──────┘         └──────────────┘
+       │
+┌──────┴──────┐
+│  TRAE-AI    │  ← 外部IDE也可同时接入
+│  (SSE客户端) │
+└─────────────┘
+```
+
+### 9.2 快速测试命令
+
+#### 单实例自环测试（验证防循环）
+
+```powershell
+# 终端1：启动 Argus + 建立 SSE 连接（模拟外部客户端）
+# 先确保 argus-desktop 已启动在 8080 端口
+$body = '{"source":"TRAE-AI"}'
+curl.exe -N --max-time 60 -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Content-Type: application/json" `
+  -d $body
+
+# 终端2：通过 ide-input 发送消息（模拟外部IDE发消息）
+$msg = '{"session_id":"<上面返回的session_id>","message":"你好"}'
+curl.exe -s -X POST http://localhost:8080/api/v1/sse/ide-input `
+  -H "Content-Type: application/json" `
+  -d $msg
+```
+
+**预期事件流（无循环）：**
+```
+: connected                          ← 连接建立
+event: pm_message                   ← PM 回复前端（不调用 ide_send）
+data: {"delta":"你好！我是 Argus PM..."}
+event: heartbeat × N                ← 正常心跳（无 ide_message 循环）
+```
+
+#### 双实例测试（真实验证）
+
+```powershell
+# 实例 A（服务端）：正常启动，默认端口 8080
+# 实例 B（客户端）：修改配置端口为 8081，然后连接 A
+
+# 在实例 B 的终端执行：
+$body = '{"source":"Argus-B"}'
+curl.exe -N --max-time 120 -X POST http://localhost:8080/api/v1/sse/subscribe `
+  -H "Content-Type: application/json" `
+  -d $body
+
+# 收到 session_id 后，从另一个终端发消息：
+$msg = '{"session_id":"<session_id>","message":"来自 Argus-B 的问候"}'
+curl.exe -s -X POST http://localhost:8080/api/v1/sse/ide-input `
+  -H "Content-Type: application/json" `
+  -d $msg
+```
+
+**预期事件流（双向对话）：**
+```
+: connected
+event: pm_message                   ← 实例A的PM回复
+data: {"delta":"@USR 收到来自 Argus-B 的消息..."}
+event: ide_message                 ← PM主动用ide_send回给B（如果需要）
+data: {"from":"PM","message":"你好 Argus-B！","action":"discuss"}
+event: heartbeat
+```
+
+### 9.3 自动唤醒机制
+
+v1.0.23 新增：SSE 订阅端收到 `ide_message` 时，自动唤醒本地 PM 处理。
+
+| 配置项 | 值 | 说明 |
+|--------|-----|------|
+| 触发事件 | `ide_message` | 仅此事件触发，`pm_message` 不触发（防回音循环） |
+| 去重窗口 | 30 秒 | 相同内容 30 秒内不重复唤醒 |
+| 调用方式 | `go SendMessage()` | 异步，不阻塞 SSE 循环 |
+
+**代码位置：** [http_server.go:268-289](../http_server.go#L268-L289)
+
+### 9.4 防循环设计（三层保护）
+
+```
+第一层：PM 智能判断
+  → 简单问候直接 pm_message 回前端，不调用 ide_send
+  → 只有需要与外部通信时才用 ide_send
+
+第二层：事件过滤
+  → 只对 ide_message 触发唤醒，忽略 pm_message
+  → 避免自己的回复触发自己
+
+第三层：内容去重（安全网）
+  → isAutoWakeDuplicate() 30秒窗口
+  → 即使前两层都突破，也不会无限循环
+```
+
+### 9.5 已知限制（组网场景）
+
+| # | 限制 | 影响 | 解决方案 |
+|---|------|------|---------|
+| 1 | 身份标识硬编码 | 都叫 `TRAE-IDE` | 下版本自动生成唯一 ID |
+| 2 | 无角色认知 | PM 不知道主/从 | 下版本注入角色 prompt |
+| 3 | 单向配置 | 需手动指定连接地址 | 下版本支持自适应/发现 |
+| 4 | 无断线重连 | 对方掉线后需手动重连 | P2 增强 |

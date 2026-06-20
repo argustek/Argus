@@ -457,3 +457,103 @@ data: {"from":"PM","message":"IDE-B 你的意见呢？","action":"discuss"}
 | 10 | **ide_send target 动态化**（去掉硬编码 enum） | `pm_prompt.go` | 小 | ✅ v1.0.21 |
 | 11 | **PM 动态在线 IDE 列表注入**（SetIDEList） | `pm_prompt.go`, `manager.go` | 小 | ✅ v1.0.21 |
 | 12 | **欢迎页 GET /**（连接发现） | `http_server.go` | 小 | ✅ v1.0.21 |
+
+---
+
+## 八、v1.0.23 架构转向：从跨厂商IDE协调 → 多Argus组网
+
+### 8.1 认知转变（2026-06-20）
+
+**原方案目标：** Argus 作为中心协调者，调度外部不同厂商的 IDE（TRAE、Cursor、OpenCode 等）协作。
+
+**实践发现的问题：**
+
+```
+原设想:
+  Argus PM ──ide_send──→ TRAE-AI (收到消息，但AI不知道)
+  Argus PM ──ide_send──→ Cursor AI (收到消息，但AI不知道)
+  Argus PM ──ide_send──→ OpenCode AI (收到消息，但AI不知道)
+
+核心障碍: 外部IDE能收到SSE事件，但IDE内的AI无法自动监听/响应。
+         消息到了IDE终端，进不了IDE的聊天界面。
+         除非改对方代码或用对方API——这违背"零接入成本"原则。
+```
+
+**新方向：多 Argus 实例组网**
+
+```
+新架构（已验证可行）:
+  ┌─────────────┐    SSE    ┌──────────────┐
+  │  Argus-A    │◄────────►│   Argus-B     │
+  │  (主机PM)   │          │  (从机PM)     │
+  │  port 8080  │          │  作为客户端连接│
+  └──────┬──────┘          └──────┬───────┘
+         │                        │
+    /sse/ide-input           自动唤醒本地PM
+         │                        │
+         ▼                        ▼
+    PM 处理                  PM 处理 + ide_reply
+```
+
+**为什么 Argus 之间可以双向对话：**
+- 每个 Argus 都有完整的 SSE 监听机制（`sse_bridge.go`）
+- 收到 `ide_message` 时可自动唤醒本地 PM（`http_server.go` auto-wake）
+- PM 有 `ide_send` 工具可以主动发消息给对方
+- 形成真正的闭环：A→B→A→B...
+
+### 8.2 已实现功能（v1.0.23）
+
+| 功能 | 文件 | 说明 |
+|------|------|------|
+| **SSE 客户端自动唤醒 PM** | `http_server.go:268-289` | 收到 `ide_message` 时调用 `SendMessage()` 唤醒本地 PM |
+| **去重防循环** | `app.go:3359-3383` | `isAutoWakeDuplicate()` 30秒窗口内容去重 |
+| **Bridge pm_message 推送到 SSE** | `bridge.go:onCoreMessage` | PM 回复同时推送给所有 SSE 订阅者 |
+
+### 8.3 实测验证结果
+
+单实例自环测试（curl 连自己）：
+- ✅ IDE 消息送达 PM
+- ✅ PM 回复推送到 SSE 订阅者
+- ✅ 无死循环（PM 智能判断是否需要 ide_send + 去重安全网）
+- ✅ `wails build` 构建通过
+
+### 8.4 未来组网 TODO
+
+> 以下为下一阶段改进方向，当前版本已满足基本双向通信。
+
+| # | 改进项 | 说明 | 优先级 |
+|---|--------|------|--------|
+| 1 | **唯一实例 ID** | 自动生成 ID（如 `Argus-A1`、`Argus-B2`），不再都叫 `TRAE-IDE` | P0 |
+| 2 | **角色认知** | 服务端 PM 知道自己是"主机PM"，客户端 PM 知道自己是"从机PM" | P0 |
+| 3 | **连接模式配置** | server / client / 自适应 三种模式可选 | P1 |
+| 4 | **拓扑发现** | 自动发现邻居节点，无需手动指定地址 | P1 |
+| 5 | **身份信息扩展** | 订阅时传 `role`、`capabilities` 等元数据 | P1 |
+| 6 | **PM Prompt 动态注入** | 根据角色注入不同的 system prompt 片段 | P1 |
+| 7 | **多跳路由** | A→B→C 链式通信，不仅限于直连 | P2 |
+| 8 | **状态同步** | 各实例的项目状态、任务进度共享 | P2 |
+
+### 8.5 最小改动方案（下次实现时参考）
+
+```go
+// 订阅请求扩展
+type SubscribeRequest struct {
+    Message      string   `json:"message"`
+    Source       string   `json:"source"`        // 唯一实例ID: "Argus-B2"
+    Role         string   `json:"role"`          // "server" | "client"
+    Capabilities []string `json:"capabilities"`  // ["pm", "se", "file_edit"]
+}
+
+// PM Prompt 注入片段（服务端）
+const ServerPMPrompt = `
+你是 Argus 主机 PM。当前管理的从机节点: {节点列表}。
+你可以通过 ide_send 向任意从机发送指令或讨论。
+从机回复会自动唤醒你的处理流程。
+`
+
+// PM Prompt 注入片段（客户端）
+const ClientPMPrompt = `
+你是 Argus 从机 PM（{实例ID}）。你已连接到主机 {主机ID}。
+收到主机消息时自动处理并回复。
+你也可以主动向主机发送消息或请求协调。
+`
+```
