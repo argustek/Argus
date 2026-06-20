@@ -259,6 +259,28 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 			jsonData, _ := json.Marshal(event.Data)
 			fmt.Fprintf(w, "data: %s\n\n", string(jsonData))
 			flusher.Flush()
+
+			// [FIX-v1.0.23] 多Argus协作：客户端收到对方PM消息时，自动唤醒本地PM处理
+			// 这样多个Argus实例可以互相对话（每个Argus既是服务端也是客户端）
+			// 注意：只对 ide_message 触发唤醒，带内容去重防止单实例自循环
+			if subName != "debug" && a.chatManager != nil && event.Type == "ide_message" {
+				if msgMap, ok := event.Data.(map[string]interface{}); ok {
+					if from, ok1 := msgMap["from"].(string); ok1 {
+						if msg, ok2 := msgMap["message"].(string); ok2 {
+							// 用内容前20字符作为去重key，防止相同消息重复唤醒
+							dedupKey := fmt.Sprintf("%s:%s", from, truncate(msg, 20))
+							if !a.isAutoWakeDuplicate(dedupKey) {
+								pmInput := fmt.Sprintf("[来自:%s] %s", from, msg)
+								fmt.Printf("[HTTPServer/SSE-Client] 收到对方ide_message，唤醒本地PM: %s\n", pmInput)
+								go a.SendMessage(pmInput)
+							} else {
+								fmt.Printf("[HTTPServer/SSE-Client] ⚠️ 跳过重复唤醒: %s\n", dedupKey)
+							}
+						}
+					}
+				}
+			}
+
 			// IDE模式（带source）保持连接不断，用于多轮对话
 			// 调试模式（无source）仍按原有逻辑在done/error时断开
 			if subName == "debug" && (event.Type == "done" || event.Type == "error") {

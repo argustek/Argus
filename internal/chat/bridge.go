@@ -243,8 +243,7 @@ func (b *Bridge) onCoreMessage(source, content string) {
 		msgContent = strings.ReplaceAll(content, "⚡", "")
 	}
 
-	// 所有事件只走 MessageBus，不再推 SSE
-
+	// 所有事件走 MessageBus（前端GUI），同时推给 SSE 订阅者（IDE长连接）
 	if b.onMessage != nil {
 		parts := strings.Split(source, "_to_")
 		from := parts[0]
@@ -259,6 +258,11 @@ func (b *Bridge) onCoreMessage(source, content string) {
 			Content:   msgContent,
 			Timestamp: time.Now(),
 		})
+	}
+
+	// [FIX-v1.0.23] Bridge 模式下也推送 pm_message 等事件到 SSE，让 IDE 订阅者能收到 PM 回复
+	if b.pushSSEEvent != nil && source == "pm_to_user" {
+		b.pushSSEEvent("pm_message", map[string]string{"delta": msgContent})
 	}
 }
 

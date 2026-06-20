@@ -253,6 +253,10 @@ type App struct {
 
 	// [v0.7.2] Debugger Session Manager
 	debuggerMgr *debugger.DebugSessionManager
+
+	// [FIX-v1.0.23] 自动唤醒去重（防止单实例自循环）
+	autoWakeMu    sync.RWMutex
+	autoWakeSeen  map[string]int64 // key → timestamp (UnixNano)
 }
 
 // ChangeRecord 改动记录
@@ -299,6 +303,7 @@ func NewApp() *App {
 		logs:          []string{"Argus Vibe Coding Platform 已启动"},
 		changeHistory: make([]ChangeRecord, 0),
 		readyChan:     make(chan struct{}), // 初始化同步通道
+		autoWakeSeen:  make(map[string]int64),
 	}
 }
 
@@ -3353,6 +3358,29 @@ func (a *App) SetLang(lang string) {
 	if a.chatManager != nil {
 		a.chatManager.SetReplyLanguage(lang)
 	}
+}
+
+func (a *App) isAutoWakeDuplicate(key string) bool {
+	a.autoWakeMu.Lock()
+	defer a.autoWakeMu.Unlock()
+	if a.autoWakeSeen == nil {
+		a.autoWakeSeen = make(map[string]int64)
+	}
+	now := time.Now().UnixNano()
+	if ts, ok := a.autoWakeSeen[key]; ok {
+		// 30秒内相同key视为重复
+		if now-ts < 30_000_000_000 {
+			return true
+		}
+	}
+	a.autoWakeSeen[key] = now
+	// 清理过期条目（超过60秒的）
+	for k, v := range a.autoWakeSeen {
+		if now-v > 60_000_000_000 {
+			delete(a.autoWakeSeen, k)
+		}
+	}
+	return false
 }
 
 func (a *App) SendMessage(content string) error {
