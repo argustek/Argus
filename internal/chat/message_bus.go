@@ -351,6 +351,8 @@ func (mb *MessageBus) Ack(msgId string, batchInfo ...*BatchAckInfo) bool {
 			mb.writeDebugLog(fmt.Sprintf("AP: %s", pending.Content))
 		case PathUserInput:
 			mb.writeDebugLog(fmt.Sprintf("USER: %s", pending.Content))
+		case PathSEExec:
+			mb.writeDebugLog(fmt.Sprintf("[terminal:output] %s", pending.Content))
 		case PathPMStream, PathSEStream:
 			// 流式消息的批量确认：记录批次摘要
 			if received.BatchAck != nil {

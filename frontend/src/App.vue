@@ -302,6 +302,7 @@ const messages = ref<Array<{
   changes?: Array<{type: string, file: string}>
   codeBlocks?: Array<{language: string, code: string}>
   error?: string
+  sections?: Array<{type: string, label: string, content: string}>
 }>>([])
 
 const aiThinking = ref(false)
@@ -318,6 +319,9 @@ const thoughtEvents = ref<Array<{
 
 const seenMsgIds = new Set<number>()
 const streamingRole = ref('')
+
+// [v1.0.24] 缓冲 terminal:output 事件，等 PM/SE 消息到达时附加为 sections
+const pendingSections = ref<Array<{type: string, label: string, content: string}>>([])
 
 // [G60] 前端收水记录（用于前后端一致性校验）
 let recordReceiveCounter = 0
@@ -419,10 +423,21 @@ onMounted(async () => {
   EventsOn('git:status', (raw: any) => {
     if (raw?._msgId) ackMessage(raw._msgId)
   })
-  // 全局 ACK terminal:output — TerminalWindow 关闭后 ACK 常驻，防止 message_lost
+  // [v1.0.24] 缓冲 terminal:output 事件 + ACK
+  // 同时缓冲内容到 pendingSections，等 PM/SE 消息到达时附加为 sections
   // ⚠️ NO EventsOff here! Child component (TerminalWindow) onMounted runs before parent App.vue,
   // so EventsOff would remove TerminalWindow's handleOutput handler, causing terminal to go silent.
   EventsOn('terminal:output', (raw: any) => {
+    const content = typeof raw === 'string' ? raw : (raw?.data || raw?.delta || '')
+    console.log('[DEBUG-terminal:output] raw=', raw, 'content=', content)
+    if (content) {
+      pendingSections.value.push({
+        type: 'terminal',
+        label: '▶ Exec',
+        content
+      })
+      console.log('[DEBUG-pendingSections] now=', pendingSections.value.length)
+    }
     if (raw?._msgId) ackMessage(raw._msgId)
   })
 
@@ -487,11 +502,15 @@ onMounted(async () => {
       if (lastSame && (lastSame.content || '').trim() === (msg.content || '').trim()) {
         return
       }
+      const pending = pendingSections.value.length
+      const sections = pending > 0 ? pendingSections.value.splice(0) : undefined
+      console.log('[DEBUG-new-message] role=', msg.role, 'pending=', pending, 'attached=', sections?.length)
       messages.value.push({
         role: msg.role,
         content: msg.content,
         raw: msg.raw,
-        timestamp: msg.timestamp
+        timestamp: msg.timestamp,
+        sections
       })
     } else {
       // 用户消息不按内容去重 — 相同的"再运行一次"可能输入多次
@@ -501,6 +520,8 @@ onMounted(async () => {
         raw: msg.raw,
         timestamp: msg.timestamp
       })
+      // 新对话轮次，清空上一轮的终端输出缓存
+      pendingSections.value = []
     }
 
     if (msg.role !== 'user') {

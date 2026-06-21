@@ -1229,6 +1229,13 @@ function appendToInput(text: string) {
 }
 
 .section-body { font-size: 13px; line-height: 1.6; }
+.section-body .terminal-output {
+  margin: 4px 0; padding: 10px 12px;
+  background: #1a1a2e; border-radius: 4px;
+  font-size: 13px; font-family: var(--font-mono, 'Cascadia Code', monospace);
+  color: #e2e8f0; white-space: pre-wrap; word-break: break-all;
+  line-height: 1.5; max-height: 300px; overflow-y: auto;
+}
 
 .msg-json { margin: 8px 0; }
 .msg-json .inline-code {

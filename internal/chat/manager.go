@@ -52,16 +52,49 @@ func filterDuplicateMentions(content string) string {
 
 // [v0.8.1] 项目级别轻量检测（与 argus.go Process() 的启发式对齐）
 // 仅基于用户消息内容判断，不依赖 PM 响应（handleToPM 入口阶段）
-// 返回值: "short-process" / "normal-process" / "full-process"
+// 返回值: "chat" / "short-process" / "normal-process" / "full-process"
 func detectProjectLevel(userMsg string) string {
 	lowerMsg := strings.ToLower(userMsg)
+	trimmed := strings.TrimSpace(lowerMsg)
+
+	// 聊天/问候检测（无工具，纯文本回复）
+	greetings := []string{"你好", "您好", "嗨", "哈喽", "hello", "hi", "hey",
+		"早上好", "下午好", "晚上好", "在吗", "吃了没",
+		"good morning", "good afternoon", "good evening"}
+	for _, g := range greetings {
+		if trimmed == g || strings.HasPrefix(trimmed, g+" ") || trimmed == g+"！" || trimmed == g+"。" || trimmed == g+"." {
+			return "chat"
+		}
+	}
+	// 纯感谢消息
+	thanks := []string{"谢谢", "多谢", "感谢", "thanks", "thank you", "thx"}
+	for _, t := range thanks {
+		if trimmed == t || strings.HasPrefix(trimmed, t+" ") {
+			return "chat"
+		}
+	}
+	// 超短消息（≤6个字符）且无任务关键词 → 聊天
+	if len([]rune(trimmed)) <= 6 {
+		taskKeywords := []string{"创建", "写", "改", "删", "执行", "运行", "修复",
+			"create", "write", "run", "exec", "fix", "delete", "修改", "实现"}
+		isTask := false
+		for _, kw := range taskKeywords {
+			if strings.Contains(lowerMsg, kw) {
+				isTask = true
+				break
+			}
+		}
+		if !isTask {
+			return "chat"
+		}
+	}
+
 	// 用户显式指定 short
 	if strings.Contains(lowerMsg, "/level short") || strings.Contains(lowerMsg, "⚡") {
 		return "short-process"
 	}
 	// 启发式：简单单文件编程任务 → short
-	isTinyTask := (strings.Contains(lowerMsg, "hello world") ||
-		strings.Contains(lowerMsg, "fibonacci") ||
+	isTinyTask := (strings.Contains(lowerMsg, "fibonacci") ||
 		strings.Contains(lowerMsg, "counter") ||
 		strings.Contains(lowerMsg, "单文件") ||
 		strings.Contains(lowerMsg, "short")) &&
@@ -185,30 +218,31 @@ type ReceiveAuditEntry struct {
 
 // Manager 对话管理器
 type Manager struct {
-	router          *Router
-	aiClient        *ai.Client // 默认AI客户端（所有角色共用，除非有独立配置）
-	pmClient        *ai.Client // PM专用客户端（nil时用aiClient）
-	seClient        *ai.Client // SE专用客户端（nil时用aiClient）
-	apClient        *ai.Client // AP专用客户端（nil时用aiClient）
-	pmProcessor     *ai.PMProcessor
-	seProcessor     *ai.SEProcessor
-	apProcessor     *ai.APProcessor
-	pmExecutor      *executor.Executor
-	seExecutor      *executor.Executor
-	fileTracker     *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
-	lspClient       *ai.LSPClient               // [P0-1] LSP 客户端（gopls daemon）
-	boardManager    *board.Manager
-	cMonitor        *monitor.CMonitor
-	memoryManager   *MemoryManager
-	configManager   *ConfigManager
-	envMemory       *EnvMemory
-	terminalWriter  func(string) error
-	sseBridge       *SSEBridge
-	taskManager     *task.TaskManager
-	backendStatus   *BackendStatus
-	ReplyLanguage   string
-	dingTalkEnabled bool
-	stopCh          chan struct{} // goroutine 停止信号
+	router                 *Router
+	aiClient               *ai.Client // 默认AI客户端（所有角色共用，除非有独立配置）
+	pmClient               *ai.Client // PM专用客户端（nil时用aiClient）
+	seClient               *ai.Client // SE专用客户端（nil时用aiClient）
+	apClient               *ai.Client // AP专用客户端（nil时用aiClient）
+	pmProcessor            *ai.PMProcessor
+	seProcessor            *ai.SEProcessor
+	apProcessor            *ai.APProcessor
+	pmExecutor             *executor.Executor
+	seExecutor             *executor.Executor
+	fileTracker            *executor.FileChangeTracker // 文件变更追踪（快照/回滚/冲突检测）
+	lspClient              *ai.LSPClient               // [P0-1] LSP 客户端（gopls daemon）
+	boardManager           *board.Manager
+	cMonitor               *monitor.CMonitor
+	memoryManager          *MemoryManager
+	configManager          *ConfigManager
+	envMemory              *EnvMemory
+	terminalWriter         func(string) error
+	terminalOutputCallback func(string) // [FIX-v1.0.24] PM exec输出回调，重建pmProcessor时传播
+	sseBridge              *SSEBridge
+	taskManager            *task.TaskManager
+	backendStatus          *BackendStatus
+	ReplyLanguage          string
+	dingTalkEnabled        bool
+	stopCh                 chan struct{} // goroutine 停止信号
 
 	history []Message
 
@@ -487,6 +521,7 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 		manager.apClient.SetDebugLog(manager.seDebugLog)
 	}
 	manager.seProcessor.SetDebugLog(manager.seDebugLog)
+	manager.pmProcessor.SetDebugLogWriter(manager.WriteDebugLog) // [FIX-v1.0.24] PM exec 输出写入 conversation.log
 	manager.seDebugLog("[INIT] ALL debugLog OK, configDir=" + configDir)
 
 	// 启动自动定期保存（15秒间隔，类似C监控的兜底机制）
@@ -563,6 +598,10 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 			fmt.Printf("[PM] ⚠️ cMonitor 未初始化，跳过状态更新\n")
 		}
 	})
+	m.pmProcessor.SetDebugLogWriter(m.WriteDebugLog) // [FIX-v1.0.24] PM exec 输出写入 conversation.log
+	if m.terminalOutputCallback != nil {
+		m.pmProcessor.SetTerminalOutputCallback(m.terminalOutputCallback) // [FIX-v1.0.24] 传播终端输出回调
+	}
 	// SE
 	m.seProcessor = ai.NewSEProcessor(m.getSEClient(), m.workDir)
 	m.seProcessor.SetDebugLog(m.seDebugLog)                                // 关键日志写入conversation.log
@@ -653,6 +692,10 @@ func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 			m.cMonitor.UpdateProjectState(state)
 		}
 	})
+	m.pmProcessor.SetDebugLogWriter(m.WriteDebugLog) // [FIX-v1.0.24] PM exec 输出写入 conversation.log
+	if m.terminalOutputCallback != nil {
+		m.pmProcessor.SetTerminalOutputCallback(m.terminalOutputCallback) // [FIX-v1.0.24] 传播终端输出回调
+	}
 	m.pmProcessor.ReplyLanguage = m.ReplyLanguage
 	m.pmProcessor.SetTodoCallbacks(
 		func(desc string) string { return m.AddTodo(desc) },
@@ -790,18 +833,7 @@ func (m *Manager) analyzeAndExecute(content string) {
 
 // handleNoOutputFeedback 处理"没有输出"反馈
 func (m *Manager) handleNoOutputFeedback() {
-	// 检查最近SE执行的文件是否存在
-	projectDir := m.workDir
-
-	// 检查hello.go是否存在
-	helloPath := filepath.Join(projectDir, "hello.go")
-	if _, err := os.Stat(helloPath); err == nil {
-		fmt.Println("[Monitor] hello.go 存在，尝试直接运行")
-		// 文件存在但没输出，可能是执行问题
-		// 这里可以触发重试
-	} else {
-		fmt.Println("[Monitor] hello.go 不存在，可能需要重新创建")
-	}
+	fmt.Println("[Monitor] 检测到用户反馈'没有输出'，等待SE重新执行")
 }
 
 // handleSETTimeout 处理SE执行超时
@@ -918,6 +950,10 @@ func (m *Manager) initCMonitor() {
 			fmt.Printf("[PM] 通过Function Call更新项目状态: %d\n", state)
 			m.cMonitor.UpdateProjectState(state)
 		})
+		m.pmProcessor.SetDebugLogWriter(m.WriteDebugLog) // [FIX-v1.0.24] PM exec 输出写入 conversation.log
+		if m.terminalOutputCallback != nil {
+			m.pmProcessor.SetTerminalOutputCallback(m.terminalOutputCallback) // [FIX-v1.0.24] 传播终端输出回调
+		}
 		// 恢复TODO回调
 		m.pmProcessor.SetTodoCallbacks(
 			func(desc string) string { return m.AddTodo(desc) },
@@ -1075,6 +1111,18 @@ func (m *Manager) SetTerminalWriter(writer func(string) error) {
 		m.pmProcessor.SetTerminalWriter(writer)
 	}
 }
+
+// SetTerminalOutputCallback 设置终端输出回调（推送PM exec输出到前端终端面板）
+func (m *Manager) SetTerminalOutputCallback(cb func(string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.terminalOutputCallback = cb
+	if m.pmProcessor != nil {
+		m.pmProcessor.SetTerminalOutputCallback(cb)
+	}
+}
+
+// SetDebugLogWriter 设置调试日志写入器（传播到PMProcessor）
 
 // SetContext 设置Wails context（供App调用）
 func (m *Manager) SetContext(ctx context.Context) {
@@ -1647,9 +1695,14 @@ func (m *Manager) handleToPM(content string) (err error) {
 		m.emitStreamChunk("pm", delta)
 	}
 
+	// [chat] 聊天/问候 → 纯文本回复（无工具），不走 ProcessStream
+	isChat := level == "chat"
 	maxPMRetries := 2
 	for pmAttempt := 0; pmAttempt < maxPMRetries; pmAttempt++ {
-		if isReviewScenario {
+		if isChat {
+			fmt.Printf("[handleToPM] 💬 聊天模式: 纯文本回复(无工具)\n")
+			resp, err = m.pmProcessor.Process(content, pmHistory)
+		} else if isReviewScenario {
 			fmt.Printf("[handleToPM] 🔄 审核场景用ProcessReview(支持工具调用验证)\n")
 			resp, err = m.pmProcessor.ProcessReview(content, pmHistory, pmStreamCallback)
 		} else {
@@ -1986,7 +2039,7 @@ func (m *Manager) handleToPM(content string) (err error) {
 	strongProgrammingSignals := []string{
 		".go", ".py", ".js", ".ts", ".java", ".cpp", ".c ", ".h ",
 		"go run", "npm run", "python ", "javac ",
-		"hello world", "hello.go", "main()",
+		"main()",
 		"fmt.Println", "console.log", "print(",
 		"func main", "def main", "public static void",
 	}

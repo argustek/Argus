@@ -36,7 +36,8 @@ type Bridge struct {
 
 	pushSSEEvent func(eventType string, data interface{}) // SSE 事件推送
 
-	pmProcessor *ai.PMProcessor // [FIX-v1.0.22] 持有PM处理器引用，供外部绑定回调
+	pmProcessor            *ai.PMProcessor // [FIX-v1.0.22] 持有PM处理器引用，供外部绑定回调
+	terminalOutputCallback func(string)    // [FIX-v1.0.24] 保存回调，UpdateClient时传播
 }
 
 func NewBridge(aiClient *ai.Client, exec *executor.Executor, workDir string) *Bridge {
@@ -114,6 +115,19 @@ func (b *Bridge) SetDebugLogWriter(fn func(content string)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.writeDebugLog = fn
+	if b.pmProcessor != nil {
+		b.pmProcessor.SetDebugLogWriter(fn) // [FIX-v1.0.24] PM exec 输出写入 conversation.log
+	}
+}
+
+// SetTerminalOutputCallback 设置PM exec输出回调（推送到前端终端面板）
+func (b *Bridge) SetTerminalOutputCallback(fn func(string)) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.terminalOutputCallback = fn
+	if b.pmProcessor != nil {
+		b.pmProcessor.SetTerminalOutputCallback(fn)
+	}
 }
 
 func (b *Bridge) SetPushSSEEvent(fn func(eventType string, data interface{})) {
@@ -487,6 +501,13 @@ func (b *Bridge) UpdateClient(newClient *ai.Client, workDir string) {
 	pmProc := ai.NewPMProcessor(newClient, workDir, func(state int) {
 		fmt.Printf("[Bridge-PM] 项目状态更新: %d\n", state)
 	})
+	// [FIX-v1.0.24] 传播回调到新PMProcessor
+	if b.writeDebugLog != nil {
+		pmProc.SetDebugLogWriter(b.writeDebugLog)
+	}
+	if b.terminalOutputCallback != nil {
+		pmProc.SetTerminalOutputCallback(b.terminalOutputCallback)
+	}
 	b.pmProcessor = pmProc // [FIX-v1.0.22] 更新引用
 	b.argus.SetPMProcessor(pmProc)
 }

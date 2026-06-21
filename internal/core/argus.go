@@ -501,15 +501,19 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 			history = append(history, ai.ChatMessage{Role: role, Content: e.Content})
 		}
 		var resp *ai.PMResponse
-		resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
-			trimmed := strings.TrimSpace(delta)
-			if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
-				return
-			}
-			if c.onChunk != nil {
-				c.onChunk(delta)
-			}
-		})
+		if isChatMessage(userMsg) {
+			resp, pmErr = c.pmProcessor.Process(userMsg, history)
+		} else {
+			resp, pmErr = c.pmProcessor.ProcessStream(userMsg, history, func(delta string) {
+				trimmed := strings.TrimSpace(delta)
+				if trimmed == "" || strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "```") {
+					return
+				}
+				if c.onChunk != nil {
+					c.onChunk(delta)
+				}
+			})
+		}
 		if pmErr == nil && resp != nil {
 			pmResponse = resp.Content
 			if resp.HasToolCalls {
@@ -2853,4 +2857,30 @@ func getFilePaths(actions []ai.SEAction) []string {
 		}
 	}
 	return paths
+}
+
+// isChatMessage checks if user message is a greeting/chat (no tools needed)
+func isChatMessage(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	greetings := []string{"你好", "您好", "嗨", "哈喽", "hello", "hi", "hey",
+		"早上好", "下午好", "晚上好", "在吗", "吃了没",
+		"good morning", "good afternoon", "good evening",
+		"谢谢", "多谢", "感谢", "thanks", "thank you", "thx"}
+	for _, g := range greetings {
+		if lower == g || strings.HasPrefix(lower, g+" ") {
+			return true
+		}
+	}
+	// ultra-short (≤6 chars) with no task keywords → chat
+	if len([]rune(lower)) <= 6 {
+		taskKw := []string{"创建", "写", "改", "删", "执行", "运行", "修复",
+			"create", "write", "run", "exec", "fix", "delete", "修改", "实现"}
+		for _, kw := range taskKw {
+			if strings.Contains(lower, kw) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

@@ -255,8 +255,8 @@ type App struct {
 	debuggerMgr *debugger.DebugSessionManager
 
 	// [FIX-v1.0.23] 自动唤醒去重（防止单实例自循环）
-	autoWakeMu    sync.RWMutex
-	autoWakeSeen  map[string]int64 // key → timestamp (UnixNano)
+	autoWakeMu   sync.RWMutex
+	autoWakeSeen map[string]int64 // key → timestamp (UnixNano)
 }
 
 // ChangeRecord 改动记录
@@ -631,6 +631,12 @@ func (a *App) initChatManager() {
 	a.chatManager.SetTerminalOutput(func(output string) {
 		a.emitTerminalOutput(output)
 	})
+	// [FIX-v1.0.24] PM exec 输出也推送到终端
+	a.chatManager.SetTerminalOutputCallback(func(output string) {
+		a.addLog(fmt.Sprintf("[PM-TerminalOutput] 开始推送: %s", truncate(output, 80)))
+		a.emitTerminalOutput(output)
+		a.addLog("[PM-TerminalOutput] 推送完成")
+	})
 	// 设置PM/SE的终端写入器（用于QA验证时显示执行过程到终端）
 	a.chatManager.SetTerminalWriter(a.WriteToTerminal)
 	a.chatManager.SetOnFileWritten(func(path string) {
@@ -721,6 +727,11 @@ func (a *App) initChatManager() {
 				a.chatManager.GetMessageBus().SetDebugLogWriter(a.chatManager.WriteDebugLog) // [v0.7.2] 对话框与log一致
 				a.bridge.SetMessageBus(a.chatManager.GetMessageBus())
 				a.bridge.SetDebugLogWriter(a.chatManager.WriteDebugLog)
+				// [FIX-v1.0.24] PM exec 输出推送到前端终端
+				a.bridge.SetTerminalOutputCallback(func(output string) {
+					a.addLog(fmt.Sprintf("[PM-TerminalOutput-Bridge] 开始推送: %s", truncate(output, 80)))
+					a.emitTerminalOutput(output)
+				})
 				a.bridge.SetPushSSEEvent(func(eventType string, data interface{}) {
 					if a.chatManager != nil {
 						a.chatManager.PushSSEEvent(eventType, data)

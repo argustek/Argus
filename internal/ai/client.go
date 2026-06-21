@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"argus/internal/i18n"
 	"argus/internal/limiter"
 	"argus/internal/types"
 )
@@ -137,6 +136,37 @@ func (c *Client) recordFailure() {
 	c.circuitBreaker.RecordFailure(apiCallOpType)
 }
 
+// retryWithBackoff 指数退避重试：5s→10min capped，无限重试，仅对 isRetryableError 重试
+func (c *Client) retryWithBackoff(ctx context.Context, desc string, fn func() error) error {
+	backoff := 5 * time.Second
+	const maxBackoff = 10 * time.Minute
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			if ctx.Err() != nil {
+				return fmt.Errorf("%s: context cancelled after %d retries", desc, attempt)
+			}
+			fmt.Printf("[AI Retry] %s attempt %d, waiting %v...\n", desc, attempt, backoff)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+		if err := fn(); err != nil {
+			if isRetryableError(err) {
+				fmt.Printf("[AI Retry] %s: retryable error: %v\n", desc, err)
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+}
+
 // SetDebugLog 设置调试日志回调
 func (c *Client) SetDebugLog(fn func(string)) {
 	c.debugLog = fn
@@ -207,8 +237,8 @@ type ChatResponse struct {
 	ToolsDefined int // 非JSON字段：记录请求中发送的tools数量（用于调试）
 }
 
-// Chat 发送聊天请求
-func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, replyLanguage string) (string, error) {
+// chatOnce 单次聊天请求（无重试），由 Chat 包装重试逻辑
+func (c *Client) chatOnce(ctx context.Context, systemPrompt, userContent string, replyLanguage string) (string, error) {
 	if err := c.checkBeforeCall(); err != nil {
 		return "", err
 	}
@@ -243,7 +273,6 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, rep
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		c.recordFailure()
 		func() {
 			f, _ := os.OpenFile(filepath.Join(os.TempDir(), "argus_api_probe.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if f != nil {
@@ -266,28 +295,23 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, rep
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("read response failed: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.recordFailure()
 		return "", fmt.Errorf("API error: %s", string(body))
 	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
 	if chatResp.Error != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("API error: %s", chatResp.Error.Message)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		c.recordFailure()
 		return "", fmt.Errorf("no response from AI")
 	}
 
@@ -296,12 +320,26 @@ func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, rep
 		msgContent = chatResp.Choices[0].Message.ReasoningContent
 	}
 	if msgContent == "" {
-		c.recordFailure()
 		return "", fmt.Errorf("empty response from AI")
 	}
 
-	c.recordSuccess()
 	return msgContent, nil
+}
+
+// Chat 聊天请求（指数退避重试，5s→10min capped，无限重试）
+func (c *Client) Chat(ctx context.Context, systemPrompt, userContent string, replyLanguage string) (string, error) {
+	var result string
+	err := c.retryWithBackoff(ctx, "Chat", func() error {
+		var e error
+		result, e = c.chatOnce(ctx, systemPrompt, userContent, replyLanguage)
+		return e
+	})
+	if err != nil {
+		c.recordFailure()
+		return "", err
+	}
+	c.recordSuccess()
+	return result, nil
 }
 
 // Delta SSE 流式 delta 内容（提取为命名类型，供 parseDelta 策略方法使用）
@@ -319,39 +357,20 @@ type StreamChunk struct {
 }
 
 // ChatStream 流式聊天请求，每收到文本片段调用 onChunk，返回累积的完整文本
+// 内部含指数退避重试（5s→10min capped，无限重试）
 func (c *Client) ChatStream(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error) {
-	maxRetries := 3 // Increased from 1 to handle unstable LLM API connections
-	var lastErr error
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			if ctx.Err() != nil {
-				fmt.Printf("[AI Retry] Context cancelled, giving up\n")
-				return "", lastErr
-			}
-			waitTime := time.Duration(attempt*3) * time.Second // 3s, 6s, 9s backoff
-			fmt.Printf("[AI Retry] Attempt %d/%d, waiting %v...\n", attempt, maxRetries, waitTime)
-			time.Sleep(waitTime)
-		}
-
-		result, err := c.chatStreamOnce(ctx, systemPrompt, history, userContent, replyLanguage, onChunk, onThought)
-		if err == nil {
-			c.recordSuccess()
-			return result, nil
-		}
-
-		lastErr = err
-
-		if !isRetryableError(err) {
-			c.recordFailure()
-			return "", err
-		}
-
-		fmt.Printf("[AI Retry] Retryable error: %v (attempt %d/%d)\n", err, attempt+1, maxRetries)
+	var result string
+	err := c.retryWithBackoff(ctx, "ChatStream", func() error {
+		var e error
+		result, e = c.chatStreamOnce(ctx, systemPrompt, history, userContent, replyLanguage, onChunk, onThought)
+		return e
+	})
+	if err != nil {
+		c.recordFailure()
+		return "", err
 	}
-
-	c.recordFailure()
-	return "", fmt.Errorf("%s: %w", i18n.T("err.api_retry_failed", maxRetries), lastErr)
+	c.recordSuccess()
+	return result, nil
 }
 
 func (c *Client) chatStreamOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string, onChunk func(delta string), onThought func(evt map[string]interface{})) (string, error) {
@@ -598,8 +617,8 @@ func isToolUnsupportedError(errStr string) bool {
 	return false
 }
 
-// ChatWithTools 带工具调用的聊天（支持自动降级：模型不支持工具时走普通 Chat）
-func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool, replyLanguage string) (*ChatResponse, error) {
+// chatWithToolsOnce 单次工具调用聊天（无重试），由 ChatWithTools 包装重试逻辑
+func (c *Client) chatWithToolsOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool, replyLanguage string) (*ChatResponse, error) {
 	if err := c.checkBeforeCall(); err != nil {
 		return nil, err
 	}
@@ -639,19 +658,16 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("send request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("read response failed: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.recordFailure()
 		// 模型不支持工具调用时降级重试
 		if isToolUnsupportedError(string(body)) {
 			fmt.Printf("[AI-Client] ⚠️ %s 不支持工具调用，降级为普通 Chat\n", c.config.Model)
@@ -662,14 +678,12 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
 	chatResp.ToolsDefined = len(tools)
 
 	if chatResp.Error != nil {
-		c.recordFailure()
 		// 错误响应中也可能包含工具不支持信息
 		if isToolUnsupportedError(chatResp.Error.Message) {
 			fmt.Printf("[AI-Client] ⚠️ %s 不支持工具调用（错误响应），降级为普通 Chat\n", c.config.Model)
@@ -679,11 +693,8 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	}
 
 	if len(chatResp.Choices) == 0 {
-		c.recordFailure()
 		return nil, fmt.Errorf("no response from AI")
 	}
-
-	c.recordSuccess()
 
 	// [G-DEBUG] 记录原始响应中的ToolCalls情况，排查为何LLM不走tool calling
 	if len(chatResp.Choices) > 0 {
@@ -703,6 +714,23 @@ func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history
 	}
 
 	return &chatResp, nil
+}
+
+// ChatWithTools 带工具调用的聊天（指数退避重试，5s→10min capped，无限重试）
+// 支持自动降级：模型不支持工具时走普通 Chat
+func (c *Client) ChatWithTools(ctx context.Context, systemPrompt string, history []Message, userContent string, tools []Tool, replyLanguage string) (*ChatResponse, error) {
+	var result *ChatResponse
+	err := c.retryWithBackoff(ctx, "ChatWithTools", func() error {
+		var e error
+		result, e = c.chatWithToolsOnce(ctx, systemPrompt, history, userContent, tools, replyLanguage)
+		return e
+	})
+	if err != nil {
+		c.recordFailure()
+		return nil, err
+	}
+	c.recordSuccess()
+	return result, nil
 }
 
 // chatNoTools 无工具调用的聊天（供 ChatWithTools 降级使用）
@@ -733,46 +761,39 @@ func (c *Client) chatNoTools(ctx context.Context, systemPrompt string, history [
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("send request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("read response failed: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.recordFailure()
 		return nil, fmt.Errorf("API error: %s", string(body))
 	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
 	chatResp.ToolsDefined = 0
 
 	if chatResp.Error != nil {
-		c.recordFailure()
 		return nil, fmt.Errorf("API error: %s", chatResp.Error.Message)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		c.recordFailure()
 		return nil, fmt.Errorf("no response from AI")
 	}
 
-	c.recordSuccess()
 	return &chatResp, nil
 }
 
-// ChatWithHistory 带历史记录的聊天
-func (c *Client) ChatWithHistory(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string) (string, error) {
+// chatWithHistoryOnce 单次带历史记录的聊天（无重试），由 ChatWithHistory 包装重试逻辑
+func (c *Client) chatWithHistoryOnce(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string) (string, error) {
 	if err := c.checkBeforeCall(); err != nil {
 		return "", err
 	}
@@ -809,40 +830,49 @@ func (c *Client) ChatWithHistory(ctx context.Context, systemPrompt string, histo
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("send request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("read response failed: %v", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.recordFailure()
 		return "", fmt.Errorf("API error: %s", string(body))
 	}
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(body, &chatResp); err != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("unmarshal response failed: %v", err)
 	}
 
 	if chatResp.Error != nil {
-		c.recordFailure()
 		return "", fmt.Errorf("API error: %s", chatResp.Error.Message)
 	}
 
 	if len(chatResp.Choices) == 0 {
-		c.recordFailure()
 		return "", fmt.Errorf("no response from AI")
 	}
 
-	c.recordSuccess()
 	return chatResp.Choices[0].Message.Content, nil
+}
+
+// ChatWithHistory 带历史记录的聊天（指数退避重试，5s→10min capped，无限重试）
+func (c *Client) ChatWithHistory(ctx context.Context, systemPrompt string, history []Message, userContent string, replyLanguage string) (string, error) {
+	var result string
+	err := c.retryWithBackoff(ctx, "ChatWithHistory", func() error {
+		var e error
+		result, e = c.chatWithHistoryOnce(ctx, systemPrompt, history, userContent, replyLanguage)
+		return e
+	})
+	if err != nil {
+		c.recordFailure()
+		return "", err
+	}
+	c.recordSuccess()
+	return result, nil
 }
 
 func isRetryableError(err error) bool {

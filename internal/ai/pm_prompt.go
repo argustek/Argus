@@ -24,13 +24,23 @@ import (
 // PMPrompt is the PM agent's core behavioral prompt.
 // Keep this short — the model reads it every turn.
 // Language is injected at runtime by GetLanguageInstruction().
-const PMPrompt = `You are Argus PM — an autonomous project manager that uses tools to get things done.
+const PMPrompt = `You are Argus PM — an autonomous project manager. You help users with coding tasks and chat naturally when greeted.
 
 Working directory: %s
 
+### HARD RULE: exec AFTER write/edit ###
+Whenever you call write_file or edit_file, you MUST immediately follow it with exec to verify the code works.
+This is NOT optional. You MUST NOT return a response to the user without first running exec.
+Exception: only if the file format clearly cannot be executed (e.g., .md, .txt, .json config files).
+Good flow: write_file → exec → show output to user
+Bad flow: write_file → respond to user without exec
+Do not skip exec even if you are confident the code is correct. Always verify by running it.
+
 === DECISION TREE (read this first) ===
 User message
-  ├─ greeting/chat/thanks → @USR <reply>
+  ├─ greeting/chat/thanks/小聊 → Just reply naturally with @USR. Do NOT call any tools.
+  │   Examples: "你好", "hi", "早上好", "hello", "吃了没", "在吗", " thanks"
+  │   These are NOT tasks. Just respond like a normal person.
   │
   ├─ [xxx] prefix (IDE name in brackets) → USE ide_send TOOL to reply to that IDE.
   │     This is an external IDE message, not a task to execute directly.
@@ -52,13 +62,13 @@ User message
   │   • system operations (disk, process, network checks) → exec
   │   • search information → grep / web_search / read_file
   │   • document conversion / processing → appropriate tool
-  │   Result format: natural language, e.g. "Created hello.go and ran it — output: Hello World"
+  │   Result format: natural language, e.g. "Created app.go and ran it — output: 42"
   │
   └─ complex task (multi-step, needs analysis) → @SE <task breakdown>
        After SE completes → verify with tools → @AP for final approval
 
 === PRINCIPLES ===
-1. Always use tools — never respond with just text unless it's a greeting.
+1. Judge the intent: is the user chatting/greeting, or asking for a task? If chatting → just reply. If a task → use tools.
 2. Concise and direct — report results, don't add suggestions unless asked. Don't explain trivial code. Don't ask "shall I continue".
 3. For unclear requests only: investigate with tools before asking the user. Don't search when the task is clear.
 4. NEVER fabricate tool execution results. If you need to run/compile/test something, you MUST call the actual tool (exec/write_file/etc). Do NOT claim in text that a tool was called if it wasn't.
@@ -82,30 +92,35 @@ Messages with [xxx] prefix come from external IDEs. You MUST use ide_send tool �
 - If SE completes a task, do not re-assign the same task to SE
 - If a tool errors twice on the same input, try a different approach, not a retry
 - If you can't make progress after 3 attempts, @USR <what happened + what you tried>
-- If a command (exec) already succeeded on the same code, do NOT run it again. One successful verification is enough.
+- When asked to write and run, always re-run exec to verify, even if the file already exists.
 
 === OUTPUT RULES (strict) ===
-- Respond in natural language, like a human developer reporting to a teammate. No tool names, no args dumps.
-- 3 sentences max. Direct answer — no explanations, no suggestions, no politeness.
-- One @ mention per message. No greetings, no sign-offs.
-- Bad: "✅ write_file foo.go (71 bytes)\n✅ exec 'go run foo.go'\nHello World"
-- Good: "Created foo.go and ran it — output: Hello World"
+- Direct answer — no explanations, no suggestions, no politeness.
+- One @ mention per message.
+- When you ran exec on user code: you MUST show the exec command and its stdout/stderr output in the response, so the user can verify the code actually ran and see the result.
+- Good: "✅ exec 'go run app.go'\nresult=42"
+- Good: "✅ go run app.go\nresult=42"
+- Bad: "已创建并运行成功" ← 没有输出用户看不到到底跑了没有
+- Bad: "已创建 app.go，输出：42" ← 看不到执行的命令和原始输出
+- For non-exec tasks (informational): respond in natural language, no tool names.
 `
 
 // PMProcessor PM处理器
 type PMProcessor struct {
-	client         *Client
-	workDir        string
-	systemPrompt   string
-	timeContext    string
-	stateUpdater   func(int)
-	currentState   int
-	terminalWriter func(string) error
-	ReplyLanguage  string
-	ctx            context.Context
-	todoAdder      func(string) string  // 添加待办
-	todoUpdater    func(string, string) // 更新待办状态
-	todoClearer    func()               // 清空待办（replace=true时）
+	client                 *Client
+	workDir                string
+	systemPrompt           string
+	timeContext            string
+	stateUpdater           func(int)
+	currentState           int
+	terminalWriter         func(string) error
+	debugLog               func(string) // [FIX-v1.0.24] 写入 conversation.log
+	terminalOutputCallback func(string) // [FIX-v1.0.24] 推送 exec 输出到前端终端
+	ReplyLanguage          string
+	ctx                    context.Context
+	todoAdder              func(string) string  // 添加待办
+	todoUpdater            func(string, string) // 更新待办状态
+	todoClearer            func()               // 清空待办（replace=true时）
 
 	ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
 	ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
@@ -124,6 +139,16 @@ func NewPMProcessor(client *Client, workDir string, stateUpdater func(int)) *PMP
 // SetTerminalWriter 设置终端写入器（用于QA验证时显示执行过程）
 func (p *PMProcessor) SetTerminalWriter(writer func(string) error) {
 	p.terminalWriter = writer
+}
+
+// SetDebugLogWriter 设置调试日志写入器（写入 conversation.log）
+func (p *PMProcessor) SetDebugLogWriter(writer func(string)) {
+	p.debugLog = writer
+}
+
+// SetTerminalOutputCallback 设置终端输出回调（推送 exec 输出到前端终端面板）
+func (p *PMProcessor) SetTerminalOutputCallback(cb func(string)) {
+	p.terminalOutputCallback = cb
 }
 
 // SetStateUpdater 设置状态更新回调
@@ -204,24 +229,27 @@ func needsExecution(request string) bool {
 }
 
 // wantsIDEDelegation 检查用户请求是否要求将消息发送/委托给 IDE
+// 要求：必须同时出现 IDE 关键词（ide/trae/cursor/vscode/windsurf）+ 委托动作词
+// 避免日常语言误触发（如"给我""告诉""通知""让"等）
 func wantsIDEDelegation(request string) bool {
-	keywords := []string{"给", "通知", "告诉", "转发给", "发给", "传话给", "发送给", "发消息给", "说给"}
 	lower := strings.ToLower(request)
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return true
+	ideKeywords := []string{"ide", "trae", "cursor", "vscode", "windsurf"}
+	hasIDE := false
+	for _, ide := range ideKeywords {
+		if strings.Contains(lower, ide) {
+			hasIDE = true
+			break
 		}
 	}
-	// 也匹配 ask/tell/forward/send + IDE/keyword
-	ideKeywords := []string{"ide", "trae", "cursor", "vscode", "windsurf"}
-	actionWords := []string{"ask", "tell", "forward", "send", "let", "让", "叫", "找"}
+	if !hasIDE {
+		return false
+	}
+	actionWords := []string{"ask", "tell", "forward", "send", "let",
+		"让", "叫", "找", "给", "通知", "告诉",
+		"转发给", "发给", "传话给", "发送给", "发消息给", "说给"}
 	for _, act := range actionWords {
 		if strings.Contains(lower, act) {
-			for _, ide := range ideKeywords {
-				if strings.Contains(lower, ide) {
-					return true
-				}
-			}
+			return true
 		}
 	}
 	return false
@@ -577,7 +605,6 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 	var hasToolCalls bool        // [v0.8] 记录是否有ToolCalls
 	var execCalled bool          // [v0.9.6] 记录是否调用了exec工具
 	originalRequest := userInput // [v0.9.6] 保存原始用户请求
-	toolNagCount := 0            // [v0.8.4] 记录连续ToolCalls=0次数
 	execNagCount := 0            // [v0.9.6] 记录exec nag已提醒次数
 	var toolResultsCollected int // [v1.0.21] 已收集的工具结果数（防重复）
 	var summaryNagCount int      // [v1.0.21] 已请求总结次数（防循环）
@@ -607,17 +634,7 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		msg := resp.Choices[0].Message
 		// [v0.8.4] 没有工具调用 → 判断是否应结束
 		// 如果之前已经有 ToolCalls 执行过，说明任务已完成，直接结束
-		// 如果从未有过 ToolCalls，可能 LLM 在纯文本回复，提醒一次
 		if len(msg.ToolCalls) == 0 {
-			if !hasToolCalls && toolNagCount == 0 {
-				toolNagCount++
-				nagMsg := "[系统提示] 请用工具来完成任务（如 write_file 写代码、exec 运行命令），不要只回复文字。"
-				aiHistory = append(aiHistory, Message{Role: "user", Content: userInput})
-				aiHistory = append(aiHistory, msg)
-				aiHistory = append(aiHistory, Message{Role: "user", Content: nagMsg, ToolCallID: "tool_nag_1"})
-				userInput = "[请用工具完成任务]"
-				continue
-			}
 			// [v0.9.6] 如果之前调用了工具但从未调用exec，而原始请求需要执行，则强制提醒（最多1次）
 			if hasToolCalls && !execCalled && needsExecution(originalRequest) && execNagCount == 0 {
 				execNagCount++
@@ -749,7 +766,8 @@ func (p *PMProcessor) ProcessStream(userInput string, history []ChatMessage, onC
 		}
 
 		// 继续循环，把工具结果送回 LLM 分析，支持多轮工具调用
-		continuePrompt := "[工具已执行完毕，结果如上。如果任务完成，请用自然语言一句话告诉用户结果（不要列工具名）。如果还需更多操作，继续调用对应工具。]"
+		// 注意：写文件后必须调exec验证，不要直接结束
+		continuePrompt := "[工具已执行完毕。如果刚才写入了代码文件，必须继续调用 exec 工具来运行验证。如果还需要其他操作，继续调用对应工具。全部完成后用一句话告诉用户结果。]"
 		userInput = continuePrompt
 		aiHistory = append(aiHistory, Message{Role: "user", Content: continuePrompt})
 	}
@@ -1150,8 +1168,15 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
 
+		if p.debugLog != nil {
+			p.debugLog(fmt.Sprintf("[PM-EXEC] exec '%s' at %s", args.Command, p.workDir))
+		}
+
 		err := cmd.Start()
 		if err != nil {
+			if p.debugLog != nil {
+				p.debugLog(fmt.Sprintf("[PM-EXEC] 启动失败: %v", err))
+			}
 			return fmt.Sprintf("命令执行失败(启动): %v", err)
 		}
 
@@ -1164,6 +1189,12 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 		case <-time.After(60 * time.Second):
 			cmd.Process.Kill()
 			result := fmt.Sprintf("命令执行超时(60秒): %s\n已终止进程", args.Command)
+			if p.debugLog != nil {
+				p.debugLog(fmt.Sprintf("[PM-EXEC] 超时(60s): %s", args.Command))
+			}
+			if p.terminalOutputCallback != nil {
+				p.terminalOutputCallback(fmt.Sprintf("> %s\n(超时 60s，已终止)", args.Command))
+			}
 			if p.terminalWriter != nil {
 				p.terminalWriter(result)
 			}
@@ -1179,12 +1210,24 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			}
 			if err != nil {
 				result := fmt.Sprintf("命令执行失败(exit code %d):\n%s", exitCode, output)
+				if p.debugLog != nil {
+					p.debugLog(fmt.Sprintf("[PM-EXEC] 失败(exit=%d):\n%s", exitCode, output))
+				}
+				if p.terminalOutputCallback != nil {
+					p.terminalOutputCallback(fmt.Sprintf("> %s\n%s\n(exit code %d)", args.Command, output, exitCode))
+				}
 				if p.terminalWriter != nil {
 					p.terminalWriter(result)
 				}
 				return result
 			}
 
+			if p.debugLog != nil {
+				p.debugLog(fmt.Sprintf("[PM-EXEC] 成功:\n%s", output))
+			}
+			if p.terminalOutputCallback != nil {
+				p.terminalOutputCallback(fmt.Sprintf("> %s\n%s", args.Command, output))
+			}
 			if p.terminalWriter != nil {
 				p.terminalWriter(output + "\n")
 			}

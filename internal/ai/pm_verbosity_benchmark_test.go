@@ -311,11 +311,11 @@ func ScorePMResponse(task, response string) PMResponseScore {
 
 func TestPMPrompt_HasAntiRedundancy(t *testing.T) {
 	prompt := formatPMPromptForTest(".")
-	if !strings.Contains(prompt, "do NOT run it again") {
-		t.Error("❌ PM prompt ANTI-LOOP 缺少反冗余指令: 'do NOT run it again'")
+	if !strings.Contains(prompt, "always re-run exec to verify") {
+		t.Error("❌ PM prompt ANTI-LOOP 缺少反冗余指令: 'always re-run exec to verify'")
 	}
-	if !strings.Contains(prompt, "already succeeded") {
-		t.Error("❌ PM prompt ANTI-LOOP 缺少反冗余指令: 'already succeeded'")
+	if !strings.Contains(prompt, "even if the file already exists") {
+		t.Error("❌ PM prompt ANTI-LOOP 缺少反冗余指令: 'even if the file already exists'")
 	}
 }
 
