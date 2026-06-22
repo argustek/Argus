@@ -1,4 +1,4 @@
-# DocTree 功能交接文档
+# DocTree Handover
 
 ## 当前状态
 
@@ -6,17 +6,18 @@ DocTree 前端已实现（数据通了、能显示了），但架构需要按今
 
 ## Git Commits（按时间倒序）
 
-| Commit | 内容 |
+| Commit | Message |
 |---|---|
-| `4a35a68` | 恢复面板双分隔条 + 根节点可见 |
-| `0b8263e` | 树嵌套包含根节点 + 文件树面板宽度可拖拽 |
-| `712ddca` | DocTreeNode 按 depth 缩进显示层级 |
-| `fd8615d` | 从 message bus 信封提取 raw.data 解包 |
-| `44f0281` | DocTree 改用 message bus 替代直接 Wails binding |
-| `e96732e` | GetDocTree return JSON string 兼容 Wails 序列化 + addLog |
-| `f1d567f` | GetDocTree return type 修复 + DocTreeNode 路径 bug 修复 |
-| `3155f83` | 文档：分层记忆模型设计 |
-| `d712424` | feat: DocTree 前端 + PathStatus 跟踪 |
+| `43391b4` | feat: add test docs for DocTree dev in testdocs/ |
+| `5fde0c7` | docs: DocTree handover document |
+| `4a35a68` | fix: restore dual resize handles for file tree + chat |
+| `0b8263e` | fix: include root node in nested tree + resizable sidebar |
+| `712ddca` | fix: DocTreeNode depth-based indentation |
+| `fd8615d` | fix: extract raw.data from message bus envelope |
+| `44f0281` | fix: switch DocTree to message bus instead of direct Wails binding |
+| `e96732e` | fix: GetDocTree returns JSON string + addLog diagnostics |
+| `f1d567f` | fix: GetDocTree return type + DocTreeNode path bug |
+| `d712424` | feat: DocTree frontend + PathStatus tracking |
 
 ## 当前实现的问题
 
@@ -57,35 +58,36 @@ data-feature.md → node_id: L1-2, parent: L0
 
 节点名 `node_title` 在项目规划阶段自定义。
 
-## 测试文档（未提交 git）
+## Test Documents
 
-测试文档在 `E:\TempArgusTest` 目录下，**不在此仓库中**（独立测试目录）。
+Test docs are in `testdocs/` at the repo root (committed in git).
 
-### config.json 配置
-
-`config/config.json` 第 141 行：
-```json
-"workDir": "E:\\TempArgusTest"
-```
-
-### 文档清单
+### Location in repo
 
 ```
-E:\TempArgusTest\.argus\
-├── PROJECT_PLAN.md          ← 当前根节点
-├── tree\
+testdocs/.argus/
+├── PROJECT_PLAN.md          ← root node
+├── tree/
 │   ├── api-spec.md
 │   ├── auth-feature.md
 │   ├── data-feature.md
 │   ├── design-doc.md
 │   ├── review-plan.md
 │   └── security-audit.md
-├── cache\
-│   └── tree.json            ← 自动生成的树缓存
-└── backups\
 ```
 
-### 当前 frontmatter 格式（待改）
+### Setup on another machine
+
+Copy `testdocs/.argus/` to your workDir's `.argus/`:
+
+```bash
+# Example: workDir = /home/user/my-project
+cp -r testdocs/.argus /home/user/my-project/.argus
+```
+
+Then restart Argus (or click refresh on the doc tree tab).
+
+### Current frontmatter format
 
 ```yaml
 ---
