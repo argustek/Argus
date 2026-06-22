@@ -963,7 +963,7 @@ func (m *Manager) initCMonitor() {
 			func() { m.ClearTodoList() },
 		)
 		// TODO 择机启用：多 IDE 协作
-	// m.setupIDEMessageEmitter()
+		// m.setupIDEMessageEmitter()
 		// 重置状态
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		return nil
@@ -7348,6 +7348,11 @@ func (m *Manager) StopCurrentTask() {
 	m.seContinueCount = 0
 	m.seAskPMCount = 0
 	m.seReportedComplete = false
+
+	// 🧹 清理 MessageBus pendingQueue（防止残留 stream chunk 超时误报"消息丢失"）
+	if m.msgBus != nil {
+		m.msgBus.Clear()
+	}
 
 	// 🧹 清理路由器状态（防止router.isProcessing卡住导致PM静默不响应）
 	m.router.ForceClear()

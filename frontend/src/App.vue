@@ -455,6 +455,9 @@ onMounted(async () => {
   EventsOff('compress_done')
   EventsOn('compress_done', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
 
+  // 全局 ACK terminal:session-created — TerminalWindow 反复开关时不会丢失 ACK
+  EventsOn('terminal:session-created', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+
   // [v1.0.24] 缓冲 terminal:output 事件 + ACK
   // 同时缓冲内容到 pendingSections，等 PM/SE 消息到达时附加为 sections
   // ⚠️ NO EventsOff here! Child component (TerminalWindow) onMounted runs before parent App.vue,
