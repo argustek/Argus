@@ -55,6 +55,7 @@
         @run-in-terminal="handleRunInTerminal"
         @add-to-chat="handleAddToChat"
         class="file-tree-panel"
+        :style="{ width: treeWidth + 'px' }"
       />
 
       <!-- 左侧：对话区 -->
@@ -71,7 +72,6 @@
         @open-file-in-editor="handleOpenFileInEditor"
         @run-in-terminal="handleRunInTerminal"
         class="chat-panel"
-        :style="{ width: chatWidth + 'px' }"
       />
 
       <!-- 拖拽分隔条 -->
@@ -221,20 +221,19 @@ const activeWindows = reactive({
 
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 
-  const chatWidth = ref(Number(localStorage.getItem('chatWidth')) || 640)
-  const isResizing = ref(false)
+  const treeWidth = ref(Number(localStorage.getItem('treeWidth')) || 240)
+  const leftPanelWidth = ref(Number(localStorage.getItem('leftPanelWidth')) || 340)
 
   function startResize(e: MouseEvent) {
-    isResizing.value = true
-    const startWidth = chatWidth.value
-    const handler = (ev: MouseEvent) => {
-      if (!isResizing.value) return
-      const delta = ev.clientX - e.clientX
-      chatWidth.value = Math.max(350, Math.min(1000, startWidth + delta))
+    const startWidth = treeWidth.value
+    const startX = e.screenX
+    function onMove(e: MouseEvent) {
+      const delta = startX - e.screenX
+      treeWidth.value = Math.max(150, Math.min(500, startWidth + delta))
     }
     const cleanup = () => {
       isResizing.value = false
-      localStorage.setItem('chatWidth', String(chatWidth.value))
+      localStorage.setItem('treeWidth', String(treeWidth.value))
       document.removeEventListener('mousemove', handler)
       document.removeEventListener('mouseup', cleanup)
     }
@@ -1426,15 +1425,14 @@ body {
 }
 
 .file-tree-panel {
-  width: 240px;
   flex-shrink: 0;
   border-right: 1px solid var(--border-color);
+  overflow: hidden;
 }
 
 .chat-panel {
-  flex-shrink: 0;
+  flex: 1;
   min-width: 350px;
-  max-width: 1000px;
 }
 
 .resize-handle {

@@ -2350,11 +2350,24 @@ func (a *App) GetDocTree() (string, error) {
 }
 
 func buildDocTreeNested(tree *doclib.DocTree) []map[string]interface{} {
-	rootID := ""
-	if tree.Root != nil {
-		rootID = tree.Root.ID
+	if tree.Root == nil {
+		return []map[string]interface{}{}
 	}
-	return buildChildren(tree, rootID)
+	root := tree.Root
+	rootItem := map[string]interface{}{
+		"id":           root.ID,
+		"parent":       root.Parent,
+		"owner_role":   root.OwnerRole,
+		"title":        root.Title,
+		"summary":      root.Summary,
+		"dirty":        root.Dirty,
+		"last_updated": root.LastUpdated,
+		"exports":      root.Exports,
+	}
+	if children := buildChildren(tree, root.ID); len(children) > 0 {
+		rootItem["children"] = children
+	}
+	return []map[string]interface{}{rootItem}
 }
 
 func buildChildren(tree *doclib.DocTree, parentID string) []map[string]interface{} {
