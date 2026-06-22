@@ -21,9 +21,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { EventsOn, EventsOff } from '../../wailsjs/runtime'
+import { EventsOn, EventsOff, EventsEmit } from '../../wailsjs/runtime'
 import DocTreeNode from './DocTreeNode.vue'
 
 const { t } = useI18n()
@@ -38,40 +38,40 @@ const treeData = ref<any[]>([])
 const loading = ref(false)
 const error = ref('')
 
-async function refresh() {
-  if (!props.workDir) { treeData.value = []; return }
-  loading.value = true
+function onTreeData(jsonStr: string) {
+  loading.value = false
   error.value = ''
-  try {
-    // @ts-ignore Wails binding — returns JSON string now
-    const jsonStr: string = await window.go.main.App.GetDocTree()
-    if (!jsonStr || jsonStr === '[]') {
-      treeData.value = []
-    } else {
-      treeData.value = JSON.parse(jsonStr) || []
-    }
-  } catch (e: any) {
-    error.value = e?.message || String(e)
+  if (!jsonStr || jsonStr === '[]') {
     treeData.value = []
-  } finally {
-    loading.value = false
+  } else {
+    try {
+      treeData.value = JSON.parse(jsonStr) || []
+    } catch (e: any) {
+      error.value = '[解析失败] ' + e?.message
+      treeData.value = []
+    }
   }
 }
 
+function refresh() {
+  if (!props.workDir) { treeData.value = []; return }
+  loading.value = true
+  error.value = ''
+  EventsEmit('req-doc-tree')
+}
+
 onMounted(() => {
+  EventsOn('doc-tree-data', onTreeData)
+  EventsOn('doc-tree-dirty', () => refresh())
   if (props.workDir) refresh()
-  EventsOn('doc-tree-dirty', () => {
-    if (props.workDir) refresh()
-  })
 })
 
 onUnmounted(() => {
+  EventsOff('doc-tree-data')
   EventsOff('doc-tree-dirty')
 })
 
-watch(() => props.workDir, (newDir) => {
-  if (newDir) refresh()
-})
+watch(() => props.workDir, () => refresh())
 </script>
 
 <style scoped>

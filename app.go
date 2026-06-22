@@ -709,6 +709,20 @@ func (a *App) initChatManager() {
 		}()
 	})
 
+	// DocTree 走事件总线：前端 EventsEmit("req-doc-tree") → 后端扫描构建 → EventsEmit("doc-tree-data") 推送
+	runtime.EventsOn(a.ctx, "req-doc-tree", func(optionalData ...interface{}) {
+		go func() {
+			a.addLog("[req-doc-tree] 收到请求")
+			jsonStr, err := a.GetDocTree()
+			if err != nil {
+				a.addLog("[req-doc-tree] ❌ 获取文档树失败: " + err.Error())
+				a.emitToFrontend("doc-tree-data", "[]", "DocTreeHandler", chat.PathSystem)
+				return
+			}
+			a.emitToFrontend("doc-tree-data", jsonStr, "DocTreeHandler", chat.PathSystem)
+		}()
+	})
+
 	// ✅ 通知初始化完成（允许 --send 发送消息）
 	close(a.readyChan)
 	fmt.Println("[initChatManager] ✅ 初始化完成，已关闭 readyChan")
