@@ -1,50 +1,60 @@
-# Doc Tree lifecycle plan
+# Doc Tree lifecycle — decisions
 
-## Weight-aware activation
+## Status: DECIDED (no UI, AI-driven)
 
-| Weight | Typical size | DocTree behavior |
-|--------|-------------|------------------|
-| Featherweight ⚡ | < 5 files, depth ≤ 2 | Hidden |
-| Lightweight | 5-20 files | Visible but empty |
-| Medium+ | > 20 files or depth ≥ 3 | **Auto-activated** |
+After implementing the DocTree frontend (v0.9.8), we reviewed the lifecycle plan.
+All manual UI prompts and user-facing "enable doc management" flows are rejected.
+The system relies entirely on AI (PM agent) weight classification.
 
-## User actions
+---
 
-### New Project
-1. Input dialog: project name + description
-2. Create dir + `.argus/` skeleton (L0 + default L1 stubs)
-3. DocTree auto-activated
+## Three scenarios when setting WorkDir
 
-### Set WorkDir (open existing)
-1. Has `.argus/` → activate directly
-2. No `.argus/` → detect weight:
-   - Medium+: banner "Enable doc management?" → [Enable] generates `.argus/` + scans `.md` files into tree → [Ignore] remembers preference
-   - Lightweight/Featherweight: silent, no banner
+| Scenario | .argus state | Current behavior | Future (AI-driven) |
+|----------|-------------|------------------|-------------------|
+| **Empty** | No `.argus/` | DocTree: "📭 No documents found" | PM detects weight → if Medium+, auto-create `.argus/` skeleton + scan `.md` files |
+| **Has doc tree** | `.argus/` + `tree/*.md` | DocTree renders fully | Same — no change needed |
+| **Has `.argus` no tree** | `.argus/` exists but no `tree/` | DocTree: "📭 No documents found" | PM detects weight → if Medium+, create `tree/` + populate from `.md` files |
 
-### Adding docs (once DocTree active)
+## Weight classification (project-level, from `pm_rules.go`)
 
-| Action | Entry point |
-|--------|-------------|
-| New doc | DocTree right-click → select parent + template |
-| Promote file | FileTree right-click `.md` → "Add to doc tree" |
-| Drag & drop | Drag `.md` from FileTree into DocTree panel |
+| Weight | Criteria | DocTree |
+|--------|----------|---------|
+| Featherweight ⚡ | < 5 files, depth ≤ 2 | Hidden — no doc management |
+| Lightweight | 5-20 files | Visible only if PM decides |
+| Medium+ | > 20 files or depth ≥ 3 | Auto-activated by PM |
 
-## Skeleton generation
+Note: task-level weight (Featherweight/Lightweight/Medium/Heavy in `pm_rules.go`)
+is separate from project-level weight. Project weight uses file count + directory depth.
 
-```
-.argus/
-├── PROJECT_PLAN.md          (L0)
-└── tree/
-    ├── requirements.md      (L1-1, template=PRD)
-    ├── design.md            (L1-2, template=design)
-    └── schedule.md          (L1-3, template=schedule)
-```
+## What was rejected (no UI)
 
-Each template has pre-filled frontmatter (`node_id`, `node_title`, `owner_role`).
+| Proposal | Reason |
+|----------|--------|
+| "Enable doc management" banner | No banners/prompts — AI decides silently |
+| New project dialog (name + description) | Over-engineered; user creates projects externally |
+| Drag & drop `.md` into DocTree | No manual interaction; AI handles imports |
+| Bulk import dialog for 50+ `.md` files | AI scans and imports automatically |
+| Manual enable/disable toggle | AI-driven, no user toggle needed |
 
-## Open questions
+## How it works (current + planned)
 
-1. Should "Enable doc management" banner appear once per project or per workDir?
-2. Scan existing `.md` — what if there are 50+ files? Bulk import dialog?
-3. Drag & drop implementation — native HTML5 DnD or custom?
-4. Weight detection — static analysis (file count, dir depth) or AI-assisted?
+### Current (v0.9.8)
+- Empty workDir → DocTree disabled (shows "No documents found")
+- Existing `.argus/tree/` → DocTree renders full hierarchy
+- No AI involvement in doc tree lifecycle yet
+
+### Planned
+1. User sets workDir
+2. System detects no `.argus/` → notifies PM agent
+3. PM evaluates project weight (static analysis: file count + depth)
+4. If Medium+: PM calls tool to create `.argus/` skeleton, scans `.md` files, populates tree
+5. If Featherweight/Lightweight: silent — no doc tree
+6. User can always override via `/level` command if PM misjudges
+
+## Questions resolved
+
+1. ~~"Enable doc management" banner per-project or per-workDir?~~ **No banner at all**
+2. ~~Bulk import for 50+ files?~~ **AI handles silently**
+3. ~~Drag & drop implementation?~~ **Not needed**
+4. ~~Weight detection: static or AI-assisted?~~ **Static (file count + depth) as first pass, PM refines**
