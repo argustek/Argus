@@ -6,8 +6,9 @@
     </div>
     <div class="tree-body">
       <div v-if="loading" class="loading">{{ t('common.loading') }}</div>
-      <div v-else-if="error" class="error">{{ error }}</div>
-      <div v-else-if="!treeData || treeData.length === 0" class="empty">{{ t('docTree.noDocuments') }}</div>
+      <div v-else-if="error" class="error">❌ {{ error }}</div>
+      <div v-else-if="!workDir" class="empty">⚠️ 未设置工作目录</div>
+      <div v-else-if="!treeData || treeData.length === 0" class="empty">📭 {{ t('docTree.noDocuments') }} (workDir: {{ workDir }})</div>
       <DocTreeNode
         v-for="node in treeData"
         :key="node.id"
@@ -42,9 +43,13 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    // @ts-ignore Wails binding
-    const data: any[] = await window.go.main.App.GetDocTree()
-    treeData.value = data || []
+    // @ts-ignore Wails binding — returns JSON string now
+    const jsonStr: string = await window.go.main.App.GetDocTree()
+    if (!jsonStr || jsonStr === '[]') {
+      treeData.value = []
+    } else {
+      treeData.value = JSON.parse(jsonStr) || []
+    }
   } catch (e: any) {
     error.value = e?.message || String(e)
     treeData.value = []

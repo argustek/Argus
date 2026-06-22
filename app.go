@@ -2298,20 +2298,41 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 }
 
 // GetDocTree 返回文档树嵌套 JSON（前端可直接消费）
-func (a *App) GetDocTree() ([]map[string]interface{}, error) {
+func (a *App) GetDocTree() (string, error) {
 	rootDir := a.getProjectDir()
 	if rootDir == "" {
-		return nil, fmt.Errorf("未设置工作目录")
+		return "", fmt.Errorf("未设置工作目录")
 	}
+	a.addLog("[GetDocTree] rootDir=" + rootDir)
+
 	tree, err := doclib.LoadCache(rootDir)
 	if err != nil {
+		a.addLog("[GetDocTree] LoadCache failed: " + err.Error() + ", building tree...")
 		tree, err = doclib.BuildTree(rootDir)
 		if err != nil {
-			return nil, err
+			a.addLog("[GetDocTree] BuildTree failed: " + err.Error())
+			return "", err
 		}
 		doclib.SaveCache(tree, rootDir)
+		a.addLog("[GetDocTree] BuildTree OK, nodes=" + fmt.Sprintf("%d", len(tree.AllDocs)))
+	} else {
+		a.addLog("[GetDocTree] LoadCache OK, nodes=" + fmt.Sprintf("%d", len(tree.AllDocs)))
 	}
-	return buildDocTreeNested(tree), nil
+
+	if tree.Root == nil {
+		a.addLog("[GetDocTree] tree.Root is nil!")
+		return "[]", nil
+	}
+	a.addLog("[GetDocTree] root=" + tree.Root.ID + ", children=" + fmt.Sprintf("%d", len(tree.Children[tree.Root.ID])))
+
+	result := buildDocTreeNested(tree)
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		a.addLog("[GetDocTree] json.Marshal failed: " + err.Error())
+		return "", fmt.Errorf("序列化失败: %w", err)
+	}
+	a.addLog("[GetDocTree] JSON length=" + fmt.Sprintf("%d", len(jsonBytes)))
+	return string(jsonBytes), nil
 }
 
 func buildDocTreeNested(tree *doclib.DocTree) []map[string]interface{} {
