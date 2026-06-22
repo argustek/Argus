@@ -206,6 +206,10 @@ export function GetDingTalkConfig() {
   return window['go']['main']['App']['GetDingTalkConfig']();
 }
 
+export function GetDocTree() {
+  return window['go']['main']['App']['GetDocTree']();
+}
+
 export function GetEnvMemory() {
   return window['go']['main']['App']['GetEnvMemory']();
 }

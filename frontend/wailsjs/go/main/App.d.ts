@@ -108,6 +108,8 @@ export function GetDecisionConfig():Promise<types.DecisionConfig>;
 
 export function GetDingTalkConfig():Promise<main.DingTalkConfig>;
 
+export function GetDocTree():Promise<any>;
+
 export function GetEnvMemory():Promise<types.EnvMemory>;
 
 export function GetFileDiff(arg1:string):Promise<Record<string, any>>;

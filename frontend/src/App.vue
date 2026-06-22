@@ -408,6 +408,8 @@ onMounted(async () => {
 
   // [v0.8.1] 监听项目级别变更事件（后端 Bridge 推送）
   EventsOn('project-level', (data: string | { data?: string; _msgId?: string }) => {
+    const raw = typeof data === 'string' ? { _msgId: undefined, data } : data
+    if (raw?._msgId) ackMessage(raw._msgId)
     const level = typeof data === 'string' ? data : (data.data || '')
     if (level) {
       projectLevel.value = level
@@ -423,6 +425,16 @@ onMounted(async () => {
   EventsOn('git:status', (raw: any) => {
     if (raw?._msgId) ackMessage(raw._msgId)
   })
+  // [v0.9.0] 全局 ACK PathStatus 事件 — 组件未挂载时无人 ACK 导致 message_lost
+  EventsOff('token_stats')
+  EventsOn('token_stats', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('role-status')
+  EventsOn('role-status', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('context_built')
+  EventsOn('context_built', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('compress_done')
+  EventsOn('compress_done', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+
   // [v1.0.24] 缓冲 terminal:output 事件 + ACK
   // 同时缓冲内容到 pendingSections，等 PM/SE 消息到达时附加为 sections
   // ⚠️ NO EventsOff here! Child component (TerminalWindow) onMounted runs before parent App.vue,

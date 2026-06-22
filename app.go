@@ -28,6 +28,7 @@ import (
 	"argus/internal/core"
 	"argus/internal/debugger"
 	"argus/internal/dingtalk"
+	"argus/internal/doclib"
 	"argus/internal/git"
 	"argus/internal/i18n"
 	"argus/internal/mcp"
@@ -2294,6 +2295,52 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 	})
 
 	return files, err
+}
+
+// GetDocTree 返回文档树嵌套 JSON（前端可直接消费）
+func (a *App) GetDocTree() (interface{}, error) {
+	rootDir := a.getProjectDir()
+	if rootDir == "" {
+		return nil, fmt.Errorf("未设置工作目录")
+	}
+	tree, err := doclib.LoadCache(rootDir)
+	if err != nil {
+		tree, err = doclib.BuildTree(rootDir)
+		if err != nil {
+			return nil, err
+		}
+		doclib.SaveCache(tree, rootDir)
+	}
+	return buildDocTreeNested(tree), nil
+}
+
+func buildDocTreeNested(tree *doclib.DocTree) []map[string]interface{} {
+	rootID := ""
+	if tree.Root != nil {
+		rootID = tree.Root.ID
+	}
+	return buildChildren(tree, rootID)
+}
+
+func buildChildren(tree *doclib.DocTree, parentID string) []map[string]interface{} {
+	var result []map[string]interface{}
+	for _, node := range tree.Children[parentID] {
+		item := map[string]interface{}{
+			"id":           node.ID,
+			"parent":       node.Parent,
+			"owner_role":   node.OwnerRole,
+			"title":        node.Title,
+			"summary":      node.Summary,
+			"dirty":        node.Dirty,
+			"last_updated": node.LastUpdated,
+			"exports":      node.Exports,
+		}
+		if children := buildChildren(tree, node.ID); len(children) > 0 {
+			item["children"] = children
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (a *App) OpenFileLocation(filePath string) error {

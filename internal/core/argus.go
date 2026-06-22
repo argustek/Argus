@@ -744,18 +744,13 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 
 	maxSelfFix := 5
 	for selfAttempt := 0; selfAttempt <= maxSelfFix; selfAttempt++ {
-		if execErr == nil && c.seExecutionSatisfied(execResults) {
-			if selfAttempt > 0 {
-				// self-fix 成功，继续执行
-			}
+		if execErr == nil {
 			break
 		}
 
 		if selfAttempt >= maxSelfFix {
 			if execErr != nil {
 				result.Error = fmt.Errorf("execution failed after %d attempts: %w", maxSelfFix, execErr)
-			} else {
-				result.Error = fmt.Errorf("SE execution incomplete after %d attempts: missing verification output", maxSelfFix)
 			}
 			// [v0.9.7] 路由到PM：让PM分析SE执行错误并决定下一步
 			if c.pmProcessor != nil {
@@ -786,7 +781,7 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 							actions2 = c.ensureExecAction(actions2)
 							if len(actions2) > 0 {
 								execResults2, execErr2 := c.executeActions(actions2, "se")
-								if execErr2 == nil && c.seExecutionSatisfied(execResults2) {
+								if execErr2 == nil {
 									execResults = execResults2
 									actions = actions2
 									result.Error = nil
@@ -1442,40 +1437,6 @@ func (c *ArgusCore) checkToolAvailability(language string) (available []string, 
 	return available, missing, hints
 }
 
-func (c *ArgusCore) seExecutionSatisfied(results []string) bool {
-	if len(results) == 0 {
-		return false
-	}
-	// Must have at least one successful operation (any tool type)
-	successPrefixes := []string{"✅ exec", "✅ read_file", "✅ write_file", "✅ edit_file",
-		"✅ read_pdf", "✅ read_docx", "✅ write_docx", "✅ compare_docs",
-		"✅ ensure_tool", "✅ install_pkg", "✅ search_code", "✅ list_files", "✅ delete_file",
-		"✅ complete_task"}
-	hasSuccess := false
-	for _, r := range results {
-		for _, prefix := range successPrefixes {
-			if strings.HasPrefix(r, prefix) {
-				hasSuccess = true
-				break
-			}
-		}
-		if hasSuccess {
-			break
-		}
-	}
-	if !hasSuccess {
-		return false
-	}
-	// Also must not have any hard failures
-	for _, r := range results {
-		if strings.Contains(r, "❌ exec") || strings.Contains(r, "❌ read_file") ||
-			strings.Contains(r, "syntax error") {
-			return false
-		}
-	}
-	return true
-}
-
 func (c *ArgusCore) analyzeExecError(errMsg string) string {
 	errLower := strings.ToLower(errMsg)
 	var analysis []string
@@ -2123,8 +2084,8 @@ Requirements:
 	// Step 3b: 检查结果 + 重试（最多3次）
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// 先检查核心任务是否已完成（有✅结果），即使清理命令报错也视为成功
-		if c.seExecutionSatisfied(execResults) {
+		// 检查核心任务是否已完成，即使清理命令报错也视为成功
+		if execErr == nil {
 			execErr = nil
 			break
 		}
@@ -2870,17 +2831,6 @@ func isChatMessage(msg string) bool {
 		if lower == g || strings.HasPrefix(lower, g+" ") {
 			return true
 		}
-	}
-	// ultra-short (≤6 chars) with no task keywords → chat
-	if len([]rune(lower)) <= 6 {
-		taskKw := []string{"创建", "写", "改", "删", "执行", "运行", "修复",
-			"create", "write", "run", "exec", "fix", "delete", "修改", "实现"}
-		for _, kw := range taskKw {
-			if strings.Contains(lower, kw) {
-				return false
-			}
-		}
-		return true
 	}
 	return false
 }

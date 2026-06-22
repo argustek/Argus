@@ -225,7 +225,8 @@ func (mb *MessageBus) GetLastMsgId() string {
 // 分类策略：
 //
 //	✅ MUST_TRACK: PathSystem, PathUserInput, PathPM/SE/APToUser, PathSEExec
-//	❌ NO_TRACK: PathCoreOutput (高频内部通道), PathStatus (状态同步)
+//	❌ NO_TRACK: PathCoreOutput (高频内部通道)
+//	✅ v0.9.0: PathStatus 已启用追踪（bounded queue 兜底）
 //	📊 SAMPLE: PathPMStream, PathSEStream (流式消息采样追踪)
 func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	mb.mu.RLock()
@@ -242,10 +243,11 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 		// pendingQueue 爆炸 → 前端完全卡死，AI 全部不动。
 		// 根因：高频事件（status/chunk/thought）每秒几十条进 pendingQueue，
 		// CheckPending O(n) 扫描 + 超时检测把 CPU 吃满。
-		// TODO: 方案A) pendingQueue 改为 ring buffer + 异步清理
-		//       方案B) 高频路径采样追踪（每N条追1条）
-		//       方案C) shouldTrack 加频率限制（同路径 >QPS阈值自动降级）
-		// 临时方案：重要事件（如 agent-thought）改用 PathSystem 发送
+		// [v0.9.0] CheckPending 已改为 bounded queue（>500 淘汰最旧），
+		//  理论上任何路径被追踪都不会再撑爆。但 PathStatus/PathCoreOutput
+		//  仍保持不追踪，因为其高频+fire-and-forget 特性不需要 ACK 保障。
+		//  重要事件（如 agent-thought）已改用 PathSystem 发送。
+		// 如需启用追踪：改 return true 即可，bounded queue 会兜底。
 
 	case PathPMStream, PathSEStream:
 		// [FIX-v0.8.4] 流式消息独立追踪（统一架构）
@@ -260,7 +262,8 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 		return true
 
 	case PathStatus, PathIDEEvent:
-		return false
+		// [v0.9.0] PathStatus 启用追踪：bounded queue（≤500）兜底，不再担心高频撑爆
+		return true
 
 	case PathPMToUser, PathSEToUser, PathAPToUser:
 		return true
@@ -380,21 +383,22 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 	var pendingList []map[string]interface{}
 	streamLost := 0 // 流式丢失计数（静默处理，不每条都报警）
 
-	// [v0.8.4] 容量保护：pendingQueue 超过 500 条时，优先清理最老的流式消息
+	// [v0.9.0] 容量保护：pendingQueue 超过 500 条时，淘汰最旧条目（不限路径）
+	// 根治历史冻机问题：任何高频路径（如 PathStatus 若被追踪）都不会撑爆队列
 	const maxPending = 500
-	if len(mb.pendingQueue) > maxPending {
-		var oldestStream string
+	for len(mb.pendingQueue) > maxPending {
+		var oldest string
 		oldestTime := now
 		for msgId, p := range mb.pendingQueue {
-			if p.Tag.Path == PathPMStream || p.Tag.Path == PathSEStream {
-				if p.SentAt.Before(oldestTime) {
-					oldestTime = p.SentAt
-					oldestStream = msgId
-				}
+			if p.SentAt.Before(oldestTime) {
+				oldestTime = p.SentAt
+				oldest = msgId
 			}
 		}
-		if oldestStream != "" {
-			delete(mb.pendingQueue, oldestStream)
+		if oldest != "" {
+			delete(mb.pendingQueue, oldest)
+		} else {
+			break
 		}
 	}
 

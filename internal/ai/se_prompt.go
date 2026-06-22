@@ -2137,7 +2137,7 @@ var SETools = []Tool{
 		Type: "function",
 		Function: ToolFunction{
 			Name:        "complete_task",
-			Description: "任务完成时调用此工具。必须在所有操作成功验证后调用。files列出所有创建/修改的文件，summary简洁描述做了什么。",
+			Description: "任务完成时调用此工具。必须在所有操作成功验证后调用。files列出所有创建/修改的文件，docs列出受影响的文档ID（传空数组则不触发传播），summary简洁描述做了什么。",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -2145,6 +2145,11 @@ var SETools = []Tool{
 						"type":        "array",
 						"items":       map[string]interface{}{"type": "string"},
 						"description": "所有创建/修改的文件名列表",
+					},
+					"docs": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "受影响的文档ID列表，传空数组[]则不触发脏标记传播",
 					},
 					"summary": map[string]interface{}{
 						"type":        "string",

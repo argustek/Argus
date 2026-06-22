@@ -476,10 +476,10 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 				seen[info.Name] = true
 			}
 		}
-		// 同步在线IDE列表到PM，让PM知道可以给哪些IDE发消息
-		if manager.pmProcessor != nil {
-			manager.pmProcessor.SetIDEList(ides)
-		}
+		// TODO 择机启用：多 IDE 协作
+		// if manager.pmProcessor != nil {
+		// 	manager.pmProcessor.SetIDEList(ides)
+		// }
 		manager.msgBus.Send("system", "", "ide_status", PathIDEEvent, "setupIDEEmitter", map[string]interface{}{
 			"ides": ides,
 		})
@@ -619,7 +619,8 @@ func (m *Manager) UpdateAPIConfig(apiConfig types.APIConfig) {
 		func() { m.ClearTodoList() },
 	)
 	// IDE消息推送
-	m.setupIDEMessageEmitter()
+	// TODO 择机启用：多 IDE 协作
+	// m.setupIDEMessageEmitter()
 
 	fmt.Printf("[Manager] API配置已更新: BaseURL=%s, Model=%s\n", apiConfig.BaseURL, apiConfig.Model)
 }
@@ -702,7 +703,8 @@ func (m *Manager) UpdatePMConfig(pmConfig types.APIConfig) {
 		func(id, status string) { m.UpdateTodoStatus(id, status) },
 		func() { m.ClearTodoList() },
 	)
-	m.setupIDEMessageEmitter()
+	// TODO 择机启用：多 IDE 协作
+	// m.setupIDEMessageEmitter()
 	m.seDebugLog(fmt.Sprintf("[UpdatePMConfig] ✅ PM model changed to: %s (BaseURL=%s)",
 		pmConfig.Model, pmConfig.BaseURL))
 	fmt.Printf("[Manager] PM配置已更新: Model=%s\n", pmConfig.Model)
@@ -960,7 +962,8 @@ func (m *Manager) initCMonitor() {
 			func(id, status string) { m.UpdateTodoStatus(id, status) },
 			func() { m.ClearTodoList() },
 		)
-		m.setupIDEMessageEmitter()
+		// TODO 择机启用：多 IDE 协作
+	// m.setupIDEMessageEmitter()
 		// 重置状态
 		m.cMonitor.UpdatePmStatus(types.RoleStatusIdle)
 		return nil
@@ -7484,174 +7487,15 @@ func (m *Manager) SetupIDEMessageEmitterFor(pmProc *ai.PMProcessor) {
 	if pmProc == nil || m.sseBridge == nil {
 		return
 	}
-	pmProc.SetIDEMessageEmitter(func(target, message, action string) bool {
-		infos := m.sseBridge.GetSubscriberInfos()
-		hasTarget := false
-		if target == "all" {
-			for _, info := range infos {
-				if info.Name != "" && info.Name != "debug" {
-					hasTarget = true
-					break
-				}
-			}
-		} else {
-			for _, info := range infos {
-				if info.Name == target {
-					hasTarget = true
-					break
-				}
-			}
-		}
-		if !hasTarget {
-			return false
-		}
-		ideAckMu.Lock()
-		ideMsgCounter++
-		counter := ideMsgCounter
-		ideAckMu.Unlock()
-		msgID := fmt.Sprintf("ide_msg_%d_%d", time.Now().Unix(), counter)
-		ackEntry := &IDEMessageAck{
-			MessageID: msgID,
-			Target:    target,
-			Message:   message,
-			Action:    action,
-			SentAt:    time.Now(),
-		}
-		ideAckMu.Lock()
-		idePendingAcks[msgID] = ackEntry
-		ideAckMu.Unlock()
-		if target == "all" {
-			for _, info := range infos {
-				if info.Name == "" || info.Name == "debug" {
-					continue
-				}
-				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
-					Type: "ide_message",
-					Data: map[string]interface{}{
-						"from":       "PM",
-						"message":    message,
-						"action":     action,
-						"message_id": msgID,
-					},
-				})
-			}
-		} else {
-			for _, info := range infos {
-				if info.Name == target {
-					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
-						Type: "ide_message",
-						Data: map[string]interface{}{
-							"from":       "PM",
-							"message":    message,
-							"action":     action,
-							"message_id": msgID,
-						},
-					})
-					break
-				}
-			}
-		}
-		return true
-	})
-	fmt.Printf("[Manager] ✅ IDE消息推送回调已绑定到Bridge的PMProcessor\n")
+	// TODO 择机启用：多 IDE 协作
+	// pmProc.SetIDEMessageEmitter(func(target, message, action string) bool { ... })
+	fmt.Printf("[Manager] ⏸️ IDE消息推送回调已跳过（待择机启用）\n")
 }
 
-// setupIDEMessageEmitter 设置 PM 的 IDE 消息推送回调
-func (m *Manager) setupIDEMessageEmitter() {
-	if m.pmProcessor == nil || m.sseBridge == nil {
-		return
-	}
-	m.pmProcessor.SetIDEMessageEmitter(func(target, message, action string) bool {
-		infos := m.sseBridge.GetSubscriberInfos()
-
-		// 检查目标是否已连接
-		hasTarget := false
-		if target == "all" {
-			for _, info := range infos {
-				if info.Name != "" && info.Name != "debug" {
-					hasTarget = true
-					break
-				}
-			}
-		} else {
-			for _, info := range infos {
-				if info.Name == target {
-					hasTarget = true
-					break
-				}
-			}
-		}
-		if !hasTarget {
-			return false
-		}
-
-		// 生成唯一 message_id
-		ideAckMu.Lock()
-		ideMsgCounter++
-		counter := ideMsgCounter
-		ideAckMu.Unlock()
-		msgID := fmt.Sprintf("ide_msg_%d_%d", time.Now().Unix(), counter)
-
-		// 注册待确认消息
-		ackEntry := &IDEMessageAck{
-			MessageID: msgID,
-			Target:    target,
-			Message:   message,
-			Action:    action,
-			SentAt:    time.Now(),
-		}
-		ideAckMu.Lock()
-		idePendingAcks[msgID] = ackEntry
-		ideAckMu.Unlock()
-
-		// 推送消息到目标 IDE
-		if target == "all" {
-			for _, info := range infos {
-				if info.Name == "" || info.Name == "debug" {
-					continue
-				}
-				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
-					Type: "ide_message",
-					Data: map[string]interface{}{
-						"from":       "PM",
-						"message":    message,
-						"action":     action,
-						"message_id": msgID,
-					},
-				})
-			}
-		} else {
-			for _, info := range infos {
-				if info.Name == target {
-					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
-						Type: "ide_message",
-						Data: map[string]interface{}{
-							"from":       "PM",
-							"message":    message,
-							"action":     action,
-							"message_id": msgID,
-						},
-					})
-					break
-				}
-			}
-		}
-
-		// terminate 时发送 done 事件给所有 IDE
-		if action == "terminate" {
-			for _, info := range infos {
-				if info.Name == "" || info.Name == "debug" {
-					continue
-				}
-				m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
-					Type: "done",
-					Data: map[string]string{"status": "completed"},
-				})
-			}
-		}
-		return true
-	})
-}
+/*
+	TODO 择机启用：多 IDE 协作
+func (m *Manager) setupIDEMessageEmitter() { ... }
+*/
 
 // GetIDEAckStats 返回 IDE 消息 ACK 统计（前端/API 调用）
 func (m *Manager) GetIDEAckStats() map[string]interface{} {

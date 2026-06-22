@@ -399,4 +399,13 @@ export default {
     notificationTaskErrorTitle: '🚨 Argus Needs Your Attention',
     notificationTaskErrorBody: 'Task error or PM cannot continue. Please check immediately.',
   },
+  docTree: {
+    title: 'Doc Tree',
+    noDocuments: 'No documents found',
+    roles: {
+      PM: 'Requirement',
+      SE: 'Implementation',
+      AP: 'Review',
+    },
+  },
 }

@@ -399,4 +399,13 @@ export default {
     notificationTaskErrorTitle: '🚨 Argus 需要您介入',
     notificationTaskErrorBody: '任务出错或PM无法继续，请立即查看',
   },
+  docTree: {
+    title: '文档树',
+    noDocuments: '暂无文档',
+    roles: {
+      PM: '需求',
+      SE: '实现',
+      AP: '审核',
+    },
+  },
 }

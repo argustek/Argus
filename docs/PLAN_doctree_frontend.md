@@ -12,13 +12,13 @@
 
 ## Step 1: 后端 Wails Binding
 
-`app.go` 新增方法：
+`app.go` 在 `ListFiles()` 后新增 `GetDocTree()` 方法：
 
 ```go
 import "argus/internal/doclib"
 
-// GetDocTree 返回文档树数据给前端
-func (a *App) GetDocTree() (map[string]interface{}, error) {
+// GetDocTree 返回文档树嵌套 JSON（前端可直接消费）
+func (a *App) GetDocTree() (interface{}, error) {
     rootDir := a.getProjectDir()
     if rootDir == "" {
         return nil, fmt.Errorf("未设置工作目录")
@@ -32,100 +32,145 @@ func (a *App) GetDocTree() (map[string]interface{}, error) {
         }
         doclib.SaveCache(tree, rootDir)
     }
-    return serializeTree(tree), nil
+    return buildDocTreeNested(tree), nil
 }
 ```
 
-序列化辅助函数 `serializeTree` 将 `DocTree` 转为前端友好的嵌套结构：
+**序列化策略**（否决方案说明）：
+- ❌ ~~新建 `DocTreeNode` 结构体~~ → 冗余，`doclib.DocNode` 已有 `json` tag
+- ✅ 递归函数 `buildDocTreeNested`：利用 `DocTree.Children map[string][]*DocNode` 从根开始构建嵌套 `[]map[string]interface{}`
+- ✅ 字段名跟 `DocNode` json tag 保持一致：`id`, `parent`, `owner_role`, `title`, `summary`, `dirty`, `last_updated`, `exports`, `children`
 
 ```go
-type DocTreeNode struct {
-    ID          string   `json:"id"`
-    Parent      string   `json:"parent"`
-    OwnerRole   string   `json:"owner_role"`
-    Title       string   `json:"title"`
-    Summary     string   `json:"summary,omitempty"`
-    Dirty       bool     `json:"dirty"`
-    LastUpdated string   `json:"last_updated"`
-    Exports     []Export `json:"exports,omitempty"`
-    Depth       int      `json:"depth"`
-    Children    []*DocTreeNode `json:"children"`
+func buildDocTreeNested(tree *doclib.DocTree) []map[string]interface{} {
+    // tree.Children[""] 或 tree.Root.ID 为根
+    rootID := ""
+    if tree.Root != nil {
+        rootID = tree.Root.ID
+    }
+    return buildChildren(tree, rootID)
+}
+
+func buildChildren(tree *doclib.DocTree, parentID string) []map[string]interface{} {
+    var result []map[string]interface{}
+    for _, node := range tree.Children[parentID] {
+        // 用 json.Marshal/Unmarshal 利用已有 json tag 保证字段一致
+        item := nodeToMap(node)
+        if children := buildChildren(tree, node.ID); len(children) > 0 {
+            item["children"] = children
+        }
+        result = append(result, item)
+    }
+    return result
 }
 ```
 
 ---
 
-## Step 2: 前端 DocTree.vue 组件
+## Step 2: 前端 FileTree.vue 改造 — 新增 Tab 栏
 
-新建 `frontend/src/components/DocTree.vue`，功能：
+否决方案：
+- ❌ ~~SideBar 新增按钮~~ → 当前 UI 没有 SideBar，窗口切换在 TopBar
+- ❌ ~~LeftPanel 新增 section~~ → 当前没有 LeftPanel 组件
+- ✅ FileTree.vue 自身增加 tab 栏（"📁 文件" / "📋 文档"），切换显示文件树或文档树
 
-- **展开/折叠**：树形层级，点击可展开子节点
-- **节点信息**：每行显示：
-  - 📄 图标
-  - `owner_role` 彩色标签（PM=🔵, SE=🟢, AP=🟠）
-  - 标题（`title`）
-  - 摘要预览（`summary`，可截断）
-  - dirty 标记（`🟡` 黄色圆点）
-  - exports 数量角标
-- **点击事件**：点击文件打开对应 `.md` 文档
-- **空状态**：`no documents found` 提示
-- **加载状态**：loading spinner
+改造后结构：
 
 ```vue
 <template>
-  <div class="doc-tree-panel">
-    <div class="panel-header">
-      <span>📋 文档树</span>
-      <button class="refresh-btn" @click="refresh">↻</button>
+  <div class="file-tree-panel">
+    <!-- Tab 栏 -->
+    <div class="panel-tabs">
+      <span class="tab" :class="{ active: activeTab === 'files' }" @click="activeTab = 'files'">
+        📁 {{ t('topBar.fileTree') }}
+      </span>
+      <span class="tab" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">
+        📋 {{ t('docTree.title') }}
+      </span>
     </div>
-    <div v-if="loading" class="loading">加载中...</div>
+    <!-- 文件树内容 -->
+    <template v-if="activeTab === 'files'">
+      <div class="panel-header">
+        <span class="address-bar" :title="workDir">{{ workDir || '未设置工作目录' }}</span>
+        <button class="refresh-btn" @click.stop="refresh(true)" title="刷新">↻</button>
+      </div>
+      <div class="tree-body">
+        ... 现有 FileTree 内容 ...
+      </div>
+    </template>
+    <!-- 文档树内容 -->
+    <DocTree v-else :work-dir="workDir" @open-doc="handleOpenDoc" />
+  </div>
+</template>
+```
+
+---
+
+## Step 3: 前端 DocTree.vue 组件
+
+新建 `frontend/src/components/DocTree.vue`，功能：
+
+- **加载**：调用 `window.go.main.App.GetDocTree()`，loading spinner
+- **展开/折叠**：树形层级，点击可展开子节点
+- **节点信息**：每行显示：
+  - `owner_role` 彩色标签（PM=🔵, SE=🟢, AP=🟠）
+  - 标题（`title`）
+  - 摘要预览（`summary`，截断）
+  - dirty 标记（🟡 圆点）
+  - exports 数量角标
+- **点击文件**：emit `open-doc` → App.vue 在 EditorWindow 打开 `.md`
+- **刷新**：手动刷新按钮 + 监听 `doc-tree-dirty` 事件（先做手动，后续加自动）
+
+```vue
+<template>
+  <div class="doc-tree">
+    <div class="panel-header">
+      <span>{{ t('docTree.title') }}</span>
+      <button class="refresh-btn" @click="refresh" title="刷新">↻</button>
+    </div>
+    <div v-if="loading" class="loading">{{ t('common.loading') }}</div>
     <div v-else-if="error" class="error">{{ error }}</div>
-    <div v-else-if="!treeData" class="empty">暂无文档</div>
+    <div v-else-if="!treeData || treeData.length === 0" class="empty">{{ t('docTree.noDocuments') }}</div>
     <div v-else class="tree-body">
       <DocTreeNode
-        v-for="node in treeData.children"
+        v-for="node in treeData"
         :key="node.id"
         :node="node"
-        @select="openDoc"
+        @select="(path: string) => emit('open-doc', path)"
       />
     </div>
   </div>
 </template>
 ```
 
-`DocTreeNode` 子组件（递归）：
-
-- `v-if="node.children?.length"` 显示展开/折叠按钮
-- `owner_role` 标签：`PM` `SE` `AP` 各自颜色
-- dirty 圆点：`v-if="node.dirty"`
-- 导出计数：`v-if="node.exports?.length"`
-
 ---
 
-## Step 3: 集成 SideBar
+## Step 4: DocTreeNode.vue 递归组件
 
-`SideBar.vue` 新增文档树按钮（在 explorer 下面）：
+新建 `frontend/src/components/DocTreeNode.vue`，递归渲染：
 
-```html
-<div class="icon-btn" :class="{ active: activePanel === 'doc' }"
-     @click="$emit('panel-change', 'doc')" title="文档树">
-  📋
-</div>
+```vue
+<template>
+  <div class="doc-tree-node">
+    <div class="node-row" @click="toggle" :style="{ paddingLeft: (depth * 16) + 'px' }">
+      <span class="toggle-icon">{{ expanded ? '▼' : '▶' }}</span>
+      <span class="role-tag" :class="node.owner_role">{{ node.owner_role }}</span>
+      <span class="node-title">{{ node.title }}</span>
+      <span v-if="node.dirty" class="dirty-dot" title="已修改">🟡</span>
+      <span v-if="node.exports?.length" class="export-badge">{{ node.exports.length }}</span>
+    </div>
+    <div v-if="expanded && node.children?.length" class="node-children">
+      <DocTreeNode
+        v-for="child in node.children"
+        :key="child.id"
+        :node="child"
+        :depth="depth + 1"
+        @select="(path: string) => emit('select', path)"
+      />
+    </div>
+  </div>
+</template>
 ```
-
----
-
-## Step 4: 集成 LeftPanel
-
-`LeftPanel.vue` 新增 panel section：
-
-```html
-<div v-if="panel === 'doc'" class="panel-content">
-  <DocTree @open-doc="handleOpenDoc" />
-</div>
-```
-
-导入 `DocTree` 组件。
 
 ---
 
@@ -137,7 +182,7 @@ type DocTreeNode struct {
 docTree: {
   title: '文档树',
   noDocuments: '暂无文档',
-  role: {
+  roles: {
     PM: '需求',
     SE: '实现',
     AP: '审核',
@@ -147,9 +192,20 @@ docTree: {
 
 ---
 
-## Step 6（可选）：实时刷新
+## Step 6（后续）：实时刷新
 
-后端在文档树变更时 emit `doc-tree-dirty` 事件，前端 `DocTree` 监听并静默刷新。类似 `file-tree-dirty` 的模式。
+后端在检测到 `.argus/tree/` 下文件变更时 emit `doc-tree-dirty` 事件，前端监听并静默刷新。模式同现有 `file-tree-dirty` + `ListFiles()`。
+
+---
+
+## 否决方案记录
+
+| 方案 | 原因 |
+|------|------|
+| 新建 DocTreeNode 结构体序列化 | doclib.DocNode 已有 json tag，重复造轮子 |
+| SideBar 加按钮 | 当前 UI 没有激活的 SideBar 组件 |
+| LeftPanel 加 section | 当前没有 LeftPanel 组件，文件树直接由 App.vue 渲染 |
+| 独立窗口（如 GitWindow） | 文档树是导航工具，不适合浮动窗口 |
 
 ---
 
@@ -157,13 +213,13 @@ docTree: {
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
-| `app.go` | 修改 | 新增 `GetDocTree()` binding |
+| `app.go` | 修改 | 新增 `GetDocTree()` binding + `buildDocTreeNested` |
+| `frontend/src/components/FileTree.vue` | 修改 | 新增 tab 栏，导入 DocTree |
 | `frontend/src/components/DocTree.vue` | **新建** | 文档树主组件 |
 | `frontend/src/components/DocTreeNode.vue` | **新建** | 递归树节点组件 |
-| `frontend/src/components/SideBar.vue` | 修改 | 新增文档树 tab 按钮 |
-| `frontend/src/components/LeftPanel.vue` | 修改 | 新增 `doc` panel section |
-| `frontend/src/i18n/locales/zh-CN.ts` | 修改 | 新增中文翻译 |
-| `frontend/src/i18n/locales/en-US.ts` | 修改 | 新增英文翻译 |
+| `frontend/src/i18n/locales/zh-CN.ts` | 修改 | 新增 `docTree` 翻译 |
+| `frontend/src/i18n/locales/en-US.ts` | 修改 | 新增 `docTree` 翻译 |
+| `docs/PLAN_doctree_frontend.md` | 修改 | 本文件，保持与实现同步 |
 
 ---
 
@@ -201,16 +257,3 @@ docTree: {
 | 结构 | 目录层级 | `parent` 字段定义的父子关系 |
 | 元数据 | 无 | `owner_role`, `title`, `dirty`, `exports` |
 | 用途 | 浏览项目文件 | 分层记忆模型：需求→设计→实现 追溯 |
-
-### Wails 绑定模式参考
-
-现有 `ListFiles()` 在 `app.go:2266` 的模式：
-
-```go
-func (a *App) ListFiles() ([]map[string]interface{}, error) {
-    rootDir := a.getProjectDir()
-    // ... 遍历目录返回扁平列表
-}
-```
-
-`GetDocTree()` 将遵循相同模式，返回前端可直接消费的嵌套 JSON。

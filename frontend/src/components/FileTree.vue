@@ -1,31 +1,48 @@
 <template>
   <div class="file-tree-panel">
-    <div class="panel-header">
-      <span class="address-bar" :title="workDir">{{ workDir || '未设置工作目录' }}</span>
-      <button class="refresh-btn" @click.stop="refresh(true)" :title="'刷新'">↻</button>
+    <div class="panel-tabs">
+      <span class="tab" :class="{ active: activeTab === 'files' }" @click="activeTab = 'files'">
+        <span class="tab-icon">📁</span>
+        <span class="tab-label">{{ t('topBar.fileTree') }}</span>
+      </span>
+      <span class="tab" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">
+        <span class="tab-icon">📋</span>
+        <span class="tab-label">{{ t('docTree.title') }}</span>
+      </span>
     </div>
-    <div class="tree-body">
-      <div v-if="loading" class="loading">加载中...</div>
-      <div v-else-if="error" class="error">{{ error }}</div>
-      <div v-else-if="!workDir" class="empty">未设置工作目录</div>
-      <div v-else-if="treeItems.length === 0" class="empty">空目录</div>
-      <FileTreeItem
-        v-for="item in treeItems"
-        :key="item.name + item.path"
-        :item="item"
-        :selected-path="selectedPath"
-        :work-dir="workDir"
-        @select="onSelectFile"
-        @context="onContextAction"
-      />
-    </div>
+    <template v-if="activeTab === 'files'">
+      <div class="panel-header">
+        <span class="address-bar" :title="workDir">{{ workDir || '未设置工作目录' }}</span>
+        <button class="refresh-btn" @click.stop="refresh(true)" :title="t('common.refresh')">↻</button>
+      </div>
+      <div class="tree-body">
+        <div v-if="loading" class="loading">{{ t('common.loading') }}</div>
+        <div v-else-if="error" class="error">{{ error }}</div>
+        <div v-else-if="!workDir" class="empty">未设置工作目录</div>
+        <div v-else-if="treeItems.length === 0" class="empty">空目录</div>
+        <FileTreeItem
+          v-for="item in treeItems"
+          :key="item.name + item.path"
+          :item="item"
+          :selected-path="selectedPath"
+          :work-dir="workDir"
+          @select="onSelectFile"
+          @context="onContextAction"
+        />
+      </div>
+    </template>
+    <DocTree v-else :work-dir="workDir" @open-doc="handleOpenDoc" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, inject } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime'
 import FileTreeItem from './FileTreeItem.vue'
+import DocTree from './DocTree.vue'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   workDir: string
@@ -34,12 +51,12 @@ const props = defineProps<{
 const emit = defineEmits(['select-file', 'select-binary-file', 'open-in-editor', 'run-in-terminal', 'add-to-chat'])
 const showError = inject('showError') as ((msg: string) => void) || alert
 
+const activeTab = ref('files')
 const treeItems = ref<any[]>([])
 const loading = ref(false)
 const error = ref('')
 const selectedPath = ref('')
 
-// 调用后端 ListFiles()，将扁平列表转为树形结构
 async function refresh(silent = false) {
   if (!props.workDir) { treeItems.value = []; return }
   if (!silent) { loading.value = true }
@@ -72,6 +89,10 @@ function onSelectFile(item: any) {
   }
 }
 
+function handleOpenDoc(path: string) {
+  emit('select-file', { path, name: path.split('/').pop() || path, isDir: false })
+}
+
 async function onContextAction(data: { action: string; item: any }) {
   const { action, item } = data
 
@@ -95,8 +116,6 @@ async function onContextAction(data: { action: string; item: any }) {
     }
     case 'delete': {
       try {
-        // @ts-ignore Wails binding — 需要后端有 DeleteFile 方法
-        // 如果没有就提示用户
         if (window.go.main.App.DeleteFile) {
           // @ts-ignore
           await window.go.main.App.DeleteFile(item.path)
@@ -112,7 +131,6 @@ async function onContextAction(data: { action: string; item: any }) {
   }
 }
 
-// 扁平列表 → 树形结构（按 path 分层）
 function buildTree(files: any[]): any[] {
   const root: Record<string, any> = {}
   const sorted = [...files].sort((a, b) => {
@@ -160,7 +178,6 @@ onUnmounted(() => {
   EventsOff('file-tree-dirty')
 })
 
-// 监听 workDir 变化（App.vue 异步加载，FileTree 先挂载）
 watch(() => props.workDir, (newDir) => {
   if (newDir) refresh()
 })
@@ -174,6 +191,44 @@ watch(() => props.workDir, (newDir) => {
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   overflow: hidden;
+}
+
+.panel-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-color);
+}
+
+.tab-icon {
+  font-size: 14px;
+}
+
+.tab-label {
+  font-weight: 500;
 }
 
 .panel-header {
