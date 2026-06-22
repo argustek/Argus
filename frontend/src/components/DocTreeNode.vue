@@ -1,6 +1,6 @@
 <template>
   <div class="doc-tree-node">
-    <div class="node-row" :class="{ selected: isSelected }" @click="handleClick">
+    <div class="node-row" :class="{ selected: isSelected }" :style="{ paddingLeft: (8 + depth * 20) + 'px' }" @click="handleClick">
       <span class="toggle-icon" v-if="node.children?.length" @click.stop="toggle">
         {{ expanded ? '▼' : '▶' }}
       </span>
