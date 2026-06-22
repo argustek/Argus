@@ -45,7 +45,7 @@ function toggle() {
 function handleClick() {
   // If leaf node (no children), treat as file open
   if (!props.node.children?.length) {
-    const path = `.argus/tree/${props.node.id}.md`
+    const path = `.argus/${props.node.id}`
     isSelected.value = true
     emit('select', path)
   } else {

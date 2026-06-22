@@ -2298,7 +2298,7 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 }
 
 // GetDocTree 返回文档树嵌套 JSON（前端可直接消费）
-func (a *App) GetDocTree() (interface{}, error) {
+func (a *App) GetDocTree() ([]map[string]interface{}, error) {
 	rootDir := a.getProjectDir()
 	if rootDir == "" {
 		return nil, fmt.Errorf("未设置工作目录")

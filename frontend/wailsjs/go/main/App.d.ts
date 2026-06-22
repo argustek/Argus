@@ -108,7 +108,7 @@ export function GetDecisionConfig():Promise<types.DecisionConfig>;
 
 export function GetDingTalkConfig():Promise<main.DingTalkConfig>;
 
-export function GetDocTree():Promise<any>;
+export function GetDocTree():Promise<Array<Record<string, any>>>;
 
 export function GetEnvMemory():Promise<types.EnvMemory>;
 
