@@ -58,7 +58,12 @@
         :style="{ width: treeWidth + 'px' }"
       />
 
-      <!-- 左侧：对话区 -->
+      <!-- 文件树分隔条 -->
+      <div class="resize-handle" @mousedown="startTreeResize">
+        <div class="resize-line"></div>
+      </div>
+
+      <!-- 对话区 -->
       <ChatPanel
         ref="chatPanelRef"
         :messages="messages"
@@ -72,13 +77,11 @@
         @open-file-in-editor="handleOpenFileInEditor"
         @run-in-terminal="handleRunInTerminal"
         class="chat-panel"
+        :style="{ width: chatWidth + 'px' }"
       />
 
-      <!-- 拖拽分隔条 -->
-      <div
-        class="resize-handle"
-        @mousedown="startResize"
-      >
+      <!-- 对话区分隔条 -->
+      <div class="resize-handle" @mousedown="startChatResize">
         <div class="resize-line"></div>
       </div>
 
@@ -222,20 +225,38 @@ const activeWindows = reactive({
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 
   const treeWidth = ref(Number(localStorage.getItem('treeWidth')) || 240)
+  const chatWidth = ref(Number(localStorage.getItem('chatWidth')) || 640)
   const leftPanelWidth = ref(Number(localStorage.getItem('leftPanelWidth')) || 340)
 
-  function startResize(e: MouseEvent) {
-    const startWidth = treeWidth.value
+  function startTreeResize(e: MouseEvent) {
+    const startW = treeWidth.value
     const startX = e.screenX
     function onMove(e: MouseEvent) {
       const delta = startX - e.screenX
-      treeWidth.value = Math.max(150, Math.min(500, startWidth + delta))
+      treeWidth.value = Math.max(150, Math.min(500, startW + delta))
     }
+    const handler = onMove
     const cleanup = () => {
-      isResizing.value = false
-      localStorage.setItem('treeWidth', String(treeWidth.value))
       document.removeEventListener('mousemove', handler)
       document.removeEventListener('mouseup', cleanup)
+      localStorage.setItem('treeWidth', String(treeWidth.value))
+    }
+    document.addEventListener('mousemove', handler)
+    document.addEventListener('mouseup', cleanup)
+  }
+
+  function startChatResize(e: MouseEvent) {
+    const startW = chatWidth.value
+    const startX = e.screenX
+    function onMove(e: MouseEvent) {
+      const delta = startX - e.screenX
+      chatWidth.value = Math.max(350, Math.min(1000, startW + delta))
+    }
+    const handler = onMove
+    const cleanup = () => {
+      document.removeEventListener('mousemove', handler)
+      document.removeEventListener('mouseup', cleanup)
+      localStorage.setItem('chatWidth', String(chatWidth.value))
     }
     document.addEventListener('mousemove', handler)
     document.addEventListener('mouseup', cleanup)
@@ -1431,8 +1452,9 @@ body {
 }
 
 .chat-panel {
-  flex: 1;
+  flex-shrink: 0;
   min-width: 350px;
+  max-width: 1000px;
 }
 
 .resize-handle {
