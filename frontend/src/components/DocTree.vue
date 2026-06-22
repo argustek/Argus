@@ -38,18 +38,19 @@ const treeData = ref<any[]>([])
 const loading = ref(false)
 const error = ref('')
 
-function onTreeData(jsonStr: string) {
+function onTreeData(raw: any) {
   loading.value = false
   error.value = ''
-  if (!jsonStr || jsonStr === '[]') {
-    treeData.value = []
-  } else {
-    try {
-      treeData.value = JSON.parse(jsonStr) || []
-    } catch (e: any) {
-      error.value = '[解析失败] ' + e?.message
+  try {
+    const jsonStr: string = typeof raw === 'string' ? raw : (raw?.data || '')
+    if (!jsonStr || jsonStr === '[]') {
       treeData.value = []
+    } else {
+      treeData.value = JSON.parse(jsonStr) || []
     }
+  } catch (e: any) {
+    error.value = '[解析失败] ' + e?.message
+    treeData.value = []
   }
 }
 
