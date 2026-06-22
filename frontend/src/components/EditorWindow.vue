@@ -9,6 +9,11 @@
         <span v-if="modified" class="modified-indicator">●</span>
       </div>
       <div class="header-actions">
+        <template v-if="isMarkdown">
+          <button class="action-btn" :class="{ active: viewMode === 'edit' }" @mousedown.stop @click.stop="viewMode = 'edit'" title="编辑">✏️</button>
+          <button class="action-btn" :class="{ active: viewMode === 'split' }" @mousedown.stop @click.stop="viewMode = 'split'" title="分栏预览">📐</button>
+          <button class="action-btn" :class="{ active: viewMode === 'preview' }" @mousedown.stop @click.stop="viewMode = 'preview'" title="预览">👁️</button>
+        </template>
         <button class="action-btn" @click.stop="handleSave" title="保存 (Ctrl+S)">💾</button>
         <button class="action-btn" @click.stop="handleOpenFile" title="打开文件">📂</button>
         <button class="action-btn" @click.stop="$emit('close')" title="关闭">×</button>
@@ -28,8 +33,11 @@
           <button class="btn" @click="handleNewFile">📄 新建文件</button>
         </div>
       </div>
-      <div ref="editorContainer" class="monaco-container" :style="{ display: (error && !loading) || (!currentFilePath && !fileContent && !error) ? 'none' : 'flex' }">
-        <div v-if="loading" class="loading-overlay">{{ t('editor.loading') }}...</div>
+      <div v-show="!error && (currentFilePath || fileContent)" class="editor-and-preview" :class="viewMode">
+        <div ref="editorContainer" class="monaco-container" :class="{ 'hide-in-preview': viewMode === 'preview' }">
+          <div v-if="loading" class="loading-overlay">{{ t('editor.loading') }}...</div>
+        </div>
+        <div v-if="viewMode !== 'edit' && isMarkdown" class="md-preview" v-html="renderedHtml"></div>
       </div>
     </div>
     
@@ -47,6 +55,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import * as monaco from 'monaco-editor'
+import { Marked } from 'marked'
 import { ReadFile as ReadFileWails, OpenFileDialog, SaveFile, WriteFile as WriteFileWails } from '../../wailsjs/go/main/App'
 import { useDraggable } from '../composables/useDraggable'
 
@@ -64,13 +73,36 @@ const editorContainer = ref<HTMLElement>()
 const loading = ref(false)
 const error = ref('')
 const fileContent = ref('')
+const previewContent = ref('')
 const modified = ref(false)
 let editorInstance: monaco.editor.IStandaloneCodeEditor | null = null
+
+const renderedHtml = computed(() => {
+  if (!isMarkdown.value) return ''
+  const src = viewMode.value === 'edit' ? '' : (previewContent.value || fileContent.value || '')
+  if (!src) return '<div class="md-empty">暂无内容</div>'
+  try {
+    return marked.parse(src) as string
+  } catch {
+    return '<div class="md-error">渲染失败</div>'
+  }
+})
 
 const windowWidth = ref(700)
 const windowHeight = ref(500)
 
 const cursorPosition = ref({ lineNumber: 1, column: 1 })
+const viewMode = ref<'edit' | 'split' | 'preview'>('edit')
+
+const marked = new Marked({
+  gfm: true,
+  breaks: true,
+})
+
+const isMarkdown = computed(() => {
+  const name = currentFileName.value
+  return name.toLowerCase().endsWith('.md') || name.toLowerCase().endsWith('.markdown')
+})
 
 const internalFilePath = ref('')  // 🔑 内部状态：跟踪通过 📂 按钮打开的文件
 
@@ -193,8 +225,9 @@ function initMonacoEditor() {
   })
 
   editorInstance.onDidChangeModelContent(() => {
-    if (editorInstance && !modified.value) {
+    if (editorInstance) {
       modified.value = true
+      previewContent.value = editorInstance.getValue()
     }
   })
   }
@@ -207,6 +240,7 @@ async function loadFile(filePath: string) {
   try {
     const content = await ReadFileWails(filePath)
     fileContent.value = content || ''
+    previewContent.value = content || ''
     modified.value = false
 
     loading.value = false
@@ -414,6 +448,11 @@ defineExpose({
   color: var(--text-primary);
 }
 
+.action-btn.active {
+  background: var(--accent-color);
+  color: #fff;
+}
+
 .window-content {
   flex: 1;
   overflow: hidden;
@@ -475,11 +514,71 @@ defineExpose({
   opacity: 0.9;
 }
 
-.monaco-container {
+.editor-and-preview {
   width: 100%;
   height: 100%;
+  display: flex;
   position: relative;
 }
+
+.editor-and-preview.edit .monaco-container {
+  width: 100%;
+  height: 100%;
+}
+
+.editor-and-preview.split .monaco-container {
+  width: 50%;
+  height: 100%;
+  border-right: 1px solid var(--border-color);
+}
+
+.editor-and-preview.preview .monaco-container {
+  display: none;
+}
+
+.monaco-container {
+  height: 100%;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.hide-in-preview {
+  display: none !important;
+}
+
+.md-preview {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #d4d4d4;
+  background: #1e1e1e;
+}
+
+.md-preview h1 { font-size: 1.8em; font-weight: 600; margin: 0 0 16px; padding-bottom: 8px; border-bottom: 1px solid #333; color: #e0e0e0; }
+.md-preview h2 { font-size: 1.4em; font-weight: 600; margin: 24px 0 12px; padding-bottom: 6px; border-bottom: 1px solid #2a2a2a; color: #e0e0e0; }
+.md-preview h3 { font-size: 1.2em; font-weight: 600; margin: 20px 0 8px; color: #d4d4d4; }
+.md-preview h4 { font-size: 1.1em; font-weight: 600; margin: 16px 0 8px; }
+.md-preview p { margin: 0 0 12px; }
+.md-preview a { color: #569cd6; text-decoration: none; }
+.md-preview a:hover { text-decoration: underline; }
+.md-preview strong { font-weight: 600; color: #e0e0e0; }
+.md-preview code { font-family: 'Consolas', 'Monaco', monospace; font-size: 13px; background: #2d2d2d; padding: 2px 6px; border-radius: 3px; color: #ce9178; }
+.md-preview pre { background: #252526; border: 1px solid #333; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; }
+.md-preview pre code { background: none; padding: 0; color: #d4d4d4; font-size: 13px; line-height: 1.5; }
+.md-preview blockquote { border-left: 4px solid #569cd6; padding: 8px 16px; margin: 12px 0; background: #252526; border-radius: 0 4px 4px 0; color: #9cdcfe; }
+.md-preview table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13px; }
+.md-preview th, .md-preview td { border: 1px solid #333; padding: 8px 12px; text-align: left; }
+.md-preview th { background: #2d2d2d; font-weight: 600; color: #e0e0e0; }
+.md-preview td { background: #1e1e1e; }
+.md-preview tr:nth-child(even) td { background: #252526; }
+.md-preview ul, .md-preview ol { padding-left: 24px; margin: 8px 0; }
+.md-preview li { margin: 4px 0; }
+.md-preview hr { border: none; border-top: 1px solid #333; margin: 24px 0; }
+.md-preview img { max-width: 100%; border-radius: 4px; }
+.md-preview .md-empty { color: #666; text-align: center; padding: 60px 0; font-style: italic; }
+.md-preview .md-error { color: #f48771; text-align: center; padding: 60px 0; }
 
 .loading-overlay {
   position: absolute;

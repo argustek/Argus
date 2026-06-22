@@ -31,7 +31,7 @@
         />
       </div>
     </template>
-    <DocTree v-else :work-dir="workDir" @open-doc="handleOpenDoc" />
+    <DocTree v-else :work-dir="workDir" @open-doc="handleOpenDoc" @doc-context="handleDocContext" />
   </div>
 </template>
 
@@ -91,6 +91,34 @@ function onSelectFile(item: any) {
 
 function handleOpenDoc(path: string) {
   emit('select-file', { path, name: path.split('/').pop() || path, isDir: false })
+}
+
+async function handleDocContext(data: { action: string; item: any }) {
+  const { action, item } = data
+  switch (action) {
+    case 'open':
+      emit('select-file', { path: item.path, name: item.name, isDir: false })
+      break
+    case 'add-to-chat':
+      emit('add-to-chat', item.path)
+      break
+    case 'copy-path': {
+      const sep = '\\'
+      const dir = props.workDir ? props.workDir.replace(/\/$/, '').replace(/\\$/, '') : ''
+      const absPath = dir ? dir + sep + item.path.replace(/\//g, sep) : item.path
+      await navigator.clipboard.writeText(absPath)
+      break
+    }
+    case 'open-explorer': {
+      try {
+        // @ts-ignore Wails binding
+        await window.go.main.App.OpenFileLocation(item.path)
+      } catch (e) {
+        console.error('打开文件位置失败:', e)
+      }
+      break
+    }
+  }
 }
 
 async function onContextAction(data: { action: string; item: any }) {

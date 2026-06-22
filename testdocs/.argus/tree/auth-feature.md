@@ -1,6 +1,8 @@
 ---
-id: "tree/auth-feature.md"
-parent: "PROJECT_PLAN.md"
+id: "auth-feature.md"
+node_id: "L1-1"
+node_title: "需求分析"
+parent: "L0"
 owner_role: "SE"
 title: "Authentication Module"
 dirty: false

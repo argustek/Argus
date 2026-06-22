@@ -1,6 +1,8 @@
 ---
-id: "tree/design-doc.md"
-parent: "PROJECT_PLAN.md"
+id: "design-doc.md"
+node_id: "L1-2"
+node_title: "系统设计"
+parent: "L0"
 owner_role: "PM"
 title: "System Design"
 dirty: false

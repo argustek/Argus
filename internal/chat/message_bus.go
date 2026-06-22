@@ -26,6 +26,7 @@ const (
 	PathCoreOutput MessagePath = "core_output" // V2 ArgusCore输出（Bridge统一推送）
 	PathStatus     MessagePath = "status"      // V2 状态同步（PM/SE/AP灯 + 阶段切换）
 	PathIDEEvent   MessagePath = "ide_event"   // IDE连接状态事件（前端TopBar）
+	PathDocData    MessagePath = "doc_data"    // 文档树数据推送（fire-and-forget，不追踪）
 )
 
 // MessageTag 消息标签（包含路径+校验信息）
@@ -237,7 +238,7 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 	}
 
 	switch path {
-	case PathCoreOutput:
+	case PathCoreOutput, PathDocData:
 		return false // ⚠️ TECH-DEBT: 高频通道不能追踪！
 		// 2026-06 血的教训：PathStatus 改为 return true 后，
 		// pendingQueue 爆炸 → 前端完全卡死，AI 全部不动。

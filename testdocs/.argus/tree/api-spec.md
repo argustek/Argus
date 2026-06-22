@@ -1,6 +1,8 @@
 ---
-id: "tree/api-spec.md"
-parent: "tree/auth-feature.md"
+id: "api-spec.md"
+node_id: "L2-1"
+node_title: "API设计"
+parent: "L1-2"
 owner_role: "SE"
 title: "API Specification"
 dirty: false

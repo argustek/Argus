@@ -232,7 +232,7 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
     const startW = treeWidth.value
     const startX = e.screenX
     function onMove(e: MouseEvent) {
-      const delta = startX - e.screenX
+      const delta = e.screenX - startX
       treeWidth.value = Math.max(150, Math.min(500, startW + delta))
     }
     const handler = onMove
@@ -249,7 +249,7 @@ const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
     const startW = chatWidth.value
     const startX = e.screenX
     function onMove(e: MouseEvent) {
-      const delta = startX - e.screenX
+      const delta = e.screenX - startX
       chatWidth.value = Math.max(350, Math.min(1000, startW + delta))
     }
     const handler = onMove

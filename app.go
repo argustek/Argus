@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -716,10 +717,10 @@ func (a *App) initChatManager() {
 			jsonStr, err := a.GetDocTree()
 			if err != nil {
 				a.addLog("[req-doc-tree] ❌ 获取文档树失败: " + err.Error())
-				a.emitToFrontend("doc-tree-data", "[]", "DocTreeHandler", chat.PathSystem)
+				a.emitToFrontend("doc-tree-data", "[]", "DocTreeHandler", chat.PathDocData)
 				return
 			}
-			a.emitToFrontend("doc-tree-data", jsonStr, "DocTreeHandler", chat.PathSystem)
+			a.emitToFrontend("doc-tree-data", jsonStr, "DocTreeHandler", chat.PathDocData)
 		}()
 	})
 
@@ -2350,45 +2351,82 @@ func (a *App) GetDocTree() (string, error) {
 }
 
 func buildDocTreeNested(tree *doclib.DocTree) []map[string]interface{} {
-	if tree.Root == nil {
+	if tree.NodeRoot == "" {
 		return []map[string]interface{}{}
 	}
-	root := tree.Root
-	rootItem := map[string]interface{}{
-		"id":           root.ID,
-		"parent":       root.Parent,
-		"owner_role":   root.OwnerRole,
-		"title":        root.Title,
-		"summary":      root.Summary,
-		"dirty":        root.Dirty,
-		"last_updated": root.LastUpdated,
-		"exports":      root.Exports,
-	}
-	if children := buildChildren(tree, root.ID); len(children) > 0 {
-		rootItem["children"] = children
-	}
-	return []map[string]interface{}{rootItem}
+	root := buildNodeGroup(tree, tree.NodeRoot)
+	return []map[string]interface{}{root}
 }
 
-func buildChildren(tree *doclib.DocTree, parentID string) []map[string]interface{} {
-	var result []map[string]interface{}
-	for _, node := range tree.Children[parentID] {
-		item := map[string]interface{}{
-			"id":           node.ID,
-			"parent":       node.Parent,
-			"owner_role":   node.OwnerRole,
-			"title":        node.Title,
-			"summary":      node.Summary,
-			"dirty":        node.Dirty,
-			"last_updated": node.LastUpdated,
-			"exports":      node.Exports,
-		}
-		if children := buildChildren(tree, node.ID); len(children) > 0 {
-			item["children"] = children
-		}
-		result = append(result, item)
+func buildNodeGroup(tree *doclib.DocTree, nodeID string) map[string]interface{} {
+	g, ok := tree.NodeGroups[nodeID]
+	if !ok {
+		return nil
 	}
-	return result
+
+	// Collect roles from files
+	roleSet := make(map[string]bool)
+	for _, f := range g.Files {
+		roleSet[f.OwnerRole] = true
+	}
+	primaryRole := "PM"
+	if _, ok := roleSet["SE"]; ok {
+		primaryRole = "SE"
+	}
+	if _, ok := roleSet["AP"]; ok {
+		primaryRole = "AP"
+	}
+
+	// Build file list
+	var files []map[string]interface{}
+	for _, f := range g.Files {
+		filePath := f.FilePath
+		if filePath == "" {
+			if f.ID == "PROJECT_PLAN.md" {
+				filePath = ".argus/PROJECT_PLAN.md"
+			} else {
+				filePath = ".argus/tree/" + f.ID
+			}
+		}
+		files = append(files, map[string]interface{}{
+			"id":           f.ID,
+			"file_path":    filePath,
+			"title":        f.Title,
+			"summary":      f.Summary,
+			"owner_role":   f.OwnerRole,
+			"dirty":        f.Dirty,
+			"last_updated": f.LastUpdated,
+			"exports":      f.Exports,
+		})
+	}
+
+	item := map[string]interface{}{
+		"node_id":    g.NodeID,
+		"node_title": g.NodeTitle,
+		"parent":     g.Parent,
+		"owner_role": primaryRole,
+		"files":      files,
+	}
+
+	// Build child nodes (sorted by node_id for stable display)
+	var childIDs []string
+	for _, g2 := range tree.NodeGroups {
+		if g2.Parent == nodeID && g2.NodeID != nodeID {
+			childIDs = append(childIDs, g2.NodeID)
+		}
+	}
+	sort.Strings(childIDs)
+	var children []map[string]interface{}
+	for _, cid := range childIDs {
+		if child := buildNodeGroup(tree, cid); child != nil {
+			children = append(children, child)
+		}
+	}
+	if len(children) > 0 {
+		item["children"] = children
+	}
+
+	return item
 }
 
 func (a *App) OpenFileLocation(filePath string) error {

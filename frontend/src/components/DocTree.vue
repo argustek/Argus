@@ -11,10 +11,11 @@
       <div v-else-if="!treeData || treeData.length === 0" class="empty">📭 {{ t('docTree.noDocuments') }} (workDir: {{ workDir }})</div>
       <DocTreeNode
         v-for="node in treeData"
-        :key="node.id"
+        :key="node.node_id || node.id"
         :node="node"
         :depth="0"
         @select="(path: string) => emit('open-doc', path)"
+        @context="(e: any) => emit('doc-context', e)"
       />
     </div>
   </div>
@@ -32,7 +33,7 @@ const props = defineProps<{
   workDir: string
 }>()
 
-const emit = defineEmits(['open-doc'])
+const emit = defineEmits(['open-doc', 'doc-context'])
 
 const treeData = ref<any[]>([])
 const loading = ref(false)

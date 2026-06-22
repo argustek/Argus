@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "marked": "^18.0.5",
     "monaco-editor": "^0.55.1",
     "vue": "^3.3.4",
     "vue-i18n": "^9.14.5",
@@ -20,6 +21,7 @@
     "xterm-addon-webgl": "^0.16.0"
   },
   "devDependencies": {
+    "@types/marked": "^5.0.2",
     "@vitejs/plugin-vue": "^4.2.3",
     "typescript": "^5.0.2",
     "vite": "^4.4.5",

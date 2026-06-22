@@ -17,10 +17,13 @@ import (
 
 type DocNode struct {
 	ID           string   `yaml:"id" json:"id"`
+	NodeID       string   `yaml:"node_id" json:"node_id"`
+	NodeTitle    string   `yaml:"node_title" json:"node_title"`
 	Parent       string   `yaml:"parent" json:"parent"`
 	OwnerRole    string   `yaml:"owner_role" json:"owner_role"`
 	Title        string   `yaml:"title" json:"title"`
 	Summary      string   `yaml:"summary,omitempty" json:"summary,omitempty"`
+	FilePath     string   `yaml:"-" json:"file_path"`
 	CodeRef      string   `yaml:"code_ref,omitempty" json:"code_ref,omitempty"`
 	CodeRefType  string   `yaml:"code_ref_type,omitempty" json:"code_ref_type,omitempty"`
 	Dirty        bool     `yaml:"dirty" json:"dirty"`
@@ -34,19 +37,29 @@ type Export struct {
 	Signature string `yaml:"signature" json:"signature"`
 }
 
+type NodeGroup struct {
+	NodeID    string     `json:"node_id"`
+	NodeTitle string     `json:"node_title"`
+	Parent    string     `json:"parent"`
+	Files     []*DocNode `json:"files"`
+}
+
 type DocTree struct {
-	Root     *DocNode
-	AllDocs  map[string]*DocNode
-	Children map[string][]*DocNode
-	Orphans  []*DocNode
-	Warnings []string
+	Root       *DocNode
+	AllDocs    map[string]*DocNode
+	Children   map[string][]*DocNode
+	Orphans    []*DocNode
+	Warnings   []string
+	NodeGroups map[string]*NodeGroup
+	NodeRoot   string
+	NodeOrder  []string
 }
 
 const cacheDir = ".argus/cache"
 const cacheFile = ".argus/cache/tree.json"
 
 func ParseFrontmatter(data []byte) (*DocNode, string, error) {
-	content := string(data)
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if !strings.HasPrefix(content, "---\n") {
 		return nil, content, nil
 	}
@@ -157,10 +170,12 @@ func BuildTree(rootDir string) (*DocTree, error) {
 	}
 
 	tree := &DocTree{
-		AllDocs:  make(map[string]*DocNode),
-		Children: make(map[string][]*DocNode),
+		AllDocs:    make(map[string]*DocNode),
+		Children:   make(map[string][]*DocNode),
+		NodeGroups: make(map[string]*NodeGroup),
 	}
 
+	// Phase 1: Parse all docs
 	for absPath, relPath := range docPaths {
 		node, _, err := ReadDocFile(absPath)
 		if err != nil {
@@ -177,54 +192,119 @@ func BuildTree(rootDir string) (*DocTree, error) {
 			continue
 		}
 
+		node.FilePath = relPath
+
+		if node.NodeID == "" {
+			node.NodeID = node.ID
+			tree.Warnings = append(tree.Warnings, fmt.Sprintf("文档 %q 缺少 node_id，使用 id 作为回退", relPath))
+		}
+		if node.NodeTitle == "" {
+			node.NodeTitle = node.Title
+		}
+
 		tree.AllDocs[node.ID] = node
 	}
 
-	if root, ok := tree.AllDocs[""]; ok {
-		tree.Root = root
-	} else {
-		for _, node := range tree.AllDocs {
-			if node.Parent == "" {
-				if tree.Root != nil {
-					tree.Warnings = append(tree.Warnings, "多个根节点，请检查")
-				}
-				tree.Root = node
-			}
-		}
-	}
-
-	if tree.Root == nil {
-		return nil, fmt.Errorf("未找到根节点（parent 为空的文档）")
-	}
-
+	// Phase 2: Build node groups
 	for _, node := range tree.AllDocs {
-		if node.ID == tree.Root.ID {
-			continue
+		g, ok := tree.NodeGroups[node.NodeID]
+		if !ok {
+			g = &NodeGroup{
+				NodeID:    node.NodeID,
+				NodeTitle: node.NodeTitle,
+				Parent:    node.Parent,
+			}
+			tree.NodeGroups[node.NodeID] = g
 		}
-		parentID := node.Parent
-		if parentID == "" {
-			tree.Orphans = append(tree.Orphans, node)
-			continue
-		}
-		if _, ok := tree.AllDocs[parentID]; !ok {
-			tree.Orphans = append(tree.Orphans, node)
-			tree.Warnings = append(tree.Warnings, fmt.Sprintf("孤儿文档 %q: parent %q 不存在", node.ID, parentID))
-			continue
-		}
-		tree.Children[parentID] = append(tree.Children[parentID], node)
+		g.Files = append(g.Files, node)
 	}
 
+	// Phase 3: Detect root via parent=""
+	for id, g := range tree.NodeGroups {
+		if g.Parent == "" {
+			if tree.NodeRoot != "" {
+				tree.Warnings = append(tree.Warnings, fmt.Sprintf("多个根节点: %s 和 %s", tree.NodeRoot, id))
+			}
+			tree.NodeRoot = id
+		}
+	}
+
+	if tree.NodeRoot == "" {
+		return nil, fmt.Errorf("未找到根节点（parent 为空的 node_id）")
+	}
+
+	// Phase 4: Detect orphans at node level
+	for id, g := range tree.NodeGroups {
+		if id == tree.NodeRoot {
+			continue
+		}
+		if g.Parent == "" {
+			for _, node := range g.Files {
+				tree.Orphans = append(tree.Orphans, node)
+			}
+			tree.Warnings = append(tree.Warnings, fmt.Sprintf("孤儿节点 %q: parent 为空", id))
+			continue
+		}
+		if _, ok := tree.NodeGroups[g.Parent]; !ok {
+			for _, node := range g.Files {
+				tree.Orphans = append(tree.Orphans, node)
+			}
+			tree.Warnings = append(tree.Warnings, fmt.Sprintf("孤儿节点 %q: parent %q 不存在", id, g.Parent))
+			continue
+		}
+	}
+
+	// Phase 5: Build legacy Children (node_id → child nodegroups, backwards compat)
+	for id, g := range tree.NodeGroups {
+		if g.Parent == "" || id == tree.NodeRoot {
+			continue
+		}
+		tree.Children[g.Parent] = append(tree.Children[g.Parent], &DocNode{
+			ID:        id,
+			NodeID:    id,
+			NodeTitle: g.NodeTitle,
+			Parent:    g.Parent,
+			OwnerRole: g.Files[0].OwnerRole,
+			Title:     g.NodeTitle,
+		})
+	}
+
+	// Phase 6: Sort children & topological order
 	for _, children := range tree.Children {
 		sort.Slice(children, func(i, j int) bool {
 			return children[i].ID < children[j].ID
 		})
 	}
+	tree.NodeOrder = nodeTopoSort(tree.NodeGroups, tree.NodeRoot)
 
-	if err := detectCycles(tree); err != nil {
-		return nil, err
+	// Legacy root for backwards compat
+	if root, ok := tree.AllDocs[""]; ok {
+		tree.Root = root
+	} else if len(tree.NodeGroups) > 0 {
+		tree.Root = tree.NodeGroups[tree.NodeRoot].Files[0]
 	}
 
 	return tree, nil
+}
+
+func nodeTopoSort(groups map[string]*NodeGroup, rootID string) []string {
+	visited := make(map[string]bool)
+	var order []string
+	var dfs func(id string)
+	dfs = func(id string) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+		for _, g := range groups {
+			if g.Parent == id {
+				dfs(g.NodeID)
+			}
+		}
+		order = append([]string{id}, order...)
+	}
+	dfs(rootID)
+	return order
 }
 
 func detectCycles(tree *DocTree) error {
@@ -233,16 +313,20 @@ func detectCycles(tree *DocTree) error {
 
 	var dfs func(id string) error
 	dfs = func(id string) error {
+		if visited[id] {
+			if inStack[id] {
+				return fmt.Errorf("检测到循环依赖: node_id=%q", id)
+			}
+			return nil
+		}
 		visited[id] = true
 		inStack[id] = true
 
-		for _, child := range tree.Children[id] {
-			if !visited[child.ID] {
-				if err := dfs(child.ID); err != nil {
+		for _, g := range tree.NodeGroups {
+			if g.Parent == id {
+				if err := dfs(g.NodeID); err != nil {
 					return err
 				}
-			} else if inStack[child.ID] {
-				return fmt.Errorf("检测到循环依赖: id=%q", child.ID)
 			}
 		}
 
@@ -250,49 +334,87 @@ func detectCycles(tree *DocTree) error {
 		return nil
 	}
 
-	return dfs(tree.Root.ID)
+	return dfs(tree.NodeRoot)
 }
 
 func PrintTree(tree *DocTree) string {
 	var sb strings.Builder
-	if tree.Root == nil {
+	if tree.NodeRoot == "" {
 		return ""
 	}
-
-	roleLabel := tree.Root.OwnerRole
-	sb.WriteString(fmt.Sprintf("%s (%s)\n", tree.Root.ID, roleLabel))
-	printChildren(tree, tree.Root.ID, "", &sb)
-
+	printNodeGroup(tree, tree.NodeRoot, "", &sb)
 	return sb.String()
 }
 
-func printChildren(tree *DocTree, parentID string, prefix string, sb *strings.Builder) {
-	children := tree.Children[parentID]
-	for i, child := range children {
-		isLast := i == len(children)-1
-		branch := "├── "
-		childPrefix := "│   "
-		if isLast {
-			branch = "└── "
-			childPrefix = "    "
-		}
-
-		displayID := child.ID
-		sb.WriteString(fmt.Sprintf("%s%s%s (%s)\n", prefix, branch, displayID, child.OwnerRole))
-		printChildren(tree, child.ID, prefix+childPrefix, sb)
+func printNodeGroup(tree *DocTree, nodeID string, prefix string, sb *strings.Builder) {
+	g, ok := tree.NodeGroups[nodeID]
+	if !ok {
+		return
 	}
+	children := nodeChildren(tree, nodeID)
+
+	if prefix == "" {
+		sb.WriteString(fmt.Sprintf("%s (%s) — %s\n", g.NodeID, g.NodeTitle, joinRoles(g.Files)))
+	} else {
+		sb.WriteString(fmt.Sprintf("%s%s %s (%s)\n", prefix, g.NodeID, g.NodeTitle, joinRoles(g.Files)))
+	}
+
+	for _, f := range g.Files {
+		dirtyMark := ""
+		if f.Dirty {
+			dirtyMark = " ⚡"
+		}
+		sb.WriteString(fmt.Sprintf("%s    ├── %s%s\n", prefix, f.Title, dirtyMark))
+	}
+
+	for _, childID := range children {
+		printNodeGroup(tree, childID, prefix+"  ", sb)
+	}
+}
+
+func nodeChildren(tree *DocTree, nodeID string) []string {
+	var ids []string
+	for _, g := range tree.NodeGroups {
+		if g.Parent == nodeID {
+			ids = append(ids, g.NodeID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func joinRoles(files []*DocNode) string {
+	seen := make(map[string]bool)
+	var roles []string
+	for _, f := range files {
+		r := strings.ToUpper(f.OwnerRole)
+		if !seen[r] {
+			seen[r] = true
+			roles = append(roles, r)
+		}
+	}
+	return strings.Join(roles, "/")
 }
 
 func GetDepth(tree *DocTree, id string) int {
 	depth := 0
 	current := id
-	for {
+	maxIter := 100
+	for maxIter > 0 {
+		maxIter--
 		node, ok := tree.AllDocs[current]
-		if !ok || node.Parent == "" {
+		if ok && node.Parent != "" {
+			depth++
+			current = node.Parent
+			continue
+		}
+		// Try as node_id
+		g, ok := tree.NodeGroups[current]
+		if !ok || g.Parent == "" {
 			break
 		}
 		depth++
-		current = node.Parent
+		current = g.Parent
 	}
 	return depth
 }
@@ -300,14 +422,14 @@ func GetDepth(tree *DocTree, id string) int {
 func ValidateTree(tree *DocTree) []string {
 	var errors []string
 
-	if tree.Root == nil {
-		errors = append(errors, "缺少根节点")
+	if tree.NodeRoot == "" {
+		errors = append(errors, "缺少根节点 (parent 为空的 node_id)")
 		return errors
 	}
 
 	if len(tree.Orphans) > 0 {
 		for _, o := range tree.Orphans {
-			errors = append(errors, fmt.Sprintf("孤儿文档: %q (parent=%q)", o.ID, o.Parent))
+			errors = append(errors, fmt.Sprintf("孤儿文档: id=%q node_id=%q (parent=%q)", o.ID, o.NodeID, o.Parent))
 		}
 	}
 
@@ -328,24 +450,29 @@ func SaveCache(tree *DocTree, rootDir string) error {
 		return fmt.Errorf("创建缓存目录失败: %w", err)
 	}
 
-	data := struct {
-		Nodes    map[string]*DocNode `json:"nodes"`
-		Children map[string][]string `json:"children"`
-		RootID   string              `json:"root_id"`
-		Updated  string              `json:"updated"`
-	}{
-		Nodes:    tree.AllDocs,
-		Children: make(map[string][]string),
-		RootID:   tree.Root.ID,
-		Updated:  time.Now().UTC().Format(time.RFC3339),
+	groups := make(map[string]NodeGroupCache)
+	for id, g := range tree.NodeGroups {
+		var fileIDs []string
+		for _, f := range g.Files {
+			fileIDs = append(fileIDs, f.ID)
+		}
+		groups[id] = NodeGroupCache{
+			NodeTitle: g.NodeTitle,
+			Parent:    g.Parent,
+			FileIDs:   fileIDs,
+		}
 	}
 
-	for parent, children := range tree.Children {
-		var ids []string
-		for _, c := range children {
-			ids = append(ids, c.ID)
-		}
-		data.Children[parent] = ids
+	data := struct {
+		Nodes   map[string]*DocNode       `json:"nodes"`
+		Groups  map[string]NodeGroupCache `json:"groups"`
+		RootID  string                    `json:"root_id"`
+		Updated string                    `json:"updated"`
+	}{
+		Nodes:   tree.AllDocs,
+		Groups:  groups,
+		RootID:  tree.NodeRoot,
+		Updated: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	jsonData, err := json.MarshalIndent(data, "", "  ")
@@ -356,38 +483,71 @@ func SaveCache(tree *DocTree, rootDir string) error {
 	return os.WriteFile(cachePath, jsonData, 0644)
 }
 
+type NodeGroupCache struct {
+	NodeTitle string   `json:"node_title"`
+	Parent    string   `json:"parent"`
+	FileIDs   []string `json:"file_ids"`
+}
+
 func LoadCache(rootDir string) (*DocTree, error) {
 	cachePath := filepath.Join(rootDir, cacheFile)
-	data, err := os.ReadFile(cachePath)
+	raw, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, fmt.Errorf("读取缓存失败: %w", err)
 	}
 
 	var cached struct {
-		Nodes    map[string]*DocNode `json:"nodes"`
-		Children map[string][]string `json:"children"`
-		RootID   string              `json:"root_id"`
+		Nodes  map[string]*DocNode       `json:"nodes"`
+		Groups map[string]NodeGroupCache `json:"groups"`
+		RootID string                    `json:"root_id"`
 	}
-	if err := json.Unmarshal(data, &cached); err != nil {
+	if err := json.Unmarshal(raw, &cached); err != nil {
 		return nil, fmt.Errorf("解析缓存失败: %w", err)
 	}
 
 	tree := &DocTree{
-		AllDocs:  cached.Nodes,
-		Children: make(map[string][]*DocNode),
+		AllDocs:    make(map[string]*DocNode),
+		Children:   make(map[string][]*DocNode),
+		NodeGroups: make(map[string]*NodeGroup),
+		NodeRoot:   cached.RootID,
 	}
 
-	if root, ok := cached.Nodes[cached.RootID]; ok {
-		tree.Root = root
+	for id, n := range cached.Nodes {
+		tree.AllDocs[id] = n
 	}
 
-	for parent, childIDs := range cached.Children {
-		for _, id := range childIDs {
-			if child, ok := cached.Nodes[id]; ok {
-				tree.Children[parent] = append(tree.Children[parent], child)
+	for id, gc := range cached.Groups {
+		g := &NodeGroup{
+			NodeID:    id,
+			NodeTitle: gc.NodeTitle,
+			Parent:    gc.Parent,
+		}
+		for _, fid := range gc.FileIDs {
+			if n, ok := cached.Nodes[fid]; ok {
+				g.Files = append(g.Files, n)
 			}
 		}
+		tree.NodeGroups[id] = g
 	}
+
+	// Rebuild legacy Children
+	for id, g := range tree.NodeGroups {
+		if g.Parent == "" || id == tree.NodeRoot {
+			continue
+		}
+		tree.Children[g.Parent] = append(tree.Children[g.Parent], &DocNode{
+			ID:        id,
+			NodeID:    id,
+			NodeTitle: g.NodeTitle,
+			Parent:    g.Parent,
+		})
+	}
+
+	if len(tree.NodeGroups) > 0 {
+		tree.Root = tree.NodeGroups[tree.NodeRoot].Files[0]
+	}
+
+	tree.NodeOrder = nodeTopoSort(tree.NodeGroups, tree.NodeRoot)
 
 	return tree, nil
 }
@@ -450,67 +610,64 @@ func PropagateDirty(rootDir string, docIDs []string) error {
 		return fmt.Errorf("扫描文档路径失败: %w", err)
 	}
 
-	var validIDs []string
+	// Collect all node_ids that need dirty propagation
+	nodeSet := make(map[string]bool)
 	for _, id := range docIDs {
-		if _, ok := tree.AllDocs[id]; ok {
-			validIDs = append(validIDs, id)
-		}
-	}
-	if len(validIDs) == 0 {
-		return nil
-	}
-
-	sort.Slice(validIDs, func(i, j int) bool {
-		return GetDepth(tree, validIDs[i]) > GetDepth(tree, validIDs[j])
-	})
-
-	seen := make(map[string]bool)
-	var toProcess []string
-	for _, id := range validIDs {
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		toProcess = append(toProcess, id)
-		current := id
-		for {
-			node, ok := tree.AllDocs[current]
-			if !ok || node.Parent == "" {
-				break
-			}
-			if seen[node.Parent] {
-				break
-			}
-			seen[node.Parent] = true
-			toProcess = append(toProcess, node.Parent)
-			current = node.Parent
-		}
-	}
-
-	sort.Slice(toProcess, func(i, j int) bool {
-		return GetDepth(tree, toProcess[i]) > GetDepth(tree, toProcess[j])
-	})
-
-	for _, id := range toProcess {
-		path, ok := idToPath[id]
+		node, ok := tree.AllDocs[id]
 		if !ok {
 			continue
 		}
-		node, body, err := ReadDocFile(path)
-		if err != nil || node == nil {
+		nodeSet[node.NodeID] = true
+	}
+
+	// Walk up node hierarchy
+	seenNode := make(map[string]bool)
+	var ancestors []string
+	var walkNode func(nid string)
+	walkNode = func(nid string) {
+		if seenNode[nid] {
+			return
+		}
+		seenNode[nid] = true
+		ancestors = append(ancestors, nid)
+		g, ok := tree.NodeGroups[nid]
+		if !ok || g.Parent == "" {
+			return
+		}
+		walkNode(g.Parent)
+	}
+	for nid := range nodeSet {
+		walkNode(nid)
+	}
+
+	// Mark all docs in ancestor nodes as dirty
+	seenFile := make(map[string]bool)
+	for _, nid := range ancestors {
+		g, ok := tree.NodeGroups[nid]
+		if !ok {
 			continue
 		}
-		node.SetDirty(true)
-		if err := WriteDocFile(path, node, body); err != nil {
-			return fmt.Errorf("写入文档 %s 失败: %w", id, err)
+		for _, f := range g.Files {
+			if seenFile[f.ID] {
+				continue
+			}
+			seenFile[f.ID] = true
+			path, ok := idToPath[f.ID]
+			if !ok {
+				continue
+			}
+			node, body, err := ReadDocFile(path)
+			if err != nil || node == nil {
+				continue
+			}
+			node.SetDirty(true)
+			if err := WriteDocFile(path, node, body); err != nil {
+				return fmt.Errorf("写入文档 %s 失败: %w", f.ID, err)
+			}
 		}
 	}
 
-	if err := SaveCache(tree, rootDir); err != nil {
-		return fmt.Errorf("保存缓存失败: %w", err)
-	}
-
-	return nil
+	return SaveCache(tree, rootDir)
 }
 
 func ClearDirty(rootDir string, docIDs []string) error {
