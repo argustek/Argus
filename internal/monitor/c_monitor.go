@@ -179,10 +179,15 @@ func (c *CMonitor) check() {
 		c.handleProjectRunning(state, now)
 
 	case types.ProjectStateIdle: // 0 = 无项目
+		// Check weight even when idle — user may have set workDir
+		c.detectDocWeightChange(&state)
 	}
 
 	// 🎭 社交互动检查（时间感知+智能寒暄）
 	c.checkSocialInteraction(state, now)
+
+	// 📊 文档树权重检测
+	c.detectDocWeightChange(&state)
 
 	// 🔄 交接安全网检查
 	c.checkHandoverTimeout(now)
@@ -1245,4 +1250,157 @@ func (c *CMonitor) GetSystemStatus() map[string]interface{} {
 	}
 
 	return status
+}
+
+// ---------------------------------------------------------------------------
+// DocTree weight detection
+// ---------------------------------------------------------------------------
+
+// ScanSourceFiles counts source-code files in rootDir (excludes .md, .json, .yaml,
+// .yml, .log, config files, node_modules, vendor, .git).
+func ScanSourceFiles(rootDir string) int {
+	count := 0
+	skipDirs := map[string]bool{
+		"node_modules": true, "vendor": true, ".git": true,
+		"__pycache__": true, ".venv": true, "venv": true,
+		"dist": true, "build": true, ".argus": true, "logs": true,
+	}
+	skipExt := map[string]bool{
+		".md": true, ".json": true, ".yaml": true, ".yml": true,
+		".log": true, ".toml": true, ".ini": true, ".cfg": true,
+		".conf": true, ".lock": true, ".sum": true,
+	}
+	filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && skipDirs[info.Name()] {
+			return filepath.SkipDir
+		}
+		if !info.IsDir() {
+			ext := strings.ToLower(filepath.Ext(info.Name()))
+			if !skipExt[ext] {
+				count++
+			}
+		}
+		return nil
+	})
+	return count
+}
+
+// detectDocWeightChange checks if source file count has crossed a weight threshold.
+// If so, updates state.DocWeight and returns true. Otherwise returns false.
+func (c *CMonitor) detectDocWeightChange(state *types.State) bool {
+	count := ScanSourceFiles(c.workDir)
+	if count == state.DocWeightFiles && state.DocWeight != "" {
+		return false // no change
+	}
+
+	oldWeight := state.DocWeight
+	newWeight := classifyWeight(count)
+
+	state.DocWeightFiles = count
+	state.DocWeight = newWeight
+
+	// persist
+	c.writeStateLocked(*state)
+
+	// If crossing into medium+ from below, send a signal to PM
+	if newWeight == types.WeightMedium && (oldWeight == types.WeightFeatherweight || oldWeight == types.WeightLightweight || oldWeight == "") {
+		msg := fmt.Sprintf("[C → PM] 项目文件数从 %d 增长到 %d，已跨越 Medium+ 阈值。", state.DocWeightFiles, count)
+		if state.DocEnabled == "auto" || state.DocEnabled == "" {
+			msg += " 当前文档模式为自动，建议创建 WBS。"
+		}
+		if c.messageSender != nil {
+			c.messageSender(msg)
+		}
+		return true
+	}
+	return false
+}
+
+// classifyWeight returns the weight level based on source file count.
+func classifyWeight(count int) string {
+	switch {
+	case count < 5:
+		return types.WeightFeatherweight
+	case count <= 20:
+		return types.WeightLightweight
+	default:
+		return types.WeightMedium
+	}
+}
+
+// GetDocWeight returns current doc weight info (safe for call from PM tools).
+func (c *CMonitor) GetDocWeight() map[string]interface{} {
+	state, err := c.readState()
+	if err != nil {
+		return map[string]interface{}{
+			"weight":  "",
+			"files":   0,
+			"enabled": "unknown",
+			"error":   err.Error(),
+		}
+	}
+	count := ScanSourceFiles(c.workDir)
+	return map[string]interface{}{
+		"weight":   state.DocWeight,
+		"files":    count,
+		"enabled":  state.DocEnabled,
+	}
+}
+
+// HandleDocCommand processes /doc on|off|auto command.
+// Returns a human-readable confirmation message.
+func (c *CMonitor) HandleDocCommand(cmd string) string {
+	cmd = strings.TrimSpace(strings.ToLower(cmd))
+	switch cmd {
+	case "on", "off", "auto":
+		// valid
+	default:
+		return fmt.Sprintf("无效的 /doc 命令: %q。请使用 /doc on、/doc off 或 /doc auto。", cmd)
+	}
+
+	state, err := c.readState()
+	if err != nil {
+		return fmt.Sprintf("读取状态失败: %v", err)
+	}
+
+	old := state.DocEnabled
+	state.DocEnabled = cmd
+
+	// If turning on, also classify current weight
+	state.DocWeightFiles = ScanSourceFiles(c.workDir)
+	state.DocWeight = classifyWeight(state.DocWeightFiles)
+
+	if err := c.writeStateLocked(state); err != nil {
+		return fmt.Sprintf("保存状态失败: %v", err)
+	}
+
+	msg := fmt.Sprintf("✓ DocTree 模式已切换: %s → %s", displayMode(old), displayMode(cmd))
+	if cmd == "on" {
+		msg += fmt.Sprintf("（当前项目 %d 个源码文件，权重: %s）", state.DocWeightFiles, state.DocWeight)
+	}
+	if cmd == "off" {
+		msg += "（C Monitor 不再检测文档变化）"
+	}
+	if cmd == "auto" && state.DocWeight == types.WeightMedium {
+		msg += "（权重为 Medium+，建议 PM 创建文档）"
+	}
+	return msg
+}
+
+func displayMode(mode string) string {
+	switch mode {
+	case "on":
+		return "手动开启"
+	case "off":
+		return "手动关闭"
+	case "auto":
+		return "自动模式"
+	case "":
+		return "未设置"
+	default:
+		return mode
+	}
 }

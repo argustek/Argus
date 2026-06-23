@@ -105,6 +105,12 @@ type PMProcessor struct {
 	todoUpdater            func(string, string) // 更新待办状态
 	todoClearer            func()               // 清空待办（replace=true时）
 
+	// DocTree tools
+	docWeightGetter func() map[string]interface{} // get_doc_weight
+	docAnalyzer     func() string                 // analyze_project
+	docProposer     func(analysis string) string  // propose_tree
+	docCreator      func(path, content string) string // create_doc
+
 	// TODO 择机启用：多 IDE 协作
 	// ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
 	// ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
@@ -145,6 +151,19 @@ func (p *PMProcessor) SetTodoCallbacks(adder func(string) string, updater func(s
 	p.todoAdder = adder
 	p.todoUpdater = updater
 	p.todoClearer = clearer
+}
+
+// SetDocCallbacks 注册文档树工具回调
+func (p *PMProcessor) SetDocCallbacks(
+	weightGetter func() map[string]interface{},
+	analyzer func() string,
+	proposer func(analysis string) string,
+	creator func(path, content string) string,
+) {
+	p.docWeightGetter = weightGetter
+	p.docAnalyzer = analyzer
+	p.docProposer = proposer
+	p.docCreator = creator
 }
 
 // SetTimeContext 设置时间上下文（动态注入到Prompt）
@@ -489,6 +508,69 @@ var PMTools = []Tool{
 					},
 				},
 				"required": []string{"path"},
+			},
+		},
+	},
+	// ===== DocTree 文档树工具 =====
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "get_doc_weight",
+			Description: "获取当前项目的文档权重。返回：weight等级（featherweight/lightweight/medium+）、源码文件数、doc_enabled模式（on/off/auto）。用于判断是否需要创建文档树。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+				"required": []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "analyze_project",
+			Description: "扫描工作目录，分析项目结构，返回主要语言、目录结构、已有文档列表。用于后续 propose_tree 的参考。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{},
+				"required": []string{},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "propose_tree",
+			Description: "基于analyze_project的分析结果，生成文档树提案。提案包含node_id层次结构和各节点的node_title建议。用户确认后调用create_doc创建。参数analysis从analyze_project结果复制。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"analysis": map[string]interface{}{
+						"type":        "string",
+						"description": "从analyze_project获取的项目分析结果",
+					},
+				},
+				"required": []string{"analysis"},
+			},
+		},
+	},
+	{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "create_doc",
+			Description: "在.argus目录下创建文档。路径相对于.argus/。内容包含YAML frontmatter（node_id, node_title, parent）。如果父节点不存在，会报错。",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "文档路径，相对于.argus/目录，如architecture/01_overview.md",
+					},
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "文档完整内容（含YAML frontmatter）",
+					},
+				},
+				"required": []string{"path", "content"},
 			},
 		},
 	},
@@ -1301,6 +1383,38 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			return "错误: url参数为空"
 		}
 		return pmWebFetch(args.URL)
+	// ===== DocTree tools =====
+	case "get_doc_weight":
+		if p.docWeightGetter != nil {
+			data := p.docWeightGetter()
+			b, _ := json.Marshal(data)
+			return string(b)
+		}
+		return "get_doc_weight 未配置"
+	case "analyze_project":
+		if p.docAnalyzer != nil {
+			return p.docAnalyzer()
+		}
+		return "analyze_project 未配置"
+	case "propose_tree":
+		var args struct {
+			Analysis string `json:"analysis"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if p.docProposer != nil {
+			return p.docProposer(args.Analysis)
+		}
+		return "propose_tree 未配置"
+	case "create_doc":
+		var args struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		json.Unmarshal([]byte(argsJSON), &args)
+		if p.docCreator != nil {
+			return p.docCreator(args.Path, args.Content)
+		}
+		return "create_doc 未配置"
 	/* TODO 择机启用：多 IDE 协作
 	case "ide_send":
 		var args struct {

@@ -116,7 +116,9 @@ type ArgusCore struct {
 	timeout    time.Duration
 
 	state         RoleState
-	prevTaskLevel string // 上一个完成任务的级别，用于追问继承同一重量
+	prevTaskLevel string // 上一个已完成任务的级别，用于追问继承同一重量
+
+	docCmdHandler func(cmd string) string // /doc 命令处理器：返回确认消息
 }
 
 func NewArgusCore(client AICaller, exec *executor.Executor, workDir string) *ArgusCore {
@@ -143,6 +145,12 @@ func (c *ArgusCore) SetLanguage(lang string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.language = lang
+}
+
+func (c *ArgusCore) SetDocCmdHandler(fn func(cmd string) string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.docCmdHandler = fn
 }
 
 func (c *ArgusCore) SetOnMessage(fn func(source, content string)) {
@@ -471,6 +479,16 @@ func (c *ArgusCore) Process(userMsg string) *ProcessResult {
 			userLevel = strings.TrimSpace(strings.Fields(parts[1])[0])
 			fmt.Printf("[Core:Level] 用户指定级别: %s\n", userLevel)
 		}
+	}
+
+	// [/doc] 文档树命令：on/off/auto
+	if strings.HasPrefix(strings.TrimSpace(userMsg), "/doc ") && c.docCmdHandler != nil {
+		cmd := strings.TrimSpace(strings.TrimPrefix(userMsg, "/doc "))
+		reply := c.docCmdHandler(cmd)
+		c.onMessage("system", reply)
+		c.emitStatus("start", "pm", "idle")
+		result.Success = true
+		return result
 	}
 
 	preFeatherweight := userLevel == "short" || userLevel == "featherweight" || userLevel == "⚡" ||

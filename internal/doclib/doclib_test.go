@@ -14,6 +14,8 @@ func writeTestDoc(t *testing.T, path, id, parent, role, title string, dirty bool
 	t.Helper()
 	frontmatter := `---
 id: "` + id + `"
+node_id: "` + id + `"
+node_title: "` + title + `"
 parent: "` + parent + `"
 owner_role: "` + role + `"
 title: "` + title + `"
@@ -117,9 +119,9 @@ func TestPrintTree(t *testing.T) {
 	require.NoError(t, err)
 
 	output := PrintTree(tree)
-	assert.True(t, strings.Contains(output, "PROJECT_PLAN.md (PM)"))
-	assert.True(t, strings.Contains(output, "tree/a.md (SE)"))
-	assert.True(t, strings.Contains(output, "tree/b.md (SE)"))
+	assert.True(t, strings.Contains(output, "PROJECT_PLAN.md"), "output should contain root node_id")
+	assert.True(t, strings.Contains(output, "tree/a.md"), "output should contain child node_id")
+	assert.True(t, strings.Contains(output, "tree/b.md"), "output should contain child node_id")
 }
 
 func TestSaveAndLoadCache(t *testing.T) {

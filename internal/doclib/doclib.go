@@ -138,26 +138,30 @@ func WriteDocFile(path string, node *DocNode, body string) error {
 func ScanForDocs(rootDir string) (map[string]string, error) {
 	docs := make(map[string]string)
 
-	projectPlan := filepath.Join(rootDir, ".argus", "PROJECT_PLAN.md")
-	if _, err := os.Stat(projectPlan); err == nil {
-		docs[projectPlan] = ".argus/PROJECT_PLAN.md"
+	argusDir := filepath.Join(rootDir, ".argus")
+	if info, err := os.Stat(argusDir); err != nil || !info.IsDir() {
+		return docs, nil
 	}
 
-	treeDir := filepath.Join(rootDir, ".argus", "tree")
-	if _, err := os.Stat(treeDir); err == nil {
-		err = filepath.WalkDir(treeDir, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
-				rel, _ := filepath.Rel(rootDir, path)
-				docs[path] = rel
+	err := filepath.WalkDir(argusDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			// Skip internal config dirs
+			if d.Name() == "cache" || d.Name() == "backups" || d.Name() == "resets" {
+				return filepath.SkipDir
 			}
 			return nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("扫描 tree 目录失败: %w", err)
 		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			rel, _ := filepath.Rel(rootDir, path)
+			docs[path] = rel
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("扫描 .argus 目录失败: %w", err)
 	}
 
 	return docs, nil

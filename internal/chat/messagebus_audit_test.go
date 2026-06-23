@@ -37,8 +37,8 @@ func TestAllPathsHaveCorrectTracking(t *testing.T) {
 		{PathUserInput, true, "用户输入 → 必须追踪、ACK 写 USER log"},
 		{PathSystem, true, "系统消息 → 追踪（用于丢失检测）"},
 		{PathSEExec, true, "SE 执行事件 → 追踪"},
-		{PathPMStream, true, "PM 流 → 追踪（1/10 采样）"},
-		{PathSEStream, true, "SE 流 → 追踪（1/10 采样）"},
+		{PathPMStream, false, "PM 流 → 不追踪（前端无监听器，fire-and-forget）"},
+		{PathSEStream, false, "SE 流 → 不追踪（前端无监听器，fire-and-forget）"},
 		{PathCoreOutput, false, "核心输出 → 不追踪（旧兼容路径）"},
 		{PathStatus, true, "状态 → [v0.9.0] 启用追踪，bounded queue 兜底"},
 	}
@@ -132,12 +132,12 @@ func TestAckDoesNotWriteLogForUntrackedPaths(t *testing.T) {
 // 已知可接受的直接 runtime.EventsEmit 调用（白名单）
 var knownEventsEmitAllowlist = map[string]map[int]string{
 	filepath.Join("internal", "chat", "message_bus.go"): {
-		212: "emitToFrontend — MessageBus 单一前向出口",
-		532: "backgroundChecker — 消息丢失告警（非用户内容）",
+		213: "emitToFrontend — MessageBus 单一前向出口",
+		534: "backgroundChecker — 消息丢失告警（非用户内容）",
 	},
 	filepath.Join("app.go"): {
-		1003: "emitToFrontend fallback — msgBus=nil 时降级，初始化阶段使用",
-		3952: "file-tree-dirty — 文件树脏标记（非消息通道）",
+		1051: "emitToFrontend fallback — msgBus=nil 时降级，初始化阶段使用",
+		4117: "file-tree-dirty — 文件树脏标记（非消息通道）",
 	},
 }
 

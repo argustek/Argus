@@ -789,6 +789,38 @@ func (a *App) initChatManager() {
 				if bridgePM := a.bridge.GetPMProcessor(); bridgePM != nil {
 					a.chatManager.SetupIDEMessageEmitterFor(bridgePM)
 				}
+				// [/doc] 命令处理器：桥接 CMonitor 的状态读写能力
+				if cm := a.chatManager.GetCMonitor(); cm != nil {
+					a.bridge.SetDocCmdHandler(func(cmd string) string {
+						return cm.HandleDocCommand(cmd)
+					})
+				}
+				// [DocTree] PM 文档工具回调
+				if bridgePM := a.bridge.GetPMProcessor(); bridgePM != nil {
+					cm := a.chatManager.GetCMonitor()
+					wd := a.getProjectDir()
+					bridgePM.SetDocCallbacks(
+						// get_doc_weight
+						func() map[string]interface{} {
+							if cm != nil {
+								return cm.GetDocWeight()
+							}
+							return map[string]interface{}{"error": "CMonitor不可用", "enabled": "unknown"}
+						},
+						// analyze_project
+						func() string {
+							return scanProject(wd)
+						},
+						// propose_tree - PM自身可决策，工具仅做格式校验
+						func(analysis string) string {
+							return fmt.Sprintf("项目分析完成。请根据分析结果，以 WBS 为轴心设计文档树。\n\n分析:\n%s", analysis)
+						},
+						// create_doc
+						func(path, content string) string {
+							return createDoc(wd, path, content)
+						},
+					)
+				}
 			}
 
 			a.bridge.SetOnMessage(func(msg *chat.Message) {
@@ -4548,4 +4580,88 @@ func (a *App) DebugEvaluate(sessionID, expression string) (interface{}, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// ---------------------------------------------------------------------------
+// DocTree helpers
+// ---------------------------------------------------------------------------
+
+// scanProject 扫描项目目录，返回结构化分析文本
+func scanProject(workDir string) string {
+	if workDir == "" {
+		return "工作目录为空"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("工作目录: %s\n", workDir))
+
+	// 顶级目录结构
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return fmt.Sprintf("读取目录失败: %v", err)
+	}
+
+	var dirs, files []string
+	extSet := make(map[string]int)
+	for _, e := range entries {
+		if e.Name() == ".argus" || e.Name() == ".git" || e.Name() == "node_modules" {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		} else {
+			files = append(files, e.Name())
+			ext := filepath.Ext(e.Name())
+			if ext != "" {
+				extSet[ext]++
+			}
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("\n目录: %d\n", len(dirs)))
+	for _, d := range dirs {
+		b.WriteString(fmt.Sprintf("  %s/\n", d))
+	}
+
+	b.WriteString(fmt.Sprintf("\n文件: %d\n", len(files)))
+	// 按扩展名归类
+	for ext, count := range extSet {
+		b.WriteString(fmt.Sprintf("  %s: %d 个\n", ext, count))
+	}
+
+	// 检查 .argus 目录
+	argusDir := filepath.Join(workDir, ".argus")
+	if info, err := os.Stat(argusDir); err == nil && info.IsDir() {
+		entries, _ := os.ReadDir(argusDir)
+		b.WriteString(fmt.Sprintf("\n已有文档 (.argus/): %d 个\n", len(entries)))
+		for _, e := range entries {
+			if !e.IsDir() {
+				b.WriteString(fmt.Sprintf("  %s\n", e.Name()))
+			}
+		}
+	} else {
+		b.WriteString("\n.argus/ 目录尚不存在，需要创建。\n")
+	}
+
+	return b.String()
+}
+
+// createDoc 在 .argus 目录下创建文档
+func createDoc(workDir, path, content string) string {
+	if workDir == "" {
+		return "工作目录为空"
+	}
+	argusDir := filepath.Join(workDir, ".argus")
+	if err := os.MkdirAll(argusDir, 0755); err != nil {
+		return fmt.Sprintf("创建 .argus 目录失败: %v", err)
+	}
+
+	fullPath := filepath.Join(argusDir, path)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return fmt.Sprintf("创建子目录失败: %v", err)
+	}
+
+	if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+		return fmt.Sprintf("写文件失败: %v", err)
+	}
+	return fmt.Sprintf("✅ 文档已创建: .argus/%s (%d bytes)", path, len(content))
 }

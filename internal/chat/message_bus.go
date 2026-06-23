@@ -251,10 +251,11 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 		// 如需启用追踪：改 return true 即可，bounded queue 会兜底。
 
 	case PathPMStream, PathSEStream:
-		// [FIX-v0.8.4] 流式消息独立追踪（统一架构）
-		// v0.8.3 的 batch 机制导致个体 msgId 与 batch msgId 不匹配 → ACK 永远失败
-		// 现改为独立追踪 + CheckPending 快速路径（短超时+轻量扫描）解决性能问题
-		return true
+		// [FIX-20260623] 流式消息不追踪 — 前端没有 ai-stream-chunk 监听器，
+		// 这些 fire-and-forget 的流式块没人在意。如果追踪，
+		// backgroundChecker 会因 5s 超时发射 message_lost 误报。
+		// 最终完整消息通过 new-message 事件可靠送达（PathPM/SEToUser 追踪）。
+		return false
 
 	case PathUserInput:
 		return true

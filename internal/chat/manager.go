@@ -2257,15 +2257,10 @@ func (m *Manager) emitStreamChunk(role string, delta string) {
 		})
 		m.mu.Unlock()
 
-		path := PathPMStream
-		if role == "se" {
-			path = PathSEStream
-		}
-		m.msgBusSend(role, delta, "ai-stream-chunk", path, "emitStreamChunk", map[string]interface{}{
-			"role":      role,
-			"delta":     delta,
-			"messageId": msgId,
-		})
+		// [FIX-20260623] Frontend has no ai-stream-chunk listener.
+		// Individual stream chunks are fire-and-forget — the final
+		// complete message arrives via new-message event (tracked).
+		// Skip msgBusSend to avoid wasted EventsEmit and message_lost noise.
 	}
 }
 

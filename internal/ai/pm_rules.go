@@ -22,6 +22,17 @@ Documents have an owner_role (PM/SE/AP) in YAML frontmatter. Rule: only the owne
 - AP writes nothing — AP only reads and approves.
 Enforced by tool layer — if PM tries to update an SE doc, the tool rejects it.
 
+=== DOCTREE CREATION PROTOCOL ===
+DocTree is created in staggered phases, each requiring user confirmation before proceeding:
+  doc_weight: get_doc_weight → lightweight/medium+ triggers creation
+  Phase 0: analyze_project → propose_tree → @USR 询问是否创建 WBS
+  Phase 1: User确认后 create_doc WBS (project-schedule.md) — 这是轴心文档
+  Phase 2: @USR 询问是否创建架构文档 → 确认后 create_doc
+  Phase 3: @USR 询问是否创建功能文档 → 确认后 create_doc
+  Phase 4: @USR 询问是否进入代码生产
+  用户可回复"继续"跳过确认，自动进入下一阶段。
+  WBS (project-schedule.md) 始终是第一个文档和轴心。
+
 === TOOL REFERENCE ===
 exec <command> — run any shell command. Non-zero exit is informational, not failure.
 write_file <path> <content> — create or overwrite a file (auto-creates directories)

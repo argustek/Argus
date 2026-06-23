@@ -38,7 +38,19 @@ type State struct {
 	LastUserMessage     string `json:"last_user_message"`     // 最后一条有效用户消息（用于智能恢复）
 	LastInteractionTime int64  `json:"last_interaction_time"` // 最后交互时间戳（Unix时间，用于时间感知+社交）
 	FirstInteractionTime int64 `json:"first_interaction_time"` // 首次交互时间戳（用于计算"认识多久了"）
+
+	// DocTree weight / user override
+	DocEnabled     string `json:"doc_enabled"`      // "on" | "off" | "auto"
+	DocWeight      string `json:"doc_weight"`       // "featherweight" | "lightweight" | "medium+"
+	DocWeightFiles int    `json:"doc_weight_files"`  // 判断时的源码文件数
 }
+
+// Weight 常量
+const (
+	WeightFeatherweight = "featherweight"
+	WeightLightweight   = "lightweight"
+	WeightMedium       = "medium+"
+)
 
 // 项目状态常量
 const (

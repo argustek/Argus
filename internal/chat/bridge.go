@@ -98,6 +98,13 @@ func (b *Bridge) SetOnMessage(fn func(msg *Message)) {
 	b.onMessage = fn
 }
 
+// SetDocCmdHandler 注册 /doc on|off|auto 命令处理器
+func (b *Bridge) SetDocCmdHandler(fn func(cmd string) string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.argus.SetDocCmdHandler(fn)
+}
+
 func (b *Bridge) SetOnChunk(fn func(delta string)) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
