@@ -466,11 +466,16 @@ onMounted(async () => {
     const content = typeof raw === 'string' ? raw : (raw?.data || raw?.delta || '')
     console.log('[DEBUG-terminal:output] raw=', raw, 'content=', content)
     if (content) {
-      pendingSections.value.push({
-        type: 'terminal',
-        label: '▶ Exec',
-        content
-      })
+      const last = pendingSections.value.length > 0 ? pendingSections.value[pendingSections.value.length - 1] : null
+      if (last && last.type === 'terminal') {
+        last.content += '\n' + content
+      } else {
+        pendingSections.value.push({
+          type: 'terminal',
+          label: '▶ Exec',
+          content
+        })
+      }
       console.log('[DEBUG-pendingSections] now=', pendingSections.value.length)
     }
     if (raw?._msgId) ackMessage(raw._msgId)

@@ -61,7 +61,8 @@ type CMonitor struct {
 	resetCount    int          // 本轮自动复位次数
 	maxResetCount int          // 最大自动复位次数（默认3次）
 
-	// [FIX-20260528-D] SE完成状态检测
+	// Doc weight dedup: prevent spamming same "cross threshold" notification
+	lastWeightNotifyTime int64
 	seCompletedChecker func() bool   // 检查SE是否已报告完成任务
 	workDirChecker     func() string // 获取工作目录（用于文件检测）
 
@@ -78,7 +79,7 @@ type CMonitor struct {
 // NewCMonitor 创建C监控
 func NewCMonitor(workDir string, pmRestarter func() error, messageSender func(string), alertFunc func(string)) *CMonitor {
 	return &CMonitor{
-		stateFile:         "config/state.json",
+		stateFile:         filepath.Join(workDir, "config", "state.json"),
 		workDir:           workDir,
 		checkInterval:     30 * time.Second,
 		gitTimeout:        300 * time.Second,
@@ -1307,6 +1308,13 @@ func (c *CMonitor) detectDocWeightChange(state *types.State) bool {
 
 	// If crossing into medium+ from below, send a signal to PM
 	if newWeight == types.WeightMedium && (oldWeight == types.WeightFeatherweight || oldWeight == types.WeightLightweight || oldWeight == "") {
+		// Dedup: don't send the same notification within the check interval
+		now := time.Now().Unix()
+		if now-c.lastWeightNotifyTime <= int64(c.checkInterval.Seconds()) {
+			return false
+		}
+		c.lastWeightNotifyTime = now
+
 		msg := fmt.Sprintf("[C → PM] 项目文件数从 %d 增长到 %d，已跨越 Medium+ 阈值。", state.DocWeightFiles, count)
 		if state.DocEnabled == "auto" || state.DocEnabled == "" {
 			msg += " 当前文档模式为自动，建议创建 WBS。"
@@ -1350,15 +1358,38 @@ func (c *CMonitor) GetDocWeight() map[string]interface{} {
 	}
 }
 
-// HandleDocCommand processes /doc on|off|auto command.
+// HandleDocCommand processes /doc on|off|auto|status command.
 // Returns a human-readable confirmation message.
 func (c *CMonitor) HandleDocCommand(cmd string) string {
 	cmd = strings.TrimSpace(strings.ToLower(cmd))
+
+	if cmd == "status" {
+		treePath := filepath.Join(c.workDir, ".argus", "cache", "tree.json")
+		treeExists := "否"
+		if _, err := os.Stat(treePath); err == nil {
+			treeExists = "是"
+		}
+		state, err := c.readState()
+		if err != nil {
+			return fmt.Sprintf("读取状态失败: %v", err)
+		}
+		files := state.DocWeightFiles
+		if files == 0 {
+			files = ScanSourceFiles(c.workDir)
+		}
+		weight := state.DocWeight
+		if weight == "" {
+			weight = "未评估"
+		}
+		return fmt.Sprintf("📊 DocTree 状态:\n  模式: %s\n  权重: %s (%d 个源码文件)\n  缓存文件: %s",
+			displayMode(state.DocEnabled), weight, files, treeExists)
+	}
+
 	switch cmd {
 	case "on", "off", "auto":
 		// valid
 	default:
-		return fmt.Sprintf("无效的 /doc 命令: %q。请使用 /doc on、/doc off 或 /doc auto。", cmd)
+		return fmt.Sprintf("无效的 /doc 命令: %q。请使用 /doc on、/doc off、/doc auto 或 /doc status。", cmd)
 	}
 
 	state, err := c.readState()
@@ -1396,10 +1427,8 @@ func displayMode(mode string) string {
 		return "手动开启"
 	case "off":
 		return "手动关闭"
-	case "auto":
+	case "auto", "":
 		return "自动模式"
-	case "":
-		return "未设置"
 	default:
 		return mode
 	}

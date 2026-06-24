@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,18 @@ func TestHandleDocCommand_Off(t *testing.T) {
 	state, _ := c.readState()
 	if state.DocEnabled != "off" {
 		t.Errorf("DocEnabled = %q, want %q", state.DocEnabled, "off")
+	}
+}
+
+func TestHandleDocCommand_Status(t *testing.T) {
+	c := newTestCMonitor()
+
+	result := c.HandleDocCommand("status")
+	if result == "" {
+		t.Fatal("expected status result")
+	}
+	if !strings.Contains(result, "DocTree") && !strings.Contains(result, "模式") {
+		t.Errorf("status result missing expected info: %q", result)
 	}
 }
 

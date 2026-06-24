@@ -2315,18 +2315,39 @@ func (a *App) ListFiles() ([]map[string]interface{}, error) {
 	projectDir := a.getProjectDir()
 	var files []map[string]interface{}
 
+	skipDirs := map[string]bool{
+		"node_modules": true,
+		"vendor":       true,
+		"dist":         true,
+		"build":        true,
+	}
+
 	err := filepath.Walk(projectDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return nil // skip inaccessible files instead of aborting
 		}
 
 		relPath, _ := filepath.Rel(projectDir, path)
 		if relPath == "." {
 			return nil
 		}
-		// Skip .argus/cache and .argus/logs, but show tree/docs/skills
 		relPathSlash := strings.ReplaceAll(relPath, "\\", "/")
-		if strings.HasPrefix(relPathSlash, ".argus/cache") || strings.HasPrefix(relPathSlash, ".argus/logs") {
+		firstDir := relPathSlash
+		if idx := strings.IndexByte(relPathSlash, '/'); idx >= 0 {
+			firstDir = relPathSlash[:idx]
+		}
+		if skipDirs[firstDir] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Also skip .argus/internal subdirs (cache, backups, resets)
+		if strings.HasPrefix(relPathSlash, ".argus/cache") || strings.HasPrefix(relPathSlash, ".argus/logs") ||
+			strings.HasPrefix(relPathSlash, ".argus/resets") || strings.HasPrefix(relPathSlash, ".argus/backups") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
@@ -4169,7 +4190,8 @@ func (a *App) GetMCPManager() *mcp.Manager {
 
 func (a *App) isDangerousWorkDir(dir string) bool {
 	dangerousPatterns := []string{
-		"\\ArgusTek\\",
+		// \ArgusTek\ removed — user intentionally sets workDir to Argus source dir;
+		// ensureSafeGitRepo in CMonitor already blocks auto-commit to the Argus repo.
 		"\\src\\",
 		"\\internal\\",
 		"\\frontend\\",
