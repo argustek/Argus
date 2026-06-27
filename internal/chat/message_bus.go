@@ -211,6 +211,7 @@ func (mb *MessageBus) emitToFrontend(eventName, msgId, role string, path Message
 	}
 
 	runtime.EventsEmit(mb.ctx, eventName, enrichedData)
+	fmt.Printf("[💧MSG-EMIT] event=%s msgId=%s path=%s ctx_nil=%v\n", eventName, msgId, path, mb.ctx == nil)
 }
 
 // GetLastMsgId returns the last sent message ID
@@ -413,6 +414,7 @@ func (mb *MessageBus) CheckPending() []map[string]interface{} {
 		if isStream {
 			effTimeout = mb.streamTimeout
 		}
+		// [FIX-v1.0.23] PM/AP→用户消息正常追踪（前端已补全ACK监听，无需放宽超时）
 
 		isTimeout := elapsed > effTimeout
 		isNewLoss := isTimeout && pending.RetryCount == 0

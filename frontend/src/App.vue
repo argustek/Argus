@@ -174,7 +174,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetConfig, SaveConfig, SendMessage, StopCurrentTask, GetMessages, IsAIThinking, IsPMThinking, IsCRunning, IsSERunning, IsAPThinking, GetLogs, GetChangeHistory, GetWorkDir, GetRecentProjects, SetWorkDir, OpenFolderDialog, StartCMonitor, StopCMonitor, FixPosition, OpenFileDialog, ReadFile } from '../wailsjs/go/main/App'
+import { GetConfig, SaveConfig, SendMessage, StopCurrentTask, GetMessages, IsAIThinking, IsPMThinking, IsCRunning, IsSERunning, IsAPThinking, GetLogs, GetChangeHistory, GetWorkDir, GetRecentProjects, SetWorkDir, OpenFolderDialog, StartCMonitor, StopCMonitor, FixPosition, OpenFileDialog, ReadFile, AckMessage } from '../wailsjs/go/main/App'
 import { EventsOn, EventsOff, EventsEmit, LogPrint } from '../wailsjs/runtime/runtime'
 
 const { t } = useI18n()
@@ -358,8 +358,14 @@ function recordReceive(role: string, messageId: string, content: string, source:
 function ackMessage(msgId: string) {
   if (!msgId) return
   try {
-    ;(window as any).go.main.App.AckMessage(msgId)
-  } catch(e) { /* 静默失败 */ }
+    AckMessage(msgId).then((ok: boolean) => {
+      LogPrint('[ACK-DEBUG] ackMessage msgId=' + msgId + ' result=' + ok)
+    }).catch((e: any) => {
+      LogPrint('[ACK-DEBUG] ackMessage FAILED msgId=' + msgId + ' err=' + String(e))
+    })
+  } catch(e: any) {
+    LogPrint('[ACK-DEBUG] ackMessage THROW msgId=' + msgId + ' err=' + String(e))
+  }
 }
 ;(window as any).__argusAck = ackMessage
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
@@ -449,11 +455,25 @@ onMounted(async () => {
   EventsOff('token_stats')
   EventsOn('token_stats', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
   EventsOff('role-status')
-  EventsOn('role-status', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOn('role-status', (raw: any) => {
+    LogPrint('[ACK-DEBUG] role-status raw=' + JSON.stringify(raw))
+    if (raw?._msgId) ackMessage(raw._msgId)
+  })
   EventsOff('context_built')
   EventsOn('context_built', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
   EventsOff('compress_done')
   EventsOn('compress_done', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  // [FIX-v1.0.23] 补全 PM/AP 消息事件的 ACK — 所有走 MessageBus 的事件都要 ACK
+  EventsOff('pm_message')
+  EventsOn('pm_message', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('pm_streaming_done')
+  EventsOn('pm_streaming_done', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('ap_message')
+  EventsOn('ap_message', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('pm_review_completed')
+  EventsOn('pm_review_completed', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
+  EventsOff('project_approved')
+  EventsOn('project_approved', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
 
   // 全局 ACK terminal:session-created — TerminalWindow 反复开关时不会丢失 ACK
   EventsOn('terminal:session-created', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })

@@ -239,14 +239,42 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: connected\ndata: %s\n\n", string(connectedData))
 	flusher.Flush()
 
-	// 如果有初始消息，发送给 PM 处理
-	if req.Message != "" {
-		fmt.Printf("[HTTPServer/SSE] SendMessage: %s (source: %s)\n", req.Message, subName)
-		if err := a.SendMessage(req.Message); err != nil {
-			fmt.Fprintf(w, "event: error\ndata: {\"error\":\"%s\",\"stage\":\"system\"}\n\n", err.Error())
-			flusher.Flush()
-			return
-		}
+	// 推送 protocol 事件：自描述协议，告诉客户端如何行为
+	protocolData, _ := json.Marshal(map[string]interface{}{
+		"name":              "Argus",
+		"version":           "1.0.21",
+		"keep_alive":        true,
+		"heartbeat_interval": 10,
+		"disconnect_timeout": 30,
+		"events":            []string{"connected", "protocol", "heartbeat", "ide_message", "pm_message", "done"},
+		"reply_endpoint":    "POST /api/v1/sse/ide-input",
+		"reply_format":      `{"source":"your-name","message":"reply content"}`,
+		"ack_endpoint":      "POST /api/v1/sse/ide-ack",
+		"rules": []string{
+			"保持长连接，不要设置超时",
+			"每10秒收到 heartbeat 事件，30秒没收到视为断开",
+			"收到 ide_message 事件后，用 reply_endpoint 回复",
+			"收到 ide_message 事件后，用 ack_endpoint 确认",
+			"断开后每30秒重连一次，直到连上为止",
+		},
+		"reconnect": map[string]interface{}{
+			"enabled":  true,
+			"interval": 30,
+			"strategy": "无限重试，直到连上为止",
+		},
+	})
+	fmt.Fprintf(w, "event: protocol\ndata: %s\n\n", string(protocolData))
+	flusher.Flush()
+
+	// IDE 上线通知：注入 PM 上下文（不显示为用户消息）
+	if subName != "" && subName != "debug" {
+		notice := fmt.Sprintf("[系统通知] %s 已上线", subName)
+		fmt.Printf("[HTTPServer/SSE] IDE上线通知注入PM: %s\n", notice)
+		go func() {
+			if _, err := a.chatManager.ProcessMessageFrom("sys", notice); err != nil {
+				fmt.Printf("[HTTPServer/SSE] IDE上线通知注入失败: %v\n", err)
+			}
+		}()
 	}
 
 	for {

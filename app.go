@@ -1132,9 +1132,12 @@ func (a *App) Ready() {
 // [G63] MessageBus: 前端ACK确认收到消息
 func (a *App) AckMessage(msgId string) bool {
 	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
+		fmt.Printf("[ACK-DEBUG] AckMessage FAIL: manager or bus nil | msgId=%s\n", msgId)
 		return false
 	}
-	return a.chatManager.GetMessageBus().Ack(msgId)
+	result := a.chatManager.GetMessageBus().Ack(msgId)
+	fmt.Printf("[ACK-DEBUG] AckMessage msgId=%s result=%v\n", msgId, result)
+	return result
 }
 
 // ackPendingMessages 自动确认所有待处理消息（用于 HTTP API / --send 等无前端的场景）
