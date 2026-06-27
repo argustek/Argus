@@ -196,7 +196,7 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Message string `json:"message"`
-		Source  string `json:"source"`  // IDE对话模式标识（可选），不传=调试模式
+		Source  string `json:"source"` // IDE对话模式标识（可选），不传=调试模式
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
@@ -251,6 +251,10 @@ func (a *App) handleSSESubscribe(w http.ResponseWriter, r *http.Request) {
 
 	for {
 		select {
+		case <-r.Context().Done():
+			// [FIX-v1.0.23] 客户端断开连接时，context 自动取消，触发 Unsubscribe
+			fmt.Printf("[HTTPServer/SSE] 客户端断开: %s (%s)\n", id, subName)
+			return
 		case event, ok3 := <-ch:
 			if !ok3 {
 				return
@@ -306,28 +310,51 @@ func (a *App) handleIDEInput(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		SessionID string `json:"session_id"`
+		Source    string `json:"source"`
 		Message   string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
 		return
 	}
-	if req.SessionID == "" || req.Message == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id and message are required"})
+	if req.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+	if req.SessionID == "" && req.Source == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id or source is required"})
 		return
 	}
 
-	// 查找订阅者
+	// 查找订阅者：优先按 session_id，其次按 source 名称
 	bridge := a.chatManager.GetSSEBridge()
-	info, ok := bridge.GetSubscriberByID(req.SessionID)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session_id 不存在或已断开"})
+	var ideName string
+	var found bool
+	if req.SessionID != "" {
+		info, ok := bridge.GetSubscriberByID(req.SessionID)
+		if ok {
+			ideName = info.Name
+			found = true
+		}
+	}
+	if !found && req.Source != "" {
+		// 按 source 名称查找第一个匹配的订阅者
+		for _, s := range bridge.GetSubscriberInfos() {
+			if s.Name == req.Source {
+				ideName = s.Name
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session_id 不存在或已断开，source 也未找到在线订阅者"})
 		return
 	}
 
 	// 注入 IDE 消息到 PM 上下文
-	input := fmt.Sprintf("[%s] %s", info.Name, req.Message)
-	fmt.Printf("[HTTPServer/SSE] IDEInput from %s (%s): %s\n", info.Name, req.SessionID, req.Message)
+	input := fmt.Sprintf("[%s] %s", ideName, req.Message)
+	fmt.Printf("[HTTPServer/SSE] IDEInput from %s (%s): %s\n", ideName, req.SessionID, req.Message)
 
 	if err := a.SendMessage(input); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "error": err.Error()})
@@ -559,10 +586,10 @@ func (a *App) handleWelcome(w http.ResponseWriter, r *http.Request) {
 		"version": "1.0.21",
 		"welcome": "欢迎接入 Argus IDE 协作平台",
 		"how_to_connect": map[string]string{
-			"step1_subscribe": "POST /api/v1/sse/subscribe  Body: {\"source\": \"你的IDE名字\"}",
-			"step2_send":      "POST /api/v1/sse/ide-input    Body: {\"session_id\": \"返回的ID\", \"message\": \"消息内容\"}",
-			"step3_ack":        "POST /api/v1/sse/ack         Body: {\"msg_id\": \"消息ID\"}",
-			"note":             "subscribe 返回 SSE 事件流（text/event-stream），保持长连接接收实时推送",
+			"step1_subscribe": "POST /api/v1/sse/subscribe  Body: {\"source\": \"your-IDE-name\"}",
+			"step2_send":      "POST /api/v1/sse/ide-input    Body: {\"session_id\": \"...\", \"message\": \"...\"}",
+			"step3_ack":       "POST /api/v1/sse/ack         Body: {\"msg_id\": \"...\"}",
+			"note":            "SSE is a long-lived connection. DO NOT set a request timeout. The server sends a heartbeat event every 10s — use it to detect liveness. If no heartbeat for 30s, assume disconnected and retry connection every 30s.",
 		},
 		"endpoints": map[string]string{
 			"sse_subscribe": "POST /api/v1/sse/subscribe   — 建立SSE长连接",
@@ -759,11 +786,11 @@ func (a *App) handleToolSearchFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":      true,
-		"pattern":      req.Pattern,
-		"count":        len(matches),
+		"success":       true,
+		"pattern":       req.Pattern,
+		"count":         len(matches),
 		"total_scanned": result.FilesSearched,
-		"matches":      matches,
+		"matches":       matches,
 	})
 }
 
@@ -778,8 +805,8 @@ func (a *App) handleToolShellStatus(w http.ResponseWriter, r *http.Request) {
 	ss, err := exe.GetShellSession()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"active":  false,
-			"error":   err.Error(),
+			"active": false,
+			"error":  err.Error(),
 		})
 		return
 	}
@@ -1014,10 +1041,15 @@ func (a *App) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":    func() string { if result.IsError { return "error" }; return "ok" }(),
-		"is_error":  result.IsError,
-		"content":   textContent,
-		"raw":       result.Content,
+		"status": func() string {
+			if result.IsError {
+				return "error"
+			}
+			return "ok"
+		}(),
+		"is_error": result.IsError,
+		"content":  textContent,
+		"raw":      result.Content,
 	})
 }
 

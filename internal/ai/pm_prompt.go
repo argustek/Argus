@@ -41,6 +41,7 @@ User message
   ├─ greeting/chat/thanks/小聊 → Just reply naturally with @USR. Do NOT call any tools.
   │   Examples: "你好", "hi", "早上好", "hello", "吃了没", "在吗", " thanks"
   │   These are NOT tasks. Just respond like a normal person.
+  │   NOTE: If message has [xxx] prefix (from external IDE), use ide_send instead of @USR.
   │
   ├─ unclear/ambiguous → use tools to investigate (list_files/grep/search),
   │     then @USR <question with options> if still unclear
@@ -68,23 +69,23 @@ User message
 === COMMUNICATION ===
 @SE <task> — assign work to Software Engineer
 @AP <result> — submit for final approval after verification
-@USR <message> — talk to the user (questions, status, results)
+@USR <message> — talk to the FRONTEND UI user only (questions, status, results). Never use @USR to reply to external IDE messages — use ide_send instead.
 One @ per message maximum.
 
-/* TODO 择机启用：多 IDE 协作
 === IDE COORDINATION (MANDATORY) ===
-Messages with [xxx] prefix come from external IDEs. You MUST use ide_send tool — do NOT use exec/write_file/read_file or any other tool.
+Messages with [xxx] prefix come from external IDEs. You MUST use ide_send tool to reply — do NOT use @USR, exec/write_file/read_file or any other tool to reply to IDE messages.
 1. ide_send(target="IDE名称"|"all", message="你的回复", action="discuss")
    - target 从「当前在线 IDE」列表中选择，或用 "all" 广播给所有在线IDE
+   - 如果目标 IDE 不在「当前在线 IDE」列表中，必须告知用户该 IDE 离线，不要尝试发送
+   - 收到 [xxx] 消息后，必须用 ide_send(target="xxx", ...) 回复，禁止用 @USR
 2. When the goal is met: action="terminate" to end discussion
 3. You may analyze and contribute your own perspective
 4. Before terminate, output the final conclusion
-*/
 
 === ANTI-LOOP ===
 - If SE completes a task, do not re-assign the same task to SE
 - If a tool errors twice on the same input, try a different approach, not a retry
-- If you can't make progress after 3 attempts, @USR <what happened + what you tried>
+- If you can't make progress after 3 attempts, report failure: use @USR for frontend user, or ide_send for the external IDE that made the request
 - When asked to write and run, always re-run exec to verify, even if the file already exists.
 `
 
@@ -111,9 +112,8 @@ type PMProcessor struct {
 	docProposer     func(analysis string) string  // propose_tree
 	docCreator      func(path, content string) string // create_doc
 
-	// TODO 择机启用：多 IDE 协作
-	// ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
-	// ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
+	ideMessageEmitter func(target, message, action string) bool // [v0.9.6] IDE消息推送，返回是否成功投递
+	ideList           string                                    // [v1.0.21] 当前在线 IDE 列表（动态注入到 system prompt）
 }
 
 // NewPMProcessor 创建PM处理器
@@ -176,19 +176,19 @@ func (p *PMProcessor) SetContext(ctx context.Context) {
 	p.ctx = ctx
 }
 
-// TODO 择机启用：多 IDE 协作
-// func (p *PMProcessor) SetIDEMessageEmitter(emitter func(target, message, action string) bool) {
-// 	p.ideMessageEmitter = emitter
-// }
+// [FIX-v1.0.23] 启用 IDE 消息推送回调
+func (p *PMProcessor) SetIDEMessageEmitter(emitter func(target, message, action string) bool) {
+	p.ideMessageEmitter = emitter
+}
 
-// TODO 择机启用：多 IDE 协作
-// func (p *PMProcessor) SetIDEList(ides []string) {
-// 	if len(ides) == 0 {
-// 		p.ideList = "（无在线 IDE）"
-// 	} else {
-// 		p.ideList = strings.Join(ides, ", ")
-// 	}
-// }
+// [FIX-v1.0.23] 动态设置当前在线 IDE 列表
+func (p *PMProcessor) SetIDEList(ides []string) {
+	if len(ides) == 0 {
+		p.ideList = "（无在线 IDE）"
+	} else {
+		p.ideList = strings.Join(ides, ", ")
+	}
+}
 
 // getCtx 获取上下文，nil 时返回 Background
 func (p *PMProcessor) getCtx() context.Context {
@@ -201,10 +201,10 @@ func (p *PMProcessor) getCtx() context.Context {
 // getSystemPrompt 获取完整的System Prompt（核心 + 执行规则 + 时间上下文 + IDE列表）
 func (p *PMProcessor) getSystemPrompt() string {
 	base := p.systemPrompt + "\n\n" + PMRules
-	// TODO 择机启用：多 IDE 协作
-	// if p.ideList != "" {
-	// 	base += fmt.Sprintf("\n\n=== 当前在线 IDE ===\n%s", p.ideList)
-	// }
+	// [FIX-v1.0.23] 注入在线 IDE 列表到 PM system prompt
+	if p.ideList != "" {
+		base += fmt.Sprintf("\n\n=== 当前在线 IDE ===\n%s", p.ideList)
+	}
 	if p.timeContext != "" {
 		return base + "\n\n" + p.timeContext
 	}
@@ -574,7 +574,7 @@ var PMTools = []Tool{
 			},
 		},
 	},
-	/* TODO 择机启用：多 IDE 协作
+	// [FIX-v1.0.23] 启用 ide_send 工具，支持 PM 与外部 IDE 对话
 	{
 		Type: "function",
 		Function: ToolFunction{
@@ -601,7 +601,6 @@ var PMTools = []Tool{
 			},
 		},
 	},
-	*/
 }
 
 // Process 处理用户输入
@@ -1415,7 +1414,7 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			return p.docCreator(args.Path, args.Content)
 		}
 		return "create_doc 未配置"
-	/* TODO 择机启用：多 IDE 协作
+	// [FIX-v1.0.23] 启用 ide_send 工具执行逻辑
 	case "ide_send":
 		var args struct {
 			Target  string `json:"target"`
@@ -1423,6 +1422,11 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 			Action  string `json:"action"`
 		}
 		json.Unmarshal([]byte(argsJSON), &args)
+		f, _ := os.OpenFile("logs/ide_send_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			f.WriteString(fmt.Sprintf("[%s] ide_send called: target=%q message=%q action=%q emitter=%v\n", time.Now().Format("15:04:05"), args.Target, args.Message, args.Action, p.ideMessageEmitter != nil))
+			f.Close()
+		}
 		if args.Target == "" {
 			return "错误: target 参数为空"
 		}
@@ -1430,11 +1434,15 @@ func (p *PMProcessor) executeTool(name, argsJSON string) string {
 		if p.ideMessageEmitter != nil {
 			delivered = p.ideMessageEmitter(args.Target, args.Message, args.Action)
 		}
+		f2, _ := os.OpenFile("logs/ide_send_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f2 != nil {
+			f2.WriteString(fmt.Sprintf("[%s] ide_send result: delivered=%v target=%q\n", time.Now().Format("15:04:05"), delivered, args.Target))
+			f2.Close()
+		}
 		if delivered {
 			return fmt.Sprintf("✅ 已向 %s 发送消息 (%s): %s", args.Target, args.Action, args.Message)
 		}
 		return fmt.Sprintf("⚠️ %s 未连接，消息未发送", args.Target)
-	*/
 	default:
 		return fmt.Sprintf("未知工具: %s", name)
 	}

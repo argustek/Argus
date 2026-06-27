@@ -476,10 +476,10 @@ func NewManager(config types.Config, workDir string, configDir string) (*Manager
 				seen[info.Name] = true
 			}
 		}
-		// TODO 择机启用：多 IDE 协作
-		// if manager.pmProcessor != nil {
-		// 	manager.pmProcessor.SetIDEList(ides)
-		// }
+		// [FIX-v1.0.23] 动态更新 PM 在线 IDE 列表
+		if manager.pmProcessor != nil {
+			manager.pmProcessor.SetIDEList(ides)
+		}
 		manager.msgBus.Send("system", "", "ide_status", PathIDEEvent, "setupIDEEmitter", map[string]interface{}{
 			"ides": ides,
 		})
@@ -7487,9 +7487,118 @@ func (m *Manager) SetupIDEMessageEmitterFor(pmProc *ai.PMProcessor) {
 	if pmProc == nil || m.sseBridge == nil {
 		return
 	}
-	// TODO 择机启用：多 IDE 协作
-	// pmProc.SetIDEMessageEmitter(func(target, message, action string) bool { ... })
-	fmt.Printf("[Manager] ⏸️ IDE消息推送回调已跳过（待择机启用）\n")
+	pmProc.SetIDEMessageEmitter(func(target, message, action string) bool {
+		infos := m.sseBridge.GetSubscriberInfos()
+		fmt.Printf("[IDE-EMITTER] target=%q infos=%d names=[", target, len(infos))
+		for i, info := range infos {
+			if i > 0 {
+				fmt.Print(",")
+			}
+			fmt.Printf("%s(%s)", info.Name, info.ID)
+		}
+		fmt.Println("]")
+
+		// [DEBUG] 文件日志
+		f, _ := os.OpenFile("logs/ide_send_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if f != nil {
+			f.WriteString(fmt.Sprintf("[EMITTER] target=%q infos=%d", target, len(infos)))
+			for _, info := range infos {
+				f.WriteString(fmt.Sprintf(" name=%q id=%q", info.Name, info.ID))
+			}
+			f.WriteString("\n")
+			f.Close()
+		}
+
+		hasTarget := false
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name != "" && info.Name != "debug" {
+					hasTarget = true
+					break
+				}
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					hasTarget = true
+					break
+				}
+			}
+		}
+		if !hasTarget {
+			return false
+		}
+
+		msgID := fmt.Sprintf("ide_msg_%d_%d", time.Now().UnixMilli(), len(idePendingAcks)+1)
+
+		// [FIX-v1.0.24] 解析消息来源：[xxx] 前缀表示转发，否则是 PM 自己说
+		fromSource := "PM"
+		msgContent := message
+		if strings.HasPrefix(message, "[") {
+			end := strings.Index(message, "]")
+			if end > 1 {
+				fromSource = message[1:end]
+				msgContent = strings.TrimSpace(message[end+1:])
+			}
+		}
+
+		// 记录待确认消息
+		ideAckMu.Lock()
+		idePendingAcks[msgID] = &IDEMessageAck{
+			MessageID: msgID,
+			Target:    target,
+			Action:    action,
+			Message:   message,
+			SentAt:    time.Now(),
+		}
+		ideAckMu.Unlock()
+
+		// 推送到目标 IDE
+		if target == "all" {
+			for _, info := range infos {
+				if info.Name != "" && info.Name != "debug" {
+					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+						Type: "ide_message",
+						Data: map[string]string{
+							"from":       fromSource,
+							"message":    msgContent,
+							"action":     action,
+							"message_id": msgID,
+						},
+					})
+				}
+			}
+		} else {
+			for _, info := range infos {
+				if info.Name == target {
+					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+						Type: "ide_message",
+						Data: map[string]string{
+							"from":       fromSource,
+							"message":    msgContent,
+							"action":     action,
+							"message_id": msgID,
+						},
+					})
+				}
+			}
+		}
+
+		// terminate → 发送 done 事件
+		if action == "terminate" {
+			for _, info := range infos {
+				if info.Name != "" && info.Name != "debug" {
+					m.sseBridge.PushToSubscriber(info.ID, SSEEvent{
+						Type: "done",
+						Data: map[string]string{"status": "completed"},
+					})
+				}
+			}
+		}
+
+		return true
+	})
+	fmt.Printf("[Manager] ✅ IDE消息推送回调已绑定\n")
 }
 
 /*
