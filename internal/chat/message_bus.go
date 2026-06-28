@@ -265,8 +265,10 @@ func (mb *MessageBus) shouldTrack(path MessagePath) bool {
 		return true
 
 	case PathStatus, PathIDEEvent:
-		// [v0.9.0] PathStatus 启用追踪：bounded queue（≤500）兜底，不再担心高频撑爆
-		return true
+		// [FIX-v1.0.24] PathStatus 不追踪 — role-status/project-level 是高频 fire-and-forget，
+		// 前端没有对应的 EventsOn 来 ACK（_msgId 传不过去），导致持续 message_lost 误报。
+		// 这些状态事件丢失一条无所谓，重要消息走 PathPMToUser/PathSEToUser 有 ACK 保障。
+		return false
 
 	case PathPMToUser, PathSEToUser, PathAPToUser:
 		return true
@@ -533,6 +535,12 @@ func (mb *MessageBus) backgroundChecker() {
 		if len(pending) > 0 && mb.ctx != nil {
 			for _, p := range pending {
 				if isNewLoss, ok := p["isNewLoss"].(bool); ok && isNewLoss {
+					eventName, _ := p["event"].(string)
+					msgId, _ := p["msgId"].(string)
+					fmt.Printf("[MessageBus-LOST] event=%s msgId=%s\n", eventName, msgId)
+					if mb.writeDebugLog != nil {
+						mb.writeDebugLog(fmt.Sprintf("[MessageBus-LOST] event=%s msgId=%s data=%v", eventName, msgId, p))
+					}
 					runtime.EventsEmit(mb.ctx, "message_lost", p)
 				}
 			}

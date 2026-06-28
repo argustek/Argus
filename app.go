@@ -1132,11 +1132,11 @@ func (a *App) Ready() {
 // [G63] MessageBus: 前端ACK确认收到消息
 func (a *App) AckMessage(msgId string) bool {
 	if a.chatManager == nil || a.chatManager.GetMessageBus() == nil {
-		fmt.Printf("[ACK-DEBUG] AckMessage FAIL: manager or bus nil | msgId=%s\n", msgId)
+		a.writeDebugLog(fmt.Sprintf("[ACK-DEBUG] AckMessage FAIL: manager or bus nil | msgId=%s", msgId))
 		return false
 	}
 	result := a.chatManager.GetMessageBus().Ack(msgId)
-	fmt.Printf("[ACK-DEBUG] AckMessage msgId=%s result=%v\n", msgId, result)
+	a.writeDebugLog(fmt.Sprintf("[ACK-DEBUG] AckMessage msgId=%s result=%v", msgId, result))
 	return result
 }
 

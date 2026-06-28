@@ -358,14 +358,8 @@ function recordReceive(role: string, messageId: string, content: string, source:
 function ackMessage(msgId: string) {
   if (!msgId) return
   try {
-    AckMessage(msgId).then((ok: boolean) => {
-      LogPrint('[ACK-DEBUG] ackMessage msgId=' + msgId + ' result=' + ok)
-    }).catch((e: any) => {
-      LogPrint('[ACK-DEBUG] ackMessage FAILED msgId=' + msgId + ' err=' + String(e))
-    })
-  } catch(e: any) {
-    LogPrint('[ACK-DEBUG] ackMessage THROW msgId=' + msgId + ' err=' + String(e))
-  }
+    AckMessage(msgId).catch(() => {})
+  } catch(e) { /* 静默失败 */ }
 }
 ;(window as any).__argusAck = ackMessage
 const pendingChanges = ref<Array<{type: string, file: string}>>([])
@@ -455,10 +449,7 @@ onMounted(async () => {
   EventsOff('token_stats')
   EventsOn('token_stats', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
   EventsOff('role-status')
-  EventsOn('role-status', (raw: any) => {
-    LogPrint('[ACK-DEBUG] role-status raw=' + JSON.stringify(raw))
-    if (raw?._msgId) ackMessage(raw._msgId)
-  })
+  EventsOn('role-status', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
   EventsOff('context_built')
   EventsOn('context_built', (raw: any) => { if (raw?._msgId) ackMessage(raw._msgId) })
   EventsOff('compress_done')
